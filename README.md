@@ -26,10 +26,12 @@ engineering questions that appear after a workflow becomes a service:
 - Go controller built with controller-runtime.
 - Indexed Kubernetes Job execution with per-pod dataset sharding.
 - Dataset readiness checks and Secret-based API key injection.
+- Required provider Secret/key readiness gating before worker creation.
 - Python worker with bounded asynchronous concurrency.
 - No-cost deterministic `fake` provider and optional OpenAI Agents SDK adapter.
 - JSONL case results plus success rate, error rate, token counters, and P95 latency summary.
 - Threshold-based process exit codes suitable for CI and Kubernetes Job status.
+- Hardened worker Pods without ServiceAccount tokens or writable root filesystems.
 
 ## Architecture
 
@@ -72,6 +74,12 @@ Run all tests:
 make test
 ```
 
+Run CRD validation and status-subresource tests against an isolated API server:
+
+```bash
+make test-envtest
+```
+
 Build the controller:
 
 ```bash
@@ -80,19 +88,30 @@ make build
 
 ## Kubernetes quickstart
 
-Prerequisites: `kubectl`, Docker, and an existing kind cluster with Indexed Jobs and CRD CEL
-validation enabled. Replace `kind` below if the cluster has a different name.
+Prerequisites: `kubectl`, Docker, and either OrbStack Kubernetes or `kind`.
+The command builds both images, deploys the controller, runs a fresh two-shard fake workload, checks
+garbage collection and cancellation, then leaves one successful demo run for inspection.
 
 ```bash
-make docker-build
-kind load docker-image agentstorm-controller:dev agentstorm-worker:dev --name kind
-kubectl apply -k config/default
-kubectl apply -f config/samples/agentstorm_v1alpha1_agenttestrun.yaml
-kubectl get agenttestruns -w
+# Active OrbStack context
+make e2e-local
+
+# Or create/reuse a local kind cluster named agentstorm
+CLUSTER_PROVIDER=kind make e2e-local
 ```
 
-This is a manual alpha workflow. A reproducible cluster bootstrap and published immutable images are
-part of M1 in the development plan.
+The script refuses arbitrary Kubernetes contexts. Set `KEEP_E2E_RESOURCES=false` for CI cleanup.
+For a single-namespace runtime with Role/RoleBinding and worker NetworkPolicies, use:
+
+```bash
+DEPLOYMENT_PROFILE=namespace make e2e-local
+```
+
+Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
+when switching modes. The CRD definition is installed cluster-wide, while `AgentTestRun` resources
+remain namespaced in both modes.
+
+Published immutable images remain an M1 release task; local E2E intentionally uses `:dev` images.
 
 ## `AgentTestRun` example
 

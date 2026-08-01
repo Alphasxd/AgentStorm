@@ -18,6 +18,8 @@ spec:
       serviceAccountName: agentstorm-controller
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: manager
           image: agentstorm-controller:dev
@@ -46,5 +48,6 @@ spec:
               memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]

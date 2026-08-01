@@ -7,6 +7,8 @@ AgentStorm contains a Go Kubernetes controller and a Python execution worker.
 - `make fmt`: format Go sources.
 - `make vet`: run Go static checks.
 - `make test`: run all Go and Python tests.
+- `make test-envtest`: verify the CRD contract against an isolated Kubernetes API server.
+- `make e2e-local`: run the no-cost local Kubernetes success, cleanup, Secret, and cancellation paths.
 - `make worker-local`: execute the no-cost fake-provider smoke workload.
 - `make docker-build`: build controller and worker images.
 

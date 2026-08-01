@@ -1,6 +1,7 @@
 namespace: agentstorm-system
 resources:
-  - namespace.yaml
+  - ../namespace
   - ../crd
   - ../rbac
   - ../manager
+  - ../network-policy/controller

@@ -20,19 +20,22 @@ Acceptance criteria:
 - Two indexed workers receive distinct dataset shards.
 - A failed threshold returns a non-zero worker exit code.
 
-## M1: Reproducible local cluster demo
+## M1: Reproducible local cluster demo — in progress
 
-- Add a kind-based bootstrap script and local image loading.
-- Add envtest coverage for CRD validation and status subresources.
-- Add controller tests for cancellation, Job success/failure, truncation, and missing Secrets.
-- Add namespace-scoped deployment mode and NetworkPolicies.
-- Publish a release image and immutable sample tags.
+- [x] Add a kind/OrbStack bootstrap script and local image loading.
+- [x] Add envtest coverage for CRD validation and status subresources.
+- [x] Add controller tests for cancellation, Job success/failure, collision-safe truncation, and missing Secrets.
+- [x] Add namespace-scoped deployment mode and NetworkPolicies.
+- [ ] Publish a release image and immutable sample tags.
 
 Acceptance criteria:
 
-- One command creates a cluster, deploys AgentStorm, runs the fake dataset, and reaches `Succeeded`.
-- Deleting a run garbage-collects its ConfigMap and Job.
-- Cancelling a running test reaches `Cancelled` without creating a replacement Job.
+- [x] One command creates or reuses a local cluster, deploys AgentStorm, runs the fake dataset, and reaches `Succeeded`.
+- [x] Deleting a run garbage-collects its ConfigMap and Job.
+- [x] Cancelling a running test reaches `Cancelled` without creating a replacement Job.
+
+The acceptance path is automated by `make e2e-local` and uses the no-cost fake provider. M1 remains
+open until immutable images are published and the sample manifests reference a release tag.
 
 ## M2: Durable result service and comparison
 
