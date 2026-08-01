@@ -7,6 +7,7 @@ import os
 
 from .adapters import create_adapter
 from .config import load_dataset, load_run_config
+from .results import ResultClient
 from .runner import WorkloadRunner, write_results
 
 
@@ -32,6 +33,9 @@ async def execute(args: argparse.Namespace) -> int:
 
     shard_index = int(os.getenv("AGENTSTORM_SHARD_INDEX", "0"))
     shard_count = int(os.getenv("AGENTSTORM_SHARD_COUNT", "1"))
+    result_client = ResultClient.from_environment()
+    if result_client is not None:
+        await asyncio.to_thread(result_client.register_run, config, shard_count)
     adapter = create_adapter(
         config.target.provider,
         model=config.target.model,
@@ -40,6 +44,14 @@ async def execute(args: argparse.Namespace) -> int:
     runner = WorkloadRunner(config, adapter, shard_index=shard_index, shard_count=shard_count)
     results, summary = await runner.execute(cases)
     write_results(args.output, results, summary)
+    if result_client is not None:
+        await asyncio.to_thread(
+            result_client.upload_shard,
+            config.run_id,
+            shard_index,
+            results,
+            summary,
+        )
     print(json.dumps(summary.to_dict(), ensure_ascii=False))
     return 0 if summary.thresholds_passed else 2
 

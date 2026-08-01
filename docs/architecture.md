@@ -7,8 +7,7 @@ AgentStorm separates orchestration from execution:
 - Kubernetes owns desired state, scheduling, pod placement, and garbage collection.
 - The controller owns run validation, child resources, cancellation, and lifecycle status.
 - Workers own provider calls, per-case evaluation, and result production.
-- The result service owns durable aggregation and run comparison; worker upload integration is the
-  next M2 step.
+- The result service owns durable aggregation and run comparison.
 
 This prevents model-specific SDK details from leaking into the Kubernetes controller and keeps
 worker adapters independently testable.
@@ -85,7 +84,7 @@ every expected shard receipt is finalized.
 | Worker pod failure | Job fails, no automatic replay | Explicit idempotent retry command |
 | Controller restart | Reconcile reconstructs state from API objects | Leader-election tests |
 | Run cancellation | Job deleted, run marked Cancelled | Grace period and partial result flush |
-| Result upload failure | Worker integration not implemented | Fail the Job, then add a durable outbox |
+| Result upload failure | Worker exits non-zero and the Job fails | Durable worker outbox |
 
 Expensive model calls make hidden retries dangerous. Future retries must use the idempotency key
 `run_id / case_id / iteration` and distinguish transport failures from completed model calls.
@@ -100,6 +99,8 @@ Expensive model calls make hidden retries dangerous. Future retries must use the
 - Worker Pods run as non-root, drop all capabilities, disable ServiceAccount token mounting, and use
   a read-only root filesystem with a dedicated EmptyDir for ephemeral results.
 - Raw trace content is opt-in because prompts and tool results may contain sensitive data.
+- Durable case uploads omit output and full error text unless the controller's explicit sensitive
+  result flag is enabled.
 - Arbitrary shell, browser, or MCP tools are out of scope until a sandbox policy is defined.
 - The default local profile uses cluster-wide RBAC. The `config/namespace-scoped` profile limits the
   controller cache and permissions to `agentstorm-system` with Role/RoleBinding resources.

@@ -3,7 +3,14 @@ from __future__ import annotations
 import unittest
 
 from agentstorm_worker.adapters.fake import FakeAdapter
-from agentstorm_worker.config import EvaluationConfig, RunConfig, TargetConfig, WorkloadConfig
+from agentstorm_worker.config import (
+    DatasetConfig,
+    EvaluationConfig,
+    RunConfig,
+    SourceConfig,
+    TargetConfig,
+    WorkloadConfig,
+)
 from agentstorm_worker.models import TestCase
 from agentstorm_worker.runner import WorkloadRunner
 
@@ -12,6 +19,8 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
     async def test_executes_only_assigned_shard_and_evaluates_thresholds(self) -> None:
         config = RunConfig(
             run_id="demo",
+            source=SourceConfig(namespace="default", name="demo"),
+            dataset=DatasetConfig(name="demo-dataset", key="cases.jsonl"),
             target=TargetConfig(provider="fake"),
             workload=WorkloadConfig(concurrency=2, iterations=2, timeout_seconds=1),
             evaluation=EvaluationConfig(min_success_rate=1.0, max_error_rate=0.0),
@@ -27,6 +36,7 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([result.case_id for result in results], ["b", "b"])
         self.assertEqual(summary.total, 2)
+        self.assertGreaterEqual(summary.duration_ms, 0)
         self.assertTrue(summary.thresholds_passed)
 
 

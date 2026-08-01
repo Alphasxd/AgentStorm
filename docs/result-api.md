@@ -48,8 +48,14 @@ The service reads configuration from environment variables:
 Database migrations are embedded in the binary and applied under a PostgreSQL advisory lock before
 the service starts accepting traffic.
 
+The controller enables worker uploads with `--result-api-url`. It reads no Result API token itself;
+instead it verifies the per-run-namespace Secret named by `--result-write-token-secret-name` and
+injects only the selected key into the worker container. `--include-sensitive-results` is disabled
+by default, and `--result-upload-timeout` defaults to 30 seconds.
+
 ## Sensitive content
 
-Case output and full error text are optional fields. Worker integration must omit them by default and
-add an explicit sensitive-result switch for controlled environments. Secrets, provider API keys, and
-bearer tokens must never be included in request bodies, raw objects, logs, or test fixtures.
+Case output and full error text are optional fields. Workers omit them by default and include them
+only when the controller's sensitive-result switch is enabled for a controlled environment. Secrets,
+provider API keys, and bearer tokens must never be included in request bodies, raw objects, logs, or
+test fixtures.

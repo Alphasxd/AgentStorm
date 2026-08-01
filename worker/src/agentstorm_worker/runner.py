@@ -27,6 +27,7 @@ class WorkloadRunner:
         self._shard_count = shard_count
 
     async def execute(self, cases: list[TestCase]) -> tuple[list[CaseResult], RunSummary]:
+        started = time.perf_counter()
         selected = [
             case
             for index, case in enumerate(cases)
@@ -50,6 +51,7 @@ class WorkloadRunner:
             self._shard_count,
             results,
             self._config.evaluation,
+            duration_ms=(time.perf_counter() - started) * 1000,
         )
 
     async def _execute_case(self, case: TestCase, iteration: int) -> CaseResult:
@@ -65,6 +67,7 @@ class WorkloadRunner:
                 iteration=iteration,
                 success=success,
                 latency_ms=(time.perf_counter() - started) * 1000,
+                failure_kind="" if success else "assertion",
                 output=response.output,
                 error=error,
                 input_tokens=response.input_tokens,
@@ -76,6 +79,7 @@ class WorkloadRunner:
                 iteration=iteration,
                 success=False,
                 latency_ms=(time.perf_counter() - started) * 1000,
+                failure_kind="provider",
                 error=f"{type(exc).__name__}: {exc}",
             )
 
@@ -86,6 +90,7 @@ def summarize(
     shard_count: int,
     results: list[CaseResult],
     evaluation: EvaluationConfig,
+    duration_ms: float = 0.0,
 ) -> RunSummary:
     total = len(results)
     succeeded = sum(1 for result in results if result.success)
@@ -107,6 +112,7 @@ def summarize(
         run_id=run_id,
         shard_index=shard_index,
         shard_count=shard_count,
+        duration_ms=duration_ms,
         total=total,
         succeeded=succeeded,
         failed=failed,
