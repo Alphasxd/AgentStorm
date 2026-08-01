@@ -31,6 +31,10 @@ jobs:
             image: ghcr.io/alphasxd/agentstorm-worker
             context: worker
             file: worker/Dockerfile
+          - component: result-api
+            image: ghcr.io/alphasxd/agentstorm-result-api
+            context: .
+            file: Dockerfile.result-api
     steps:
       - uses: actions/checkout@v7
         with:

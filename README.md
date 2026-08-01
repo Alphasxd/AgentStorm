@@ -5,9 +5,10 @@ Agent workloads. It turns an `AgentTestRun` custom resource into indexed Kuberne
 runs a JSONL scenario set with bounded concurrency, and evaluates deterministic quality and
 latency thresholds.
 
-> Status: early alpha. Public multi-architecture images, the local worker, and the first controller
-> reconciliation path are implemented. Central result ingestion, OpenTelemetry export, fault
-> injection, and autoscaling are planned milestones rather than finished features.
+> Status: early alpha. Public multi-architecture controller and worker images are available. The
+> authenticated Result API and PostgreSQL/object-storage path run from source in the development
+> overlay; its public image release is still pending. OpenTelemetry export, fault injection, and
+> autoscaling remain planned milestones.
 
 ## Why this project
 
@@ -32,6 +33,8 @@ engineering questions that appear after a workflow becomes a service:
 - JSONL case results plus success rate, error rate, token counters, and P95 latency summary.
 - Threshold-based process exit codes suitable for CI and Kubernetes Job status.
 - Hardened worker Pods without ServiceAccount tokens or writable root filesystems.
+- Authenticated, idempotent result ingestion with PostgreSQL metadata, compressed S3 raw shards,
+  paginated case queries, and baseline comparisons in the development stack.
 
 ## Architecture
 
@@ -47,7 +50,10 @@ flowchart LR
     Job --> W2["Worker shard N"]
     W1 --> Result["JSONL results + summary"]
     W2 --> Result
-    Result -. planned .-> Telemetry["OTel / Prometheus / result API"]
+    Result --> ResultAPI["Authenticated Result API"]
+    ResultAPI --> PostgreSQL["PostgreSQL metadata"]
+    ResultAPI --> ObjectStore["Compressed S3 shards"]
+    ResultAPI -. planned .-> Telemetry["OTel / Prometheus"]
 ```
 
 The controller never serializes API keys into generated ConfigMaps. Provider credentials are
@@ -140,6 +146,17 @@ For a single-namespace runtime with Role/RoleBinding and worker NetworkPolicies,
 ```bash
 DEPLOYMENT_PROFILE=namespace make e2e-local
 ```
+
+Run the full source-built M2 development stack, including PostgreSQL, MinIO, Result API Secret
+gating, two durable runs, case reads, and a baseline comparison:
+
+```bash
+CLUSTER_PROVIDER=kind make e2e-results-local
+```
+
+The result overlay lives under `config/dev/results`, uses test-only Secrets created by the E2E
+script, and is not the released public manifest. See [Result API](docs/result-api.md) for its HTTP and
+storage contract.
 
 Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
 when switching modes. The CRD definition is installed cluster-wide, while `AgentTestRun` resources

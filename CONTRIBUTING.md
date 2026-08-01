@@ -27,6 +27,19 @@ The Result API uses PostgreSQL for run metadata and MinIO-compatible S3 storage 
 payloads. Its integration tests are opt-in and require `AGENTSTORM_TEST_DATABASE_URL` plus the
 `AGENTSTORM_TEST_S3_*` variables before running `make test-results-integration`.
 
+Run the complete development result stack on kind or OrbStack with:
+
+```bash
+CLUSTER_PROVIDER=kind make e2e-results-local
+```
+
+This command first runs the ordinary namespace-scoped controller E2E, then builds and loads the
+current Result API, deploys the development-only PostgreSQL/MinIO overlay, checks Result API Secret
+gating, runs two concurrent two-shard workloads, and verifies durable run, case, and comparison
+queries. Its `agentstorm-result-storage` and `agentstorm-result-auth` Secrets contain test-only
+values, are labeled `app.kubernetes.io/managed-by=agentstorm-e2e`, and never replace Secrets without
+that label. Set `KEEP_E2E_RESOURCES=false` to delete the result stack and its PVCs after the check.
+
 Changes to the CRD must update all of the following in one pull request:
 
 - `api/v1alpha1` Go types

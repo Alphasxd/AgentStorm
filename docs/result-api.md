@@ -53,6 +53,40 @@ instead it verifies the per-run-namespace Secret named by `--result-write-token-
 injects only the selected key into the worker container. `--include-sensitive-results` is disabled
 by default, and `--result-upload-timeout` defaults to 30 seconds.
 
+## Local Kubernetes stack
+
+`config/dev/results` is a development-only namespace-scoped overlay. It runs PostgreSQL and MinIO
+with persistent volumes, starts the Result API from `agentstorm-result-api:dev`, and configures the
+controller to send workers to the in-cluster service. The overlay deliberately does not contain
+credentials; create `agentstorm-result-storage` and `agentstorm-result-auth` Secrets before applying
+it. For compatibility across local kind and OrbStack network implementations, this development-only
+overlay disables the namespace profile's worker NetworkPolicy selector; the Result API and storage
+Services remain cluster-internal and API traffic still requires separate read/write bearer tokens.
+Production deployments should supply CNI-specific egress rules. The reusable test path creates
+disposable credentials, resets only resources bearing its test-management label, and verifies the
+full data path:
+
+```bash
+CLUSTER_PROVIDER=kind make e2e-results-local
+```
+
+To inspect retained results, forward the read endpoint and use the test-only read token created by
+the E2E script:
+
+```bash
+kubectl -n agentstorm-system port-forward service/agentstorm-result-api 18080:8080
+RUN_ID=$(kubectl -n agentstorm-system get agenttestrun agentstorm-results-baseline \
+  -o jsonpath='{.metadata.uid}')
+READ_TOKEN=$(kubectl -n agentstorm-system get secret agentstorm-result-auth \
+  -o jsonpath='{.data.read-token}' | \
+  python3 -c 'import base64, sys; print(base64.b64decode(sys.stdin.read()).decode())')
+curl -H "Authorization: Bearer $READ_TOKEN" \
+  "http://127.0.0.1:18080/v1/runs/$RUN_ID"
+```
+
+The `:dev` image is intentionally limited to this local overlay. Public Kubernetes manifests will
+use an immutable multi-architecture Result API digest after the next alpha image release.
+
 ## Sensitive content
 
 Case output and full error text are optional fields. Workers omit them by default and include them
