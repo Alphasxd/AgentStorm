@@ -26,6 +26,7 @@ class CaseResult:
     iteration: int
     success: bool
     latency_ms: float
+    failure_kind: str = ""
     output: str = ""
     error: str | None = None
     input_tokens: int | None = None
@@ -40,6 +41,7 @@ class RunSummary:
     run_id: str
     shard_index: int
     shard_count: int
+    duration_ms: float
     total: int
     succeeded: int
     failed: int

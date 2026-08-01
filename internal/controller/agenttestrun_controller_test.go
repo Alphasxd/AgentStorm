@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,123 @@ func TestReconcileWaitsForRequiredSecret(t *testing.T) {
 	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionCredentials)
 	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunPending || condition == nil || condition.Reason != "SecretMissing" {
 		t.Fatalf("status = %#v, want Pending with SecretMissing condition", updated.Status)
+	}
+}
+
+func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentstorm-result-auth", Namespace: "default"},
+		Data:       map[string][]byte{"write-token": []byte("result-test-only-value")},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset, secret).Build()
+	resultSink := ResultSinkConfig{
+		URL:                  "http://agentstorm-result-api:8080/",
+		WriteTokenSecretName: "agentstorm-result-auth",
+		WriteTokenSecretKey:  "write-token",
+		TimeoutSeconds:       30,
+	}
+	if err := resultSink.ValidateAndDefault(); err != nil {
+		t.Fatalf("validate result sink: %v", err)
+	}
+	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme, ResultSink: resultSink}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	job := &batchv1.Job{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, job); err != nil {
+		t.Fatalf("get Job: %v", err)
+	}
+	env := job.Spec.Template.Spec.Containers[0].Env
+	assertEnv(t, env, "AGENTSTORM_RESULT_API_URL", "http://agentstorm-result-api:8080")
+	assertEnv(t, env, "AGENTSTORM_INCLUDE_SENSITIVE_RESULTS", "false")
+	assertEnv(t, env, "AGENTSTORM_RESULT_TIMEOUT_SECONDS", "30")
+	assertSecretEnv(t, env, "AGENTSTORM_RESULT_WRITE_TOKEN", "agentstorm-result-auth", "write-token")
+
+	configMap := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-config"}, configMap); err != nil {
+		t.Fatalf("get worker config: %v", err)
+	}
+	workerConfig := map[string]any{}
+	if err := json.Unmarshal([]byte(configMap.Data[workerConfigKey]), &workerConfig); err != nil {
+		t.Fatalf("decode worker config: %v", err)
+	}
+	source := workerConfig["source"].(map[string]any)
+	datasetConfig := workerConfig["dataset"].(map[string]any)
+	if source["namespace"] != "default" || source["name"] != "demo" ||
+		datasetConfig["name"] != "demo-dataset" || datasetConfig["key"] != "cases.jsonl" {
+		t.Fatalf("unexpected source/dataset config: %#v", workerConfig)
+	}
+	for _, forbidden := range []string{"result-test-only-value", "agentstorm-result-auth", "write-token"} {
+		if strings.Contains(configMap.Data[workerConfigKey], forbidden) {
+			t.Fatalf("generated worker ConfigMap contains result Secret material %q", forbidden)
+		}
+	}
+}
+
+func TestReconcileWaitsForResultSinkSecret(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+	resultSink := ResultSinkConfig{
+		URL:                  "http://agentstorm-result-api:8080",
+		WriteTokenSecretName: "agentstorm-result-auth",
+		WriteTokenSecretKey:  "write-token",
+		TimeoutSeconds:       30,
+	}
+	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme, ResultSink: resultSink}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("expected a requeue while the result sink Secret is missing")
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+		t.Fatal("worker Job should not exist before the result sink Secret is available")
+	}
+	updated := &agentstormv1alpha1.AgentTestRun{}
+	if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionResultSink)
+	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunPending || condition == nil || condition.Reason != "SecretMissing" {
+		t.Fatalf("status = %#v, want Pending with result sink SecretMissing", updated.Status)
+	}
+}
+
+func TestResultSinkConfigValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  ResultSinkConfig
+		wantErr bool
+	}{
+		{name: "disabled", config: ResultSinkConfig{}},
+		{name: "valid", config: ResultSinkConfig{URL: "https://results.example", WriteTokenSecretName: "result-auth", WriteTokenSecretKey: "write_token", TimeoutSeconds: 30}},
+		{name: "credentials in URL", config: ResultSinkConfig{URL: "https://user:password@results.example", WriteTokenSecretName: "result-auth", WriteTokenSecretKey: "write-token"}, wantErr: true},
+		{name: "invalid Secret name", config: ResultSinkConfig{URL: "https://results.example", WriteTokenSecretName: "INVALID", WriteTokenSecretKey: "write-token"}, wantErr: true},
+		{name: "sensitive without sink", config: ResultSinkConfig{IncludeSensitive: true}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.config.ValidateAndDefault()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ValidateAndDefault() error = %v, wantErr=%v", err, test.wantErr)
+			}
+		})
 	}
 }
 

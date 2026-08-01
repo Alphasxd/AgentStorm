@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,14 +31,58 @@ const (
 	conditionReady       = "Ready"
 	conditionDataset     = "DatasetReady"
 	conditionCredentials = "CredentialsReady"
+	conditionResultSink  = "ResultSinkReady"
 	workerConfigKey      = "run.json"
 )
+
+type ResultSinkConfig struct {
+	URL                  string
+	WriteTokenSecretName string
+	WriteTokenSecretKey  string
+	IncludeSensitive     bool
+	TimeoutSeconds       int
+}
+
+func (c *ResultSinkConfig) ValidateAndDefault() error {
+	c.URL = strings.TrimRight(strings.TrimSpace(c.URL), "/")
+	if c.URL == "" {
+		if c.IncludeSensitive {
+			return fmt.Errorf("include-sensitive-results requires result-api-url")
+		}
+		return nil
+	}
+	parsed, err := url.Parse(c.URL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("result-api-url must be an HTTP(S) URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("result-api-url must not contain credentials, query, or fragment")
+	}
+	if c.WriteTokenSecretName == "" || len(utilvalidation.IsDNS1123Subdomain(c.WriteTokenSecretName)) > 0 {
+		return fmt.Errorf("result-write-token-secret-name must be a valid Secret name")
+	}
+	if c.WriteTokenSecretKey == "" || len(utilvalidation.IsConfigMapKey(c.WriteTokenSecretKey)) > 0 {
+		return fmt.Errorf("result-write-token-secret-key must be a valid Secret data key")
+	}
+	if c.TimeoutSeconds == 0 {
+		c.TimeoutSeconds = 30
+	}
+	if c.TimeoutSeconds < 1 || c.TimeoutSeconds > 300 {
+		return fmt.Errorf("result-upload-timeout must be between 1 and 300 seconds")
+	}
+	return nil
+}
+
+func (c ResultSinkConfig) Enabled() bool {
+	return c.URL != ""
+}
 
 // AgentTestRunReconciler turns an AgentTestRun into an indexed Kubernetes Job.
 type AgentTestRunReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Scheme    *runtime.Scheme
+	APIReader  client.Reader
+	Scheme     *runtime.Scheme
+	ResultSink ResultSinkConfig
 }
 
 // +kubebuilder:rbac:groups=agentstorm.io,resources=agenttestruns,verbs=get;list;watch;create;update;patch;delete
@@ -117,6 +163,27 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Message: message, ObservedGeneration: run.Generation,
 		})
 	}
+	resultSinkReady, reason, message, err := r.resultSinkReady(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !resultSinkReady {
+		run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionResultSink, Status: metav1.ConditionFalse, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+		if err := r.patchStatus(ctx, before, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if r.ResultSink.Enabled() {
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionResultSink, Status: metav1.ConditionTrue, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+	}
 	if err := r.ensureWorkerConfig(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -141,6 +208,33 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	logger.Info("AgentTestRun reached terminal phase", "phase", run.Status.Phase, "job", job.Name)
 	return ctrl.Result{}, nil
+}
+
+func (r *AgentTestRunReconciler) resultSinkReady(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) (bool, string, string, error) {
+	if !r.ResultSink.Enabled() {
+		return true, "NotConfigured", "durable result sink is not configured", nil
+	}
+	secret := &corev1.Secret{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := reader.Get(ctx, types.NamespacedName{
+		Namespace: run.Namespace,
+		Name:      r.ResultSink.WriteTokenSecretName,
+	}, secret)
+	if apierrors.IsNotFound(err) {
+		return false, "SecretMissing", "result sink write-token Secret is not available", nil
+	}
+	if err != nil {
+		return false, "", "", err
+	}
+	if _, exists := secret.Data[r.ResultSink.WriteTokenSecretKey]; !exists {
+		if _, exists = secret.StringData[r.ResultSink.WriteTokenSecretKey]; !exists {
+			return false, "KeyMissing", "result sink write-token Secret key is not available", nil
+		}
+	}
+	return true, "Available", "result sink write-token Secret is available", nil
 }
 
 func (r *AgentTestRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -242,9 +336,21 @@ func (r *AgentTestRunReconciler) credentialsReady(ctx context.Context, run *agen
 
 type workerRunConfig struct {
 	RunID      string                                 `json:"run_id"`
+	Source     workerRunSourceConfig                  `json:"source"`
+	Dataset    workerDatasetConfig                    `json:"dataset"`
 	Target     agentstormv1alpha1.AgentTargetSpec     `json:"target"`
 	Workload   workerWorkloadConfig                   `json:"workload"`
 	Evaluation agentstormv1alpha1.AgentEvaluationSpec `json:"evaluation,omitempty"`
+}
+
+type workerRunSourceConfig struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type workerDatasetConfig struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 type workerWorkloadConfig struct {
@@ -256,6 +362,11 @@ type workerWorkloadConfig struct {
 func (r *AgentTestRunReconciler) ensureWorkerConfig(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) error {
 	config := workerRunConfig{
 		RunID:  string(run.UID),
+		Source: workerRunSourceConfig{Namespace: run.Namespace, Name: run.Name},
+		Dataset: workerDatasetConfig{
+			Name: run.Spec.Workload.DatasetRef.Name,
+			Key:  run.Spec.Workload.DatasetRef.Key,
+		},
 		Target: run.Spec.Target,
 		Workload: workerWorkloadConfig{
 			Concurrency:    run.Spec.Workload.ConcurrencyPerWorker,
@@ -304,7 +415,7 @@ func (r *AgentTestRunReconciler) ensureJob(ctx context.Context, run *agentstormv
 		return nil, false, err
 	}
 
-	job = buildJob(run)
+	job = buildJob(run, r.ResultSink)
 	if err := controllerutil.SetControllerReference(run, job, r.Scheme); err != nil {
 		return nil, false, err
 	}
@@ -314,7 +425,7 @@ func (r *AgentTestRunReconciler) ensureJob(ctx context.Context, run *agentstormv
 	return job, true, nil
 }
 
-func buildJob(run *agentstormv1alpha1.AgentTestRun) *batchv1.Job {
+func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig) *batchv1.Job {
 	parallelism := run.Spec.Workload.Parallelism
 	backoffLimit := int32(0)
 	completionMode := batchv1.IndexedCompletion
@@ -344,6 +455,20 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun) *batchv1.Job {
 			Name:      "OPENAI_API_KEY",
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: ref.DeepCopy()},
 		})
+	}
+	if resultSink.Enabled() {
+		env = append(env,
+			corev1.EnvVar{Name: "AGENTSTORM_RESULT_API_URL", Value: resultSink.URL},
+			corev1.EnvVar{
+				Name: "AGENTSTORM_RESULT_WRITE_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: resultSink.WriteTokenSecretName},
+					Key:                  resultSink.WriteTokenSecretKey,
+				}},
+			},
+			corev1.EnvVar{Name: "AGENTSTORM_INCLUDE_SENSITIVE_RESULTS", Value: strconv.FormatBool(resultSink.IncludeSensitive)},
+			corev1.EnvVar{Name: "AGENTSTORM_RESULT_TIMEOUT_SECONDS", Value: strconv.Itoa(resultSink.TimeoutSeconds)},
+		)
 	}
 
 	return &batchv1.Job{

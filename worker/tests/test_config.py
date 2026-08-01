@@ -18,6 +18,8 @@ class ConfigTest(unittest.TestCase):
                 json.dumps(
                     {
                         "run_id": "demo",
+                        "source": {"namespace": "default", "name": "demo"},
+                        "dataset": {"name": "demo-dataset", "key": "cases.jsonl"},
                         "target": {"provider": "fake"},
                         "workload": {"concurrency": 2, "iterations": 3, "timeout_seconds": 10},
                         "evaluation": {"minSuccessRate": 1.0},
@@ -34,8 +36,21 @@ class ConfigTest(unittest.TestCase):
             cases = load_dataset(dataset_path)
 
             self.assertEqual(config.workload.iterations, 3)
+            self.assertEqual(config.source.namespace, "default")
+            self.assertEqual(config.dataset.name, "demo-dataset")
             self.assertEqual(config.evaluation.min_success_rate, 1.0)
             self.assertEqual(cases[0].case_id, "case-1")
+
+    def test_rejects_duplicate_case_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "cases.jsonl"
+            dataset_path.write_text(
+                '{"id":"duplicate","input":"first"}\n'
+                '{"id":"duplicate","input":"second"}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate dataset case id"):
+                load_dataset(dataset_path)
 
 
 if __name__ == "__main__":

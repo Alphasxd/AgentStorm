@@ -5,7 +5,7 @@ WORKER_IMAGE ?= agentstorm-worker:dev
 RESULT_API_IMAGE ?= agentstorm-result-api:dev
 ENVTEST_K8S_VERSION ?= v1.33.0
 
-.PHONY: fmt vet test test-envtest test-results-integration build build-result-api worker-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local
+.PHONY: fmt vet test test-envtest test-results-integration test-result-pipeline build build-result-api worker-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local
 
 fmt:
 	gofmt -w $$(find api cmd internal -name '*.go')
@@ -22,6 +22,9 @@ test-envtest:
 
 test-results-integration:
 	go test -tags=integration ./internal/results -count=1
+
+test-result-pipeline:
+	./hack/test-result-pipeline.sh
 
 build:
 	mkdir -p bin

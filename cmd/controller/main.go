@@ -2,7 +2,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"time"
 
 	agentstormv1alpha1 "github.com/Alphasxd/AgentStorm/api/v1alpha1"
 	agentcontroller "github.com/Alphasxd/AgentStorm/internal/controller"
@@ -28,14 +30,39 @@ func main() {
 	var probeAddr string
 	var leaderElection bool
 	var watchNamespace string
+	var resultAPIURL string
+	var resultWriteTokenSecretName string
+	var resultWriteTokenSecretKey string
+	var includeSensitiveResults bool
+	var resultUploadTimeout time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for the metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address for health probes")
 	flag.BoolVar(&leaderElection, "leader-elect", false, "enable leader election")
 	flag.StringVar(&watchNamespace, "watch-namespace", os.Getenv("WATCH_NAMESPACE"), "namespace to watch; empty watches all namespaces")
+	flag.StringVar(&resultAPIURL, "result-api-url", "", "base URL for durable result ingestion; empty disables uploads")
+	flag.StringVar(&resultWriteTokenSecretName, "result-write-token-secret-name", "agentstorm-result-auth", "per-run-namespace Secret containing the Result API write token")
+	flag.StringVar(&resultWriteTokenSecretKey, "result-write-token-secret-key", "write-token", "Secret data key containing the Result API write token")
+	flag.BoolVar(&includeSensitiveResults, "include-sensitive-results", false, "upload case output and full error text")
+	flag.DurationVar(&resultUploadTimeout, "result-upload-timeout", 30*time.Second, "timeout for each Result API request")
 	zapOptions := zap.Options{Development: true}
 	zapOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOptions)))
+	if resultUploadTimeout < time.Second || resultUploadTimeout > 300*time.Second || resultUploadTimeout%time.Second != 0 {
+		ctrl.Log.Error(fmt.Errorf("result-upload-timeout must be 1-300 whole seconds"), "invalid result sink configuration")
+		os.Exit(1)
+	}
+	resultSink := agentcontroller.ResultSinkConfig{
+		URL:                  resultAPIURL,
+		WriteTokenSecretName: resultWriteTokenSecretName,
+		WriteTokenSecretKey:  resultWriteTokenSecretKey,
+		IncludeSensitive:     includeSensitiveResults,
+		TimeoutSeconds:       int(resultUploadTimeout.Seconds()),
+	}
+	if err := resultSink.ValidateAndDefault(); err != nil {
+		ctrl.Log.Error(err, "invalid result sink configuration")
+		os.Exit(1)
+	}
 
 	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
@@ -56,9 +83,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&agentcontroller.AgentTestRunReconciler{
-		Client:    manager.GetClient(),
-		APIReader: manager.GetAPIReader(),
-		Scheme:    manager.GetScheme(),
+		Client:     manager.GetClient(),
+		APIReader:  manager.GetAPIReader(),
+		Scheme:     manager.GetScheme(),
+		ResultSink: resultSink,
 	}).SetupWithManager(manager); err != nil {
 		ctrl.Log.Error(err, "unable to create controller")
 		os.Exit(1)
