@@ -1,0 +1,3 @@
+{"id":"echo-1","input":"hello AgentStorm","expected_contains":"hello AgentStorm","metadata":{"category":"smoke"}}
+{"id":"echo-2","input":"test tool-call reliability","expected_contains":"tool-call reliability","metadata":{"category":"smoke"}}
+{"id":"echo-3","input":"measure agent latency","expected_contains":"agent latency","metadata":{"category":"smoke"}}

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-demo-dataset
+data:
+  cases.jsonl: |
+    {"id":"greeting-1","input":"hello","expected_contains":"hello"}
+    {"id":"greeting-2","input":"agent reliability","expected_contains":"agent reliability"}
+---
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-demo
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-demo-dataset
+      key: cases.jsonl
+    parallelism: 2
+    concurrencyPerWorker: 4
+    iterations: 1
+    timeoutSeconds: 300
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+    maxP95LatencyMs: 1000
+  runner:
+    image: agentstorm-worker:dev
+    imagePullPolicy: IfNotPresent

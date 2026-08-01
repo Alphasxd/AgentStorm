@@ -1,0 +1,17 @@
+{
+  "run_id": "local-demo",
+  "target": {
+    "provider": "fake",
+    "model": ""
+  },
+  "workload": {
+    "concurrency": 4,
+    "iterations": 2,
+    "timeout_seconds": 30
+  },
+  "evaluation": {
+    "minSuccessRate": 1.0,
+    "maxErrorRate": 0.0,
+    "maxP95LatencyMs": 1000
+  }
+}

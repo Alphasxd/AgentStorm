@@ -1,0 +1,201 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agenttestruns.agentstorm.io
+spec:
+  group: agentstorm.io
+  names:
+    kind: AgentTestRun
+    listKind: AgentTestRunList
+    plural: agenttestruns
+    singular: agenttestrun
+    shortNames:
+      - atr
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Active
+          type: integer
+          jsonPath: .status.active
+        - name: Succeeded
+          type: integer
+          jsonPath: .status.succeeded
+        - name: Failed
+          type: integer
+          jsonPath: .status.failed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: AgentTestRun describes a distributed AI Agent evaluation run.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - target
+                - workload
+                - evaluation
+                - runner
+              properties:
+                target:
+                  type: object
+                  required:
+                    - provider
+                  properties:
+                    provider:
+                      type: string
+                      enum: [fake, openai-agents]
+                    model:
+                      type: string
+                    baseURL:
+                      type: string
+                    apiKeySecretRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                        optional:
+                          type: boolean
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: target is immutable; create a new AgentTestRun
+                workload:
+                  type: object
+                  required:
+                    - datasetRef
+                  properties:
+                    datasetRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                        optional:
+                          type: boolean
+                    parallelism:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 1
+                    concurrencyPerWorker:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 1
+                    iterations:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 1
+                    timeoutSeconds:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                      default: 900
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: workload is immutable; create a new AgentTestRun
+                evaluation:
+                  type: object
+                  default: {}
+                  properties:
+                    minSuccessRate:
+                      type: number
+                      format: double
+                      minimum: 0
+                      maximum: 1
+                    maxErrorRate:
+                      type: number
+                      format: double
+                      minimum: 0
+                      maximum: 1
+                    maxP95LatencyMs:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: evaluation is immutable; create a new AgentTestRun
+                runner:
+                  type: object
+                  required: [image]
+                  properties:
+                    image:
+                      type: string
+                    imagePullPolicy:
+                      type: string
+                      enum: [Always, IfNotPresent, Never]
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: runner is immutable; create a new AgentTestRun
+                cancel:
+                  type: boolean
+                  default: false
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Running, Succeeded, Failed, Cancelled]
+                jobName:
+                  type: string
+                active:
+                  type: integer
+                  format: int32
+                succeeded:
+                  type: integer
+                  format: int32
+                failed:
+                  type: integer
+                  format: int32
+                observedGeneration:
+                  type: integer
+                  format: int64
+                startedAt:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      reason:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      type:
+                        type: string

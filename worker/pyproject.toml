@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentstorm-worker"
+version = "0.1.0"
+description = "Execution worker for distributed AI Agent evaluations"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = "MIT"
+authors = [{name = "Sheldon Shi"}]
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai-agents>=0.17.4,<0.18"]
+dev = ["ruff>=0.9,<1"]
+
+[project.scripts]
+agentstorm-worker = "agentstorm_worker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

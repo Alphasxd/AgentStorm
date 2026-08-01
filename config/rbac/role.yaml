@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentstorm-controller
+rules:
+  - apiGroups: [agentstorm.io]
+    resources: [agenttestruns]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [agentstorm.io]
+    resources: [agenttestruns/status]
+    verbs: [get, update, patch]
+  - apiGroups: [agentstorm.io]
+    resources: [agenttestruns/finalizers]
+    verbs: [update]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs/status]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
