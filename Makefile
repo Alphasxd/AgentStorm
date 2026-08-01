@@ -54,4 +54,4 @@ undeploy-namespace:
 	kubectl delete -k config/namespace-scoped
 
 e2e-local:
-	./hack/e2e-local.sh
+	CONTROLLER_IMAGE=$(CONTROLLER_IMAGE) WORKER_IMAGE=$(WORKER_IMAGE) ./hack/e2e-local.sh

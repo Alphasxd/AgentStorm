@@ -9,6 +9,9 @@ deployment_profile="${DEPLOYMENT_PROFILE:-cluster}"
 e2e_namespace="${E2E_NAMESPACE:-}"
 keep_resources="${KEEP_E2E_RESOURCES:-true}"
 skip_image_build="${SKIP_IMAGE_BUILD:-false}"
+load_local_images="${LOAD_LOCAL_IMAGES:-true}"
+controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
+worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 wait_timeout="${E2E_TIMEOUT:-120s}"
 kubectl_bin="${KUBECTL:-kubectl}"
 docker_bin="${DOCKER:-docker}"
@@ -33,6 +36,7 @@ require_boolean() {
 
 require_boolean KEEP_E2E_RESOURCES "$keep_resources"
 require_boolean SKIP_IMAGE_BUILD "$skip_image_build"
+require_boolean LOAD_LOCAL_IMAGES "$load_local_images"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 
@@ -130,11 +134,11 @@ trap diagnostics ERR
 "${kubectl_cmd[@]}" cluster-info >/dev/null
 
 if [[ "$skip_image_build" == "false" ]]; then
-  make -C "$repo_root" docker-build
+  make -C "$repo_root" docker-build CONTROLLER_IMAGE="$controller_image" WORKER_IMAGE="$worker_image"
 fi
 
-if [[ "$cluster_provider" == "kind" ]]; then
-  "$kind_bin" load docker-image agentstorm-controller:dev agentstorm-worker:dev --name "$kind_cluster_name"
+if [[ "$cluster_provider" == "kind" && "$load_local_images" == "true" ]]; then
+  "$kind_bin" load docker-image "$controller_image" "$worker_image" --name "$kind_cluster_name"
 fi
 
 "${kubectl_cmd[@]}" apply -k "$kustomize_dir"
@@ -146,8 +150,24 @@ else
   "${kubectl_cmd[@]}" delete role agentstorm-controller -n agentstorm-system --ignore-not-found
   "${kubectl_cmd[@]}" delete networkpolicy agentstorm-worker -n agentstorm-system --ignore-not-found
 fi
+"${kubectl_cmd[@]}" set image deployment/agentstorm-controller -n agentstorm-system "manager=$controller_image"
 "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-controller -n agentstorm-system
 "${kubectl_cmd[@]}" rollout status deployment/agentstorm-controller -n agentstorm-system --timeout="$wait_timeout"
+
+"${kubectl_cmd[@]}" apply --server-side --dry-run=server -n "$e2e_namespace" \
+  -f "$repo_root/config/samples/agentstorm_v1alpha1_agenttestrun.yaml" >/dev/null
+
+"${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-demo-dataset
+  namespace: $e2e_namespace
+data:
+  cases.jsonl: |
+    {"id":"greeting-1","input":"hello","expected_contains":"hello"}
+    {"id":"greeting-2","input":"agent reliability","expected_contains":"agent reliability"}
+YAML
 
 service_account="system:serviceaccount:agentstorm-system:agentstorm-controller"
 can_get_secrets="$("${kubectl_cmd[@]}" auth can-i get secrets --as="$service_account" -n "$e2e_namespace" || true)"
@@ -177,7 +197,31 @@ delete_run() {
 
 run_success_case() {
   delete_run agentstorm-demo
-  "${kubectl_cmd[@]}" apply -n "$e2e_namespace" -f "$repo_root/config/samples/agentstorm_v1alpha1_agenttestrun.yaml"
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-demo
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-demo-dataset
+      key: cases.jsonl
+    parallelism: 2
+    concurrencyPerWorker: 4
+    iterations: 1
+    timeoutSeconds: 300
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+    maxP95LatencyMs: 1000
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
   "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-demo -n "$e2e_namespace" --timeout="$wait_timeout"
 
   job_name="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-demo -n "$e2e_namespace" -o jsonpath='{.status.jobName}')"
@@ -225,7 +269,7 @@ spec:
     maxErrorRate: 0
     maxP95LatencyMs: 1000
   runner:
-    image: agentstorm-worker:dev
+    image: "$worker_image"
     imagePullPolicy: IfNotPresent
 YAML
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Pending agenttestrun/agentstorm-secret-gate -n "$e2e_namespace" --timeout="$wait_timeout"
@@ -272,7 +316,7 @@ spec:
     maxErrorRate: 0
     maxP95LatencyMs: 1000
   runner:
-    image: agentstorm-worker:dev
+    image: "$worker_image"
     imagePullPolicy: IfNotPresent
 YAML
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Running agenttestrun/agentstorm-cancel -n "$e2e_namespace" --timeout="$wait_timeout"
@@ -295,4 +339,4 @@ else
   "${kubectl_cmd[@]}" delete configmap agentstorm-demo-dataset -n "$e2e_namespace" --ignore-not-found
 fi
 
-echo "AgentStorm E2E passed: context=$kube_context profile=$deployment_profile namespace=$e2e_namespace"
+echo "AgentStorm E2E passed: context=$kube_context profile=$deployment_profile namespace=$e2e_namespace controller_image=$controller_image worker_image=$worker_image"
