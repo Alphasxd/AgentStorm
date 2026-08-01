@@ -27,5 +27,5 @@ spec:
     maxErrorRate: 0
     maxP95LatencyMs: 1000
   runner:
-    image: agentstorm-worker:dev
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4
     imagePullPolicy: IfNotPresent
