@@ -120,6 +120,28 @@ jobs:
           KEEP_E2E_RESOURCES: 'false'
         run: make e2e-local
 
+  results-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run durable result-stack E2E
+        env:
+          CLUSTER_PROVIDER: kind
+          KEEP_E2E_RESOURCES: 'false'
+        run: make e2e-results-local
+
   published-image-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentstorm-result-api
+  labels:
+    app.kubernetes.io/name: agentstorm-result-api
+    app.kubernetes.io/part-of: agentstorm-results
+spec:
+  selector:
+    app.kubernetes.io/name: agentstorm-result-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentstorm-result-api
+  labels:
+    app.kubernetes.io/name: agentstorm-result-api
+    app.kubernetes.io/part-of: agentstorm-results
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentstorm-result-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentstorm-result-api
+        app.kubernetes.io/part-of: agentstorm-results
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: result-api
+          image: agentstorm-result-api:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AGENTSTORM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentstorm-result-storage
+                  key: database-url
+            - name: AGENTSTORM_S3_ENDPOINT
+              value: agentstorm-minio:9000
+            - name: AGENTSTORM_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentstorm-result-storage
+                  key: s3-access-key
+            - name: AGENTSTORM_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentstorm-result-storage
+                  key: s3-secret-key
+            - name: AGENTSTORM_S3_BUCKET
+              value: agentstorm-results
+            - name: AGENTSTORM_RESULT_WRITE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentstorm-result-auth
+                  key: write-token
+            - name: AGENTSTORM_RESULT_READ_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentstorm-result-auth
+                  key: read-token
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
