@@ -13,6 +13,11 @@ make test-envtest
 directory and verifies CRD defaults, CEL immutability, and the status subresource against a real API
 server. Use `make e2e-local` for the full no-cost local cluster path.
 
+The E2E script builds and loads `agentstorm-controller:dev` and `agentstorm-worker:dev` by default.
+Set `CONTROLLER_IMAGE` and `WORKER_IMAGE` to test other references. For already-published images, set
+`SKIP_IMAGE_BUILD=true` and `LOAD_LOCAL_IMAGES=false` so kind pulls the requested references instead
+of loading local Docker images.
+
 Changes to the CRD must update all of the following in one pull request:
 
 - `api/v1alpha1` Go types
