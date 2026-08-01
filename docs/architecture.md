@@ -7,7 +7,8 @@ AgentStorm separates orchestration from execution:
 - Kubernetes owns desired state, scheduling, pod placement, and garbage collection.
 - The controller owns run validation, child resources, cancellation, and lifecycle status.
 - Workers own provider calls, per-case evaluation, and result production.
-- A later result service will own durable aggregation and run comparison.
+- The result service owns durable aggregation and run comparison; worker upload integration is the
+  next M2 step.
 
 This prevents model-specific SDK details from leaking into the Kubernetes controller and keeps
 worker adapters independently testable.
@@ -58,7 +59,7 @@ The alpha worker writes one `results.jsonl` and one `summary.json` per shard and
 to stdout. This is sufficient for local use and Job-level success, but pod-local files are not a
 durable cluster result store.
 
-The next result path is:
+The M2 result path is:
 
 ```text
 Worker -> authenticated result API -> PostgreSQL run metadata
@@ -69,6 +70,12 @@ Worker -> authenticated result API -> PostgreSQL run metadata
 ClickHouse should only be added after event volume and comparison queries justify it. The project
 must not introduce a database solely to enlarge the technology list.
 
+Result API clients first register the expected shard count, then upload one idempotent shard
+document. The service reserves the shard in PostgreSQL, writes the canonical JSON as a gzip object,
+and only then commits case rows and recomputes the run aggregate. A retry with the same key and body
+is a no-op; reusing a key with different content is a conflict. A run becomes complete only when
+every expected shard receipt is finalized.
+
 ## Failure semantics
 
 | Failure | Current behavior | Planned improvement |
@@ -78,7 +85,7 @@ must not introduce a database solely to enlarge the technology list.
 | Worker pod failure | Job fails, no automatic replay | Explicit idempotent retry command |
 | Controller restart | Reconcile reconstructs state from API objects | Leader-election tests |
 | Run cancellation | Job deleted, run marked Cancelled | Grace period and partial result flush |
-| Result upload failure | Not implemented | Outbox and idempotency key |
+| Result upload failure | Worker integration not implemented | Fail the Job, then add a durable outbox |
 
 Expensive model calls make hidden retries dangerous. Future retries must use the idempotency key
 `run_id / case_id / iteration` and distinguish transport failures from completed model calls.
