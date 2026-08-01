@@ -57,3 +57,27 @@ jobs:
           DEPLOYMENT_PROFILE: namespace
           KEEP_E2E_RESOURCES: 'false'
         run: make e2e-local
+
+  published-image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run published-image smoke
+        env:
+          CLUSTER_PROVIDER: kind
+          DEPLOYMENT_PROFILE: namespace
+          KEEP_E2E_RESOURCES: 'false'
+          SKIP_IMAGE_BUILD: 'true'
+          LOAD_LOCAL_IMAGES: 'false'
+          CONTROLLER_IMAGE: ghcr.io/alphasxd/agentstorm-controller@sha256:d8722216fc9f532aa5f7a5d4c7f401ca432df7752f2a9f510f821122f11e1045
+          WORKER_IMAGE: ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4
+        run: make e2e-local

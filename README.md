@@ -5,9 +5,9 @@ Agent workloads. It turns an `AgentTestRun` custom resource into indexed Kuberne
 runs a JSONL scenario set with bounded concurrency, and evaluates deterministic quality and
 latency thresholds.
 
-> Status: early alpha. The local worker and the first controller reconciliation path are
-> implemented. Central result ingestion, OpenTelemetry export, fault injection, and autoscaling
-> are planned milestones rather than finished features.
+> Status: early alpha. Public multi-architecture images, the local worker, and the first controller
+> reconciliation path are implemented. Central result ingestion, OpenTelemetry export, fault
+> injection, and autoscaling are planned milestones rather than finished features.
 
 ## Why this project
 
@@ -86,11 +86,45 @@ Build the controller:
 make build
 ```
 
-## Kubernetes quickstart
+## Released Kubernetes quickstart
 
-Prerequisites: `kubectl`, Docker, and either OrbStack Kubernetes or `kind`.
-The command builds both images, deploys the controller, runs a fresh two-shard fake workload, checks
-garbage collection and cancellation, then leaves one successful demo run for inspection.
+Prerequisite: `kubectl` access to a Kubernetes cluster. The public manifests use immutable
+`v0.1.0-alpha.1` image-index digests and need no local image build or registry credentials.
+
+```bash
+kubectl apply -k config/default
+kubectl apply --dry-run=server -f config/samples/agentstorm_v1alpha1_agenttestrun.yaml
+kubectl apply -f config/samples/agentstorm_v1alpha1_agenttestrun.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+  agenttestrun/agentstorm-demo --timeout=120s
+kubectl get agenttestrun/agentstorm-demo
+```
+
+The released images are public for anonymous pulls:
+
+```text
+ghcr.io/alphasxd/agentstorm-controller@sha256:d8722216fc9f532aa5f7a5d4c7f401ca432df7752f2a9f510f821122f11e1045
+ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4
+```
+
+Both images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
+
+```bash
+gh attestation verify \
+  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:d8722216fc9f532aa5f7a5d4c7f401ca432df7752f2a9f510f821122f11e1045 \
+  --repo Alphasxd/AgentStorm
+
+gh attestation verify \
+  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4 \
+  --repo Alphasxd/AgentStorm
+```
+
+## Local development E2E
+
+Prerequisites: `kubectl`, Docker, and either OrbStack Kubernetes or `kind`. This path builds the
+current source as local `agentstorm-controller:dev` and `agentstorm-worker:dev` images, deploys the
+controller, runs a fresh two-shard fake workload, and checks Secret gating, garbage collection, and
+cancellation.
 
 ```bash
 # Active OrbStack context
@@ -110,8 +144,6 @@ DEPLOYMENT_PROFILE=namespace make e2e-local
 Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
 when switching modes. The CRD definition is installed cluster-wide, while `AgentTestRun` resources
 remain namespaced in both modes.
-
-Published immutable images remain an M1 release task; local E2E intentionally uses `:dev` images.
 
 ## `AgentTestRun` example
 
@@ -136,8 +168,8 @@ spec:
     maxErrorRate: 0
     maxP95LatencyMs: 1000
   runner:
-    image: agentstorm-worker:dev
-    imagePullPolicy: Never
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4
+    imagePullPolicy: IfNotPresent
 ```
 
 Set `spec.cancel: true` to request cancellation. Worker Jobs use `backoffLimit: 0` by default so
