@@ -6,7 +6,12 @@
 make fmt
 make vet
 make test
+make test-envtest
 ```
+
+`make test-envtest` downloads pinned Kubernetes control-plane binaries into the ignored `.cache/`
+directory and verifies CRD defaults, CEL immutability, and the status subresource against a real API
+server. Use `make e2e-local` for the full no-cost local cluster path.
 
 Changes to the CRD must update all of the following in one pull request:
 

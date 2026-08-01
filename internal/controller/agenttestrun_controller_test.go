@@ -4,13 +4,16 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	agentstormv1alpha1 "github.com/Alphasxd/AgentStorm/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -26,7 +29,11 @@ func TestReconcileCreatesIndexedWorkerJob(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
 		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "provider-credentials", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("test-only-value")},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset, secret).Build()
 	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
 
@@ -49,6 +56,7 @@ func TestReconcileCreatesIndexedWorkerJob(t *testing.T) {
 	}
 	assertEnv(t, job.Spec.Template.Spec.Containers[0].Env, "AGENTSTORM_SHARD_COUNT", "2")
 	assertSecretEnv(t, job.Spec.Template.Spec.Containers[0].Env, "OPENAI_API_KEY", "provider-credentials", "api-key")
+	assertWorkerSecurity(t, job.Spec.Template.Spec)
 
 	config := &corev1.ConfigMap{}
 	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-config"}, config); err != nil {
@@ -59,6 +67,90 @@ func TestReconcileCreatesIndexedWorkerJob(t *testing.T) {
 	}
 	if strings.Contains(config.Data[workerConfigKey], "provider-credentials") || strings.Contains(config.Data[workerConfigKey], "api-key") {
 		t.Fatal("generated worker config must not contain Secret references")
+	}
+}
+
+func TestReconcileWaitsForRequiredSecret(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	run.Spec.Target.APIKeySecretRef = &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "provider-credentials"},
+		Key:                  "api-key",
+	}
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("expected a requeue while the provider Secret is missing")
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+		t.Fatal("worker Job should not exist before the provider Secret is available")
+	}
+
+	updated := &agentstormv1alpha1.AgentTestRun{}
+	if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionCredentials)
+	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunPending || condition == nil || condition.Reason != "SecretMissing" {
+		t.Fatalf("status = %#v, want Pending with SecretMissing condition", updated.Status)
+	}
+}
+
+func TestReconcileAllowsMissingOptionalSecret(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	run.Spec.Target.APIKeySecretRef = &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "optional-credentials"},
+		Key:                  "api-key",
+		Optional:             ptr.To(true),
+	}
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err != nil {
+		t.Fatalf("optional Secret should not prevent Job creation: %v", err)
+	}
+}
+
+func TestCredentialsReadyUsesAPIReader(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	run.Spec.Target.APIKeySecretRef = &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "provider-credentials"},
+		Key:                  "api-key",
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "provider-credentials", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("test-only-value")},
+	}
+	cachedClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	reconciler := &AgentTestRunReconciler{Client: cachedClient, APIReader: apiReader, Scheme: scheme}
+
+	ready, reason, _, err := reconciler.credentialsReady(context.Background(), run)
+	if err != nil {
+		t.Fatalf("credentialsReady: %v", err)
+	}
+	if !ready || reason != "Available" {
+		t.Fatalf("credentials readiness = %v/%s, want true/Available", ready, reason)
 	}
 }
 
@@ -104,6 +196,86 @@ func TestReconcileCancelsExistingJob(t *testing.T) {
 	}
 	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunCancelled {
 		t.Fatalf("phase = %q, want %q", updated.Status.Phase, agentstormv1alpha1.AgentTestRunCancelled)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile terminal run: %v", err)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+		t.Fatal("terminal cancelled run recreated its worker Job")
+	}
+}
+
+func TestApplyJobStatus(t *testing.T) {
+	completedAt := metav1.NewTime(time.Unix(1234, 0))
+	tests := []struct {
+		name       string
+		job        *batchv1.Job
+		wantPhase  agentstormv1alpha1.AgentTestRunPhase
+		wantReason string
+		wantReady  metav1.ConditionStatus
+	}{
+		{
+			name: "success",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Succeeded:      2,
+				CompletionTime: &completedAt,
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+			}},
+			wantPhase:  agentstormv1alpha1.AgentTestRunSucceeded,
+			wantReason: "WorkersCompleted",
+			wantReady:  metav1.ConditionTrue,
+		},
+		{
+			name: "failure",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Failed:         1,
+				CompletionTime: &completedAt,
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "worker exited non-zero",
+				}},
+			}},
+			wantPhase:  agentstormv1alpha1.AgentTestRunFailed,
+			wantReason: "WorkerJobFailed",
+			wantReady:  metav1.ConditionFalse,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := testRun()
+			applyJobStatus(run, tt.job)
+			if run.Status.Phase != tt.wantPhase {
+				t.Fatalf("phase = %q, want %q", run.Status.Phase, tt.wantPhase)
+			}
+			condition := meta.FindStatusCondition(run.Status.Conditions, conditionReady)
+			if condition == nil || condition.Reason != tt.wantReason || condition.Status != tt.wantReady {
+				t.Fatalf("ready condition = %#v, want reason %q and status %q", condition, tt.wantReason, tt.wantReady)
+			}
+			if run.Status.CompletionTime == nil || !run.Status.CompletionTime.Equal(&completedAt) {
+				t.Fatalf("completion time = %v, want %v", run.Status.CompletionTime, completedAt)
+			}
+		})
+	}
+}
+
+func TestChildNameTruncatesWithStableHash(t *testing.T) {
+	if got := childName("demo", "worker"); got != "demo-worker" {
+		t.Fatalf("short name = %q, want demo-worker", got)
+	}
+
+	prefix := strings.Repeat("a", 62)
+	first := childName(prefix+"x", "worker")
+	second := childName(prefix+"y", "worker")
+	if len(first) > 63 || !strings.HasSuffix(first, "-worker") {
+		t.Fatalf("truncated name = %q, want <= 63 chars with worker suffix", first)
+	}
+	if first == second {
+		t.Fatalf("distinct long names collided at %q", first)
+	}
+	if first != childName(prefix+"x", "worker") {
+		t.Fatalf("child name is not deterministic: %q", first)
 	}
 }
 
@@ -182,4 +354,33 @@ func assertSecretEnv(t *testing.T, env []corev1.EnvVar, name, secretName, secret
 		return
 	}
 	t.Fatalf("env %s not found", name)
+}
+
+func assertWorkerSecurity(t *testing.T, pod corev1.PodSpec) {
+	t.Helper()
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Fatal("worker must not automount a ServiceAccount token")
+	}
+	if pod.SecurityContext == nil || pod.SecurityContext.RunAsNonRoot == nil || !*pod.SecurityContext.RunAsNonRoot {
+		t.Fatal("worker pod must run as non-root")
+	}
+	if pod.SecurityContext.SeccompProfile == nil || pod.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatal("worker pod must use the RuntimeDefault seccomp profile")
+	}
+	container := pod.Containers[0]
+	if container.SecurityContext == nil || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
+		t.Fatal("worker container must use a read-only root filesystem")
+	}
+	if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatal("worker container must disable privilege escalation")
+	}
+	if container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Fatal("worker container must drop all Linux capabilities")
+	}
+	for _, volume := range pod.Volumes {
+		if volume.Name == "output" && volume.EmptyDir != nil {
+			return
+		}
+	}
+	t.Fatal("worker output directory must use an EmptyDir volume")
 }

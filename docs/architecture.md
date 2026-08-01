@@ -86,9 +86,15 @@ Expensive model calls make hidden retries dangerous. Future retries must use the
 ## Security boundaries
 
 - API keys remain in Kubernetes Secrets and never enter generated ConfigMaps.
+- Missing non-optional provider Secrets or keys keep a run Pending instead of creating a failing Pod.
+- Secret readiness checks use the uncached API reader, so runtime RBAC grants `get` without broad
+  `list` or `watch` access to Secrets.
 - Controller logs must not include prompts, outputs, tool arguments, or Secret values.
-- Worker images run as non-root and should use read-only filesystems once result upload exists.
+- Worker Pods run as non-root, drop all capabilities, disable ServiceAccount token mounting, and use
+  a read-only root filesystem with a dedicated EmptyDir for ephemeral results.
 - Raw trace content is opt-in because prompts and tool results may contain sensitive data.
 - Arbitrary shell, browser, or MCP tools are out of scope until a sandbox policy is defined.
-- Cluster-wide RBAC is acceptable for the first local demo; a production profile must support
-  namespace-scoped watches and least-privilege RoleBindings.
+- The default local profile uses cluster-wide RBAC. The `config/namespace-scoped` profile limits the
+  controller cache and permissions to `agentstorm-system` with Role/RoleBinding resources.
+- NetworkPolicies deny worker ingress and restrict controller/worker egress to DNS and HTTPS. Custom
+  provider ports require an explicit policy extension.

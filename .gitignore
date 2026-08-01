@@ -2,6 +2,7 @@
 .idea/
 .vscode/
 .out/
+.cache/
 bin/
 coverage.out
 *.log

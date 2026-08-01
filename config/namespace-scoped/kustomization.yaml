@@ -1,0 +1,18 @@
+namespace: agentstorm-system
+resources:
+  - ../namespace
+  - ../crd
+  - ../rbac/namespace-scoped
+  - ../manager
+  - ../network-policy/controller
+  - ../network-policy/worker
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: agentstorm-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --watch-namespace=agentstorm-system

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -24,15 +26,17 @@ import (
 )
 
 const (
-	conditionReady   = "Ready"
-	conditionDataset = "DatasetReady"
-	workerConfigKey  = "run.json"
+	conditionReady       = "Ready"
+	conditionDataset     = "DatasetReady"
+	conditionCredentials = "CredentialsReady"
+	workerConfigKey      = "run.json"
 )
 
 // AgentTestRunReconciler turns an AgentTestRun into an indexed Kubernetes Job.
 type AgentTestRunReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 }
 
 // +kubebuilder:rbac:groups=agentstorm.io,resources=agenttestruns,verbs=get;list;watch;create;update;patch;delete
@@ -42,6 +46,7 @@ type AgentTestRunReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -91,6 +96,27 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Type: conditionDataset, Status: metav1.ConditionTrue, Reason: "Available",
 		Message: "dataset ConfigMap is available", ObservedGeneration: run.Generation,
 	})
+	credentialsReady, reason, message, err := r.credentialsReady(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !credentialsReady {
+		run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionCredentials, Status: metav1.ConditionFalse, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+		if err := r.patchStatus(ctx, before, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if run.Spec.Target.APIKeySecretRef != nil {
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionCredentials, Status: metav1.ConditionTrue, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+	}
 	if err := r.ensureWorkerConfig(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -177,6 +203,41 @@ func (r *AgentTestRunReconciler) datasetReady(ctx context.Context, run *agentsto
 		_, exists = dataset.BinaryData[ref.Key]
 	}
 	return exists, nil
+}
+
+func (r *AgentTestRunReconciler) credentialsReady(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) (bool, string, string, error) {
+	ref := run.Spec.Target.APIKeySecretRef
+	if ref == nil {
+		return true, "NotRequired", "no provider Secret is configured", nil
+	}
+
+	secret := &corev1.Secret{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, secret)
+	if apierrors.IsNotFound(err) {
+		if ref.Optional != nil && *ref.Optional {
+			return true, "Optional", "optional provider Secret is not available", nil
+		}
+		return false, "SecretMissing", "referenced provider Secret is not available", nil
+	}
+	if err != nil {
+		return false, "", "", err
+	}
+
+	_, exists := secret.Data[ref.Key]
+	if !exists {
+		_, exists = secret.StringData[ref.Key]
+	}
+	if !exists {
+		if ref.Optional != nil && *ref.Optional {
+			return true, "Optional", "optional provider Secret key is not available", nil
+		}
+		return false, "KeyMissing", "referenced provider Secret key is not available", nil
+	}
+	return true, "Available", "provider Secret key is available", nil
 }
 
 type workerRunConfig struct {
@@ -296,13 +357,25 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun) *batchv1.Job {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:                corev1.RestartPolicyNever,
+					AutomountServiceAccountToken: ptr.To(false),
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot:   ptr.To(true),
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+					},
 					Containers: []corev1.Container{{
 						Name: "worker", Image: run.Spec.Runner.Image, ImagePullPolicy: pullPolicy,
 						Args: []string{"run"}, Env: env,
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: ptr.To(false),
+							ReadOnlyRootFilesystem:   ptr.To(true),
+							RunAsNonRoot:             ptr.To(true),
+							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "run-config", MountPath: "/etc/agentstorm/run", ReadOnly: true},
 							{Name: "dataset", MountPath: "/etc/agentstorm/dataset", ReadOnly: true},
+							{Name: "output", MountPath: "/tmp/agentstorm"},
 						},
 					}},
 					Volumes: []corev1.Volume{
@@ -312,6 +385,7 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun) *batchv1.Job {
 						{Name: "dataset", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 							LocalObjectReference: corev1.LocalObjectReference{Name: run.Spec.Workload.DatasetRef.Name},
 						}}},
+						{Name: "output", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
 				},
 			},
@@ -392,9 +466,13 @@ func (r *AgentTestRunReconciler) patchStatus(ctx context.Context, before, run *a
 }
 
 func childName(name, suffix string) string {
-	maxBase := 63 - len(suffix) - 1
-	if len(name) > maxBase {
-		name = strings.TrimRight(name[:maxBase], "-")
+	if len(name)+len(suffix)+1 <= 63 {
+		return name + "-" + suffix
 	}
-	return name + "-" + suffix
+
+	digest := sha256.Sum256([]byte(name))
+	hash := fmt.Sprintf("%x", digest[:4])
+	maxBase := 63 - len(suffix) - len(hash) - 2
+	base := strings.TrimRight(name[:maxBase], "-")
+	return base + "-" + hash + "-" + suffix
 }

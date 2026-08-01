@@ -1,5 +1,6 @@
 .git
 .github
+.cache
 .out
 .venv
 __pycache__
