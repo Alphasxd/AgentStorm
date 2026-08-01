@@ -39,19 +39,23 @@ The acceptance path is automated by `make e2e-local` and uses the no-cost fake p
 `v0.1.0-alpha.1` publishes immutable multi-architecture images, and public manifests reference their
 image-index digests.
 
-## M2: Durable result service and comparison
+## M2: Durable result service and comparison — implemented
 
-- Add a Go HTTP service for run registration, shard result ingestion, and summary queries.
-- Store run metadata and summaries in PostgreSQL.
-- Store raw case events in object storage or compressed files before considering ClickHouse.
-- Require idempotency keys for every shard and case result.
-- Add baseline-vs-candidate comparison for prompts, models, tools, and workflow versions.
+- [x] Add a Go HTTP service for run registration, shard result ingestion, and summary queries.
+- [x] Store run metadata and summaries in PostgreSQL.
+- [x] Store raw case events in object storage or compressed files before considering ClickHouse.
+- [x] Require idempotency keys for every shard and case result.
+- [x] Add baseline-vs-candidate comparison for prompts, models, tools, and workflow versions.
 
 Acceptance criteria:
 
-- Duplicate shard uploads do not duplicate counters.
-- A run is complete only after all expected shard summaries arrive.
-- The API returns quality, latency, token, and error deltas between two runs.
+- [x] Duplicate shard uploads do not duplicate counters.
+- [x] A run is complete only after all expected shard summaries arrive.
+- [x] The API returns quality, latency, token, and error deltas between two runs.
+
+Release `v0.2.0-alpha.1` publishes the controller, worker, and Result API as immutable
+multi-architecture images. `config/results` is the namespace-scoped public reference stack; its
+single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation, not production HA.
 
 ## M3: Agent observability and evaluation
 

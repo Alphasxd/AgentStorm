@@ -2,25 +2,21 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: agentstorm-system
 resources:
-  - ../../namespace-scoped
-  - postgres.yaml
-  - minio.yaml
-  - result-api.yaml
+  - ../../results
 patches:
   - target:
       group: apps
       version: v1
       kind: Deployment
-      name: agentstorm-controller
+      name: agentstorm-result-api
     patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: --result-api-url=http://agentstorm-result-api:8080
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: agentstorm-result-api:dev
   - target:
       group: networking.k8s.io
       version: v1
       kind: NetworkPolicy
-      name: agentstorm-worker
     patch: |-
       - op: replace
         path: /spec/podSelector/matchLabels

@@ -5,10 +5,9 @@ Agent workloads. It turns an `AgentTestRun` custom resource into indexed Kuberne
 runs a JSONL scenario set with bounded concurrency, and evaluates deterministic quality and
 latency thresholds.
 
-> Status: early alpha. Public multi-architecture controller and worker images are available. The
-> authenticated Result API and PostgreSQL/object-storage path run from source in the development
-> overlay; its public image release is still pending. OpenTelemetry export, fault injection, and
-> autoscaling remain planned milestones.
+> Status: early alpha. Public multi-architecture controller, worker, and Result API images are
+> available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
+> comparison. OpenTelemetry export, fault injection, and autoscaling remain planned milestones.
 
 ## Why this project
 
@@ -34,7 +33,7 @@ engineering questions that appear after a workflow becomes a service:
 - Threshold-based process exit codes suitable for CI and Kubernetes Job status.
 - Hardened worker Pods without ServiceAccount tokens or writable root filesystems.
 - Authenticated, idempotent result ingestion with PostgreSQL metadata, compressed S3 raw shards,
-  paginated case queries, and baseline comparisons in the development stack.
+  paginated case queries, and baseline comparisons.
 
 ## Architecture
 
@@ -95,7 +94,7 @@ make build
 ## Released Kubernetes quickstart
 
 Prerequisite: `kubectl` access to a Kubernetes cluster. The public manifests use immutable
-`v0.1.0-alpha.1` image-index digests and need no local image build or registry credentials.
+`v0.2.0-alpha.1` image-index digests and need no local image build or registry credentials.
 
 ```bash
 kubectl apply -k config/default
@@ -109,21 +108,60 @@ kubectl get agenttestrun/agentstorm-demo
 The released images are public for anonymous pulls:
 
 ```text
-ghcr.io/alphasxd/agentstorm-controller@sha256:d8722216fc9f532aa5f7a5d4c7f401ca432df7752f2a9f510f821122f11e1045
-ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4
+ghcr.io/alphasxd/agentstorm-controller@sha256:5d6e9785b17036bc3d47157b4d2c39038a92175bbcd6d90252054624b5062f6f
+ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74
+ghcr.io/alphasxd/agentstorm-result-api@sha256:0db0c0eaee89f7a075ab2cde212788a008741b814967c467ff20d08dd64c819c
 ```
 
-Both images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
+All three images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
 
 ```bash
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:d8722216fc9f532aa5f7a5d4c7f401ca432df7752f2a9f510f821122f11e1045 \
+  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:5d6e9785b17036bc3d47157b4d2c39038a92175bbcd6d90252054624b5062f6f \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4 \
+  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74 \
+  --repo Alphasxd/AgentStorm
+
+gh attestation verify \
+  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:0db0c0eaee89f7a075ab2cde212788a008741b814967c467ff20d08dd64c819c \
   --repo Alphasxd/AgentStorm
 ```
+
+### Released durable result stack
+
+The public namespace-scoped result stack needs storage and API credentials supplied as Secrets.
+This example generates disposable values locally; none are committed to the repository:
+
+```bash
+kubectl apply -k config/namespace
+
+POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+S3_SECRET_KEY="$(openssl rand -hex 24)"
+WRITE_TOKEN="$(openssl rand -hex 24)"
+READ_TOKEN="$(openssl rand -hex 24)"
+
+kubectl -n agentstorm-system create secret generic agentstorm-result-storage \
+  --from-literal=database-url="postgres://agentstorm:${POSTGRES_PASSWORD}@agentstorm-postgres:5432/agentstorm?sslmode=disable" \
+  --from-literal=postgres-password="$POSTGRES_PASSWORD" \
+  --from-literal=s3-access-key=agentstorm \
+  --from-literal=s3-secret-key="$S3_SECRET_KEY"
+kubectl -n agentstorm-system create secret generic agentstorm-result-auth \
+  --from-literal=write-token="$WRITE_TOKEN" \
+  --from-literal=read-token="$READ_TOKEN"
+
+kubectl apply -k config/results
+kubectl -n agentstorm-system rollout status deployment/agentstorm-result-api --timeout=180s
+kubectl apply -n agentstorm-system -f config/samples/agentstorm_v1alpha1_agenttestrun.yaml
+kubectl wait -n agentstorm-system --for=jsonpath='{.status.phase}'=Succeeded \
+  agenttestrun/agentstorm-demo --timeout=180s
+```
+
+`config/results` is an alpha reference deployment with single-replica PostgreSQL and MinIO, two
+1 GiB persistent-volume claims, and restrictive NetworkPolicies. It is not a high-availability
+production storage design; adapt storage classes, backups, CNI rules, and credentials before using
+it beyond evaluation.
 
 ## Local development E2E
 
@@ -154,9 +192,9 @@ gating, two durable runs, case reads, and a baseline comparison:
 CLUSTER_PROVIDER=kind make e2e-results-local
 ```
 
-The result overlay lives under `config/dev/results`, uses test-only Secrets created by the E2E
-script, and is not the released public manifest. See [Result API](docs/result-api.md) for its HTTP and
-storage contract.
+The local overlay lives under `config/dev/results`, inherits the released `config/results` stack,
+uses test-only Secrets created by the E2E script, and replaces only the Result API image with the
+source-built `:dev` image. See [Result API](docs/result-api.md) for its HTTP and storage contract.
 
 Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
 when switching modes. The CRD definition is installed cluster-wide, while `AgentTestRun` resources
@@ -185,7 +223,7 @@ spec:
     maxErrorRate: 0
     maxP95LatencyMs: 1000
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker@sha256:3dbef77e5ecfd7f73bfa36532aef9fce72ccdbd4590f897c47ee503e1099d8e4
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74
     imagePullPolicy: IfNotPresent
 ```
 
@@ -209,11 +247,10 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Persist and compare run results through an authenticated result API.
-2. Export Agent, model, and tool-call telemetry with OpenTelemetry conventions.
-3. Add reusable assertions, provider adapters, and controlled fault injection.
-4. Add KEDA-based queue scaling and resource-aware scheduling.
-5. Publish Helm charts, reproducible benchmarks, and a public demo.
+1. Export Agent, model, and tool-call telemetry with OpenTelemetry conventions.
+2. Add reusable assertions, provider adapters, and controlled fault injection.
+3. Add KEDA-based queue scaling and resource-aware scheduling.
+4. Publish Helm charts, reproducible benchmarks, and a public demo.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

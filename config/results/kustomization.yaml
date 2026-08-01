@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agentstorm-system
+resources:
+  - ../namespace-scoped
+  - postgres.yaml
+  - minio.yaml
+  - result-api.yaml
+  - network-policies.yaml
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: agentstorm-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --result-api-url=http://agentstorm-result-api:8080
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: agentstorm-worker
+    patch: |-
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agentstorm-result-api
+          ports:
+            - protocol: TCP
+              port: 8080
