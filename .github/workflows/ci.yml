@@ -38,6 +38,58 @@ jobs:
       - name: Run no-cost smoke workload
         run: make worker-local
 
+  results-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_DB: agentstorm
+          POSTGRES_USER: agentstorm
+          POSTGRES_PASSWORD: integration-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentstorm -d agentstorm"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - name: Start MinIO
+        run: >-
+          docker run --detach --name agentstorm-minio-ci
+          --publish 9000:9000
+          --env MINIO_ROOT_USER=agentstorm
+          --env MINIO_ROOT_PASSWORD=integration-only-secret
+          minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          server /data
+      - name: Wait for MinIO
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs agentstorm-minio-ci
+          exit 1
+      - name: Test durable result storage
+        env:
+          AGENTSTORM_TEST_DATABASE_URL: postgres://agentstorm:integration-only@127.0.0.1:5432/agentstorm?sslmode=disable
+          AGENTSTORM_TEST_S3_ENDPOINT: 127.0.0.1:9000
+          AGENTSTORM_TEST_S3_ACCESS_KEY: agentstorm
+          AGENTSTORM_TEST_S3_SECRET_KEY: integration-only-secret
+        run: make test-results-integration
+      - name: Stop MinIO
+        if: always()
+        run: docker rm --force agentstorm-minio-ci || true
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -18,6 +18,15 @@ Set `CONTROLLER_IMAGE` and `WORKER_IMAGE` to test other references. For already-
 `SKIP_IMAGE_BUILD=true` and `LOAD_LOCAL_IMAGES=false` so kind pulls the requested references instead
 of loading local Docker images.
 
+When a macOS host proxy points at `127.0.0.1` or `localhost`, the E2E script translates it to
+`host.docker.internal` only while creating a kind cluster. Set `KIND_PROXY_URL` to override the proxy
+used for kind creation. An existing cluster whose node has a loopback proxy is rejected with a
+recreation command; the script never changes the host-wide proxy configuration.
+
+The Result API uses PostgreSQL for run metadata and MinIO-compatible S3 storage for gzipped raw shard
+payloads. Its integration tests are opt-in and require `AGENTSTORM_TEST_DATABASE_URL` plus the
+`AGENTSTORM_TEST_S3_*` variables before running `make test-results-integration`.
+
 Changes to the CRD must update all of the following in one pull request:
 
 - `api/v1alpha1` Go types

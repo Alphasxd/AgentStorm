@@ -4,6 +4,7 @@ set -Eeuo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cluster_provider="${CLUSTER_PROVIDER:-auto}"
 kind_cluster_name="${KIND_CLUSTER_NAME:-agentstorm}"
+kind_proxy_url="${KIND_PROXY_URL:-}"
 kube_context="${KUBE_CONTEXT:-}"
 deployment_profile="${DEPLOYMENT_PROFILE:-cluster}"
 e2e_namespace="${E2E_NAMESPACE:-}"
@@ -32,6 +33,53 @@ require_boolean() {
       exit 1
       ;;
   esac
+}
+
+translate_kind_proxy() {
+  proxy_url="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    proxy_url="${proxy_url/:\/\/127.0.0.1/:\/\/host.docker.internal}"
+    proxy_url="${proxy_url/:\/\/localhost/:\/\/host.docker.internal}"
+    proxy_url="${proxy_url/:\/\/\[::1\]/:\/\/host.docker.internal}"
+  fi
+  printf '%s' "$proxy_url"
+}
+
+kind_create_cluster() {
+  http_proxy="${HTTP_PROXY:-${http_proxy:-}}"
+  https_proxy="${HTTPS_PROXY:-${https_proxy:-}}"
+  if [[ -n "$kind_proxy_url" ]]; then
+    http_proxy="$kind_proxy_url"
+    https_proxy="$kind_proxy_url"
+  fi
+  http_proxy="$(translate_kind_proxy "$http_proxy")"
+  https_proxy="$(translate_kind_proxy "$https_proxy")"
+
+  env \
+    HTTP_PROXY="$http_proxy" \
+    HTTPS_PROXY="$https_proxy" \
+    http_proxy="$http_proxy" \
+    https_proxy="$https_proxy" \
+    "$kind_bin" create cluster --name "$kind_cluster_name" --wait "$wait_timeout"
+}
+
+validate_existing_kind_proxy() {
+  node_name="${kind_cluster_name}-control-plane"
+  node_environment="$($docker_bin inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$node_name")"
+  while IFS= read -r environment_entry; do
+    case "$environment_entry" in
+      HTTP_PROXY=*|HTTPS_PROXY=*|http_proxy=*|https_proxy=*)
+        proxy_value="${environment_entry#*=}"
+        case "$proxy_value" in
+          *://127.0.0.1:*|*://localhost:*|*://\[::1\]:*)
+            echo "kind cluster '$kind_cluster_name' has a loopback proxy that is unreachable from its node container" >&2
+            echo "recreate it with: kind delete cluster --name $kind_cluster_name && KIND_PROXY_URL=http://host.docker.internal:<port> make e2e-local" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  done <<<"$node_environment"
 }
 
 require_boolean KEEP_E2E_RESOURCES "$keep_resources"
@@ -72,7 +120,9 @@ case "$cluster_provider" in
       fi
     done < <("$kind_bin" get clusters 2>/dev/null)
     if [[ "$kind_exists" == "false" ]]; then
-      "$kind_bin" create cluster --name "$kind_cluster_name" --wait "$wait_timeout"
+      kind_create_cluster
+    else
+      validate_existing_kind_proxy
     fi
     ;;
   orbstack)
