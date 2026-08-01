@@ -65,7 +65,8 @@ fi
 
 # Exercise the controller lifecycle, RBAC, Secret, cancellation, and garbage-collection paths first.
 # It also creates or validates the requested local cluster.
-KEEP_E2E_RESOURCES=false DEPLOYMENT_PROFILE=namespace "$repo_root/hack/e2e-local.sh"
+KEEP_E2E_RESOURCES=false DEPLOYMENT_PROFILE=namespace DISABLE_LOCAL_NETWORK_POLICIES=true \
+  "$repo_root/hack/e2e-local.sh"
 
 if [[ "$cluster_provider" == "auto" ]]; then
   if [[ -z "$kube_context" ]]; then
@@ -176,6 +177,8 @@ cleanup_stack() {
   "${kubectl_cmd[@]}" delete pvc -n "$e2e_namespace" -l app.kubernetes.io/part-of=agentstorm-results --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete secret -n "$e2e_namespace" -l app.kubernetes.io/managed-by=agentstorm-e2e,app.kubernetes.io/part-of=agentstorm-results --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" apply -k "$repo_root/config/namespace-scoped" >/dev/null || true
+  "${kubectl_cmd[@]}" delete networkpolicy agentstorm-controller agentstorm-worker \
+    -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" set image deployment/agentstorm-controller -n "$e2e_namespace" "manager=$controller_image" >/dev/null || true
 }
 

@@ -53,16 +53,28 @@ instead it verifies the per-run-namespace Secret named by `--result-write-token-
 injects only the selected key into the worker container. `--include-sensitive-results` is disabled
 by default, and `--result-upload-timeout` defaults to 30 seconds.
 
+## Public Kubernetes stack
+
+`config/results` composes the namespace-scoped controller, single-replica PostgreSQL and MinIO,
+the public Result API image, and restrictive NetworkPolicies. All container images are pinned to
+immutable multi-architecture digests. The overlay deliberately contains no credentials; create
+`agentstorm-result-storage` and `agentstorm-result-auth` in `agentstorm-system` before applying it.
+See the released durable result-stack quickstart in the README for the required Secret keys.
+
+This is an alpha reference stack, not a high-availability production database or object-store
+topology. Operators must define storage classes, backups, credential rotation, availability, and
+CNI-specific policy extensions for their environment.
+
 ## Local Kubernetes stack
 
 `config/dev/results` is a development-only namespace-scoped overlay. It runs PostgreSQL and MinIO
 with persistent volumes, starts the Result API from `agentstorm-result-api:dev`, and configures the
 controller to send workers to the in-cluster service. The overlay deliberately does not contain
 credentials; create `agentstorm-result-storage` and `agentstorm-result-auth` Secrets before applying
-it. For compatibility across local kind and OrbStack network implementations, this development-only
-overlay disables the namespace profile's worker NetworkPolicy selector; the Result API and storage
-Services remain cluster-internal and API traffic still requires separate read/write bearer tokens.
-Production deployments should supply CNI-specific egress rules. The reusable test path creates
+it. For compatibility with nested macOS kind/OrbStack combinations that incorrectly enforce
+otherwise standard port-only rules, this development-only overlay disables all AgentStorm
+NetworkPolicy selectors. The public `config/results` stack retains the policies, and API traffic in
+both modes still requires separate read/write bearer tokens. The reusable test path creates
 disposable credentials, resets only resources bearing its test-management label, and verifies the
 full data path:
 
@@ -84,8 +96,8 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
   "http://127.0.0.1:18080/v1/runs/$RUN_ID"
 ```
 
-The `:dev` image is intentionally limited to this local overlay. Public Kubernetes manifests will
-use an immutable multi-architecture Result API digest after the next alpha image release.
+The `:dev` image and disabled NetworkPolicy selectors are intentionally limited to this local
+overlay. The public stack uses the `v0.2.0-alpha.1` Result API image-index digest.
 
 ## Sensitive content
 

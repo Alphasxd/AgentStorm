@@ -11,6 +11,7 @@ e2e_namespace="${E2E_NAMESPACE:-}"
 keep_resources="${KEEP_E2E_RESOURCES:-true}"
 skip_image_build="${SKIP_IMAGE_BUILD:-false}"
 load_local_images="${LOAD_LOCAL_IMAGES:-true}"
+disable_local_network_policies="${DISABLE_LOCAL_NETWORK_POLICIES:-false}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 wait_timeout="${E2E_TIMEOUT:-120s}"
@@ -85,6 +86,7 @@ validate_existing_kind_proxy() {
 require_boolean KEEP_E2E_RESOURCES "$keep_resources"
 require_boolean SKIP_IMAGE_BUILD "$skip_image_build"
 require_boolean LOAD_LOCAL_IMAGES "$load_local_images"
+require_boolean DISABLE_LOCAL_NETWORK_POLICIES "$disable_local_network_policies"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 
@@ -199,6 +201,13 @@ else
   "${kubectl_cmd[@]}" delete rolebinding agentstorm-controller -n agentstorm-system --ignore-not-found
   "${kubectl_cmd[@]}" delete role agentstorm-controller -n agentstorm-system --ignore-not-found
   "${kubectl_cmd[@]}" delete networkpolicy agentstorm-worker -n agentstorm-system --ignore-not-found
+fi
+if [[ "$disable_local_network_policies" == "true" ]]; then
+  # Some nested macOS kind/OrbStack combinations incorrectly enforce otherwise standard
+  # port-only NetworkPolicy rules. Keep the public policies intact and disable them only for
+  # this explicitly requested local compatibility path.
+  "${kubectl_cmd[@]}" delete networkpolicy agentstorm-controller agentstorm-worker \
+    -n agentstorm-system --ignore-not-found
 fi
 "${kubectl_cmd[@]}" set image deployment/agentstorm-controller -n agentstorm-system "manager=$controller_image"
 "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-controller -n agentstorm-system

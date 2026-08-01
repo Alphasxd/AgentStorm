@@ -63,8 +63,10 @@ The M2 result path is:
 ```text
 Worker -> authenticated result API -> PostgreSQL run metadata
                                   -> object storage raw events
-                                  -> Prometheus / OpenTelemetry aggregates
 ```
+
+Prometheus metrics and OpenTelemetry traces remain an M3 concern after this result contract has
+stabilized.
 
 ClickHouse should only be added after event volume and comparison queries justify it. The project
 must not introduce a database solely to enlarge the technology list.
