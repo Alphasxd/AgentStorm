@@ -16,6 +16,12 @@ type resultMetrics struct {
 	runRegistrations *prometheus.CounterVec
 	shardUploads     *prometheus.CounterVec
 	cases            *prometheus.CounterVec
+	caseFailures     *prometheus.CounterVec
+	attempts         *prometheus.CounterVec
+	retryDecisions   *prometheus.CounterVec
+	retries          *prometheus.CounterVec
+	injectedFaults   *prometheus.CounterVec
+	circuitEvents    *prometheus.CounterVec
 	tokens           *prometheus.CounterVec
 	costUSD          *prometheus.CounterVec
 }
@@ -53,6 +59,42 @@ func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
 			Name:      "cases_total",
 			Help:      "Total uniquely persisted cases by result and bounded failure category.",
 		}, []string{"result", "failure_kind"}),
+		caseFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "case_failures_total",
+			Help:      "Total uniquely persisted failed cases by stable bounded M4 category.",
+		}, []string{"category"}),
+		attempts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "attempts_total",
+			Help:      "Total uniquely persisted structured attempts by bounded outcome.",
+		}, []string{"outcome"}),
+		retryDecisions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "retry_decisions_total",
+			Help:      "Total uniquely persisted retry decisions by bounded decision.",
+		}, []string{"decision"}),
+		retries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "retries_total",
+			Help:      "Total uniquely persisted retry executions by bounded triggering decision and outcome.",
+		}, []string{"decision", "outcome"}),
+		injectedFaults: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "injected_faults_total",
+			Help:      "Total uniquely persisted injected faults by supported type.",
+		}, []string{"fault"}),
+		circuitEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "circuit_events_total",
+			Help:      "Total uniquely persisted circuit-breaker events by bounded event.",
+		}, []string{"event"}),
 		tokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "agentstorm",
 			Subsystem: "result_api",
@@ -73,6 +115,12 @@ func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
 		metrics.runRegistrations,
 		metrics.shardUploads,
 		metrics.cases,
+		metrics.caseFailures,
+		metrics.attempts,
+		metrics.retryDecisions,
+		metrics.retries,
+		metrics.injectedFaults,
+		metrics.circuitEvents,
 		metrics.tokens,
 		metrics.costUSD,
 	)
@@ -113,8 +161,25 @@ func (m *resultMetrics) observeShard(result ShardResult, upload ShardUpload, err
 		if !item.Success {
 			result = "failure"
 			failureKind = boundedFailureKind(item.FailureKind)
+			m.caseFailures.WithLabelValues(boundedFailureCategory(item.FailureCategory)).Inc()
 		}
 		m.cases.WithLabelValues(result, failureKind).Inc()
+		for index, attempt := range item.Attempts {
+			m.attempts.WithLabelValues(boundedAttemptOutcome(attempt.Outcome)).Inc()
+			m.retryDecisions.WithLabelValues(boundedRetryDecision(attempt.RetryDecision)).Inc()
+			if index > 0 {
+				m.retries.WithLabelValues(
+					boundedRetryDecision(item.Attempts[index-1].RetryDecision),
+					boundedAttemptOutcome(attempt.Outcome),
+				).Inc()
+			}
+			if attempt.InjectedFault != "" {
+				m.injectedFaults.WithLabelValues(boundedInjectedFault(attempt.InjectedFault)).Inc()
+			}
+			for _, event := range attempt.CircuitEvents {
+				m.circuitEvents.WithLabelValues(boundedCircuitEvent(event)).Inc()
+			}
+		}
 	}
 	m.tokens.WithLabelValues("input").Add(float64(upload.Summary.InputTokens))
 	m.tokens.WithLabelValues("output").Add(float64(upload.Summary.OutputTokens))
@@ -149,6 +214,52 @@ func operationOutcome(created bool, err error) string {
 func boundedFailureKind(value string) string {
 	switch value {
 	case "assertion", "provider", "timeout", "tool", "harness":
+		return value
+	default:
+		return "other"
+	}
+}
+
+func boundedFailureCategory(value string) string {
+	switch value {
+	case "evaluation", "provider", "tool", "harness":
+		return value
+	default:
+		return "other"
+	}
+}
+
+func boundedAttemptOutcome(value string) string {
+	switch value {
+	case "succeeded", "failed", "rejected", "cancelled":
+		return value
+	default:
+		return "other"
+	}
+}
+
+func boundedRetryDecision(value string) string {
+	switch value {
+	case "not_needed", "retry_safe", "retry_ambiguous", "ambiguous_blocked", "not_retryable",
+		"half_open_no_retry", "attempt_limit", "backoff_budget", "time_budget":
+		return value
+	default:
+		return "other"
+	}
+}
+
+func boundedInjectedFault(value string) string {
+	switch value {
+	case "latency", "timeout", "http_error", "malformed_response", "rate_limit", "tool_error":
+		return value
+	default:
+		return "other"
+	}
+}
+
+func boundedCircuitEvent(value string) string {
+	switch value {
+	case "open", "reject", "half_open", "close":
 		return value
 	default:
 		return "other"

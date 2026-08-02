@@ -186,21 +186,32 @@ type TerminalReason struct {
 }
 
 type Aggregate struct {
-	Total            int64   `json:"total"`
-	Succeeded        int64   `json:"succeeded"`
-	Failed           int64   `json:"failed"`
-	SuccessRate      float64 `json:"success_rate"`
-	FailureRate      float64 `json:"failure_rate"`
-	P50MS            float64 `json:"p50_ms"`
-	P95MS            float64 `json:"p95_ms"`
-	P99MS            float64 `json:"p99_ms"`
-	InputTokens      int64   `json:"input_tokens"`
-	OutputTokens     int64   `json:"output_tokens"`
-	InputCostUSD     *string `json:"input_cost_usd"`
-	OutputCostUSD    *string `json:"output_cost_usd"`
-	CostUSD          *string `json:"cost_usd"`
-	ThresholdsPassed bool    `json:"thresholds_passed"`
-	UsageComplete    bool    `json:"usage_complete"`
+	Total                     int64   `json:"total"`
+	Succeeded                 int64   `json:"succeeded"`
+	Failed                    int64   `json:"failed"`
+	SuccessRate               float64 `json:"success_rate"`
+	FailureRate               float64 `json:"failure_rate"`
+	QualityFailures           int64   `json:"quality_failures"`
+	QualityFailureRate        float64 `json:"quality_failure_rate"`
+	InfrastructureFailures    int64   `json:"infrastructure_failures"`
+	InfrastructureFailureRate float64 `json:"infrastructure_failure_rate"`
+	AttemptCount              int64   `json:"attempt_count"`
+	RetryCount                int64   `json:"retry_count"`
+	RetriedCases              int64   `json:"retried_cases"`
+	RetrySuccesses            int64   `json:"retry_successes"`
+	RetrySuccessRate          float64 `json:"retry_success_rate"`
+	InjectedFaults            int64   `json:"injected_faults"`
+	CircuitRejections         int64   `json:"circuit_rejections"`
+	P50MS                     float64 `json:"p50_ms"`
+	P95MS                     float64 `json:"p95_ms"`
+	P99MS                     float64 `json:"p99_ms"`
+	InputTokens               int64   `json:"input_tokens"`
+	OutputTokens              int64   `json:"output_tokens"`
+	InputCostUSD              *string `json:"input_cost_usd"`
+	OutputCostUSD             *string `json:"output_cost_usd"`
+	CostUSD                   *string `json:"cost_usd"`
+	ThresholdsPassed          bool    `json:"thresholds_passed"`
+	UsageComplete             bool    `json:"usage_complete"`
 }
 
 type RunDetail struct {
@@ -230,18 +241,29 @@ type Comparison struct {
 }
 
 type ComparisonDelta struct {
-	SuccessRate  float64  `json:"success_rate"`
-	FailureRate  float64  `json:"failure_rate"`
-	P50MS        float64  `json:"p50_ms"`
-	P50Percent   *float64 `json:"p50_percent"`
-	P95MS        float64  `json:"p95_ms"`
-	P95Percent   *float64 `json:"p95_percent"`
-	P99MS        float64  `json:"p99_ms"`
-	P99Percent   *float64 `json:"p99_percent"`
-	InputTokens  int64    `json:"input_tokens"`
-	OutputTokens int64    `json:"output_tokens"`
-	CostUSD      *string  `json:"cost_usd"`
-	CostPercent  *float64 `json:"cost_percent"`
+	SuccessRate               float64  `json:"success_rate"`
+	FailureRate               float64  `json:"failure_rate"`
+	QualityFailures           int64    `json:"quality_failures"`
+	QualityFailureRate        float64  `json:"quality_failure_rate"`
+	InfrastructureFailures    int64    `json:"infrastructure_failures"`
+	InfrastructureFailureRate float64  `json:"infrastructure_failure_rate"`
+	AttemptCount              int64    `json:"attempt_count"`
+	RetryCount                int64    `json:"retry_count"`
+	RetriedCases              int64    `json:"retried_cases"`
+	RetrySuccesses            int64    `json:"retry_successes"`
+	RetrySuccessRate          float64  `json:"retry_success_rate"`
+	InjectedFaults            int64    `json:"injected_faults"`
+	CircuitRejections         int64    `json:"circuit_rejections"`
+	P50MS                     float64  `json:"p50_ms"`
+	P50Percent                *float64 `json:"p50_percent"`
+	P95MS                     float64  `json:"p95_ms"`
+	P95Percent                *float64 `json:"p95_percent"`
+	P99MS                     float64  `json:"p99_ms"`
+	P99Percent                *float64 `json:"p99_percent"`
+	InputTokens               int64    `json:"input_tokens"`
+	OutputTokens              int64    `json:"output_tokens"`
+	CostUSD                   *string  `json:"cost_usd"`
+	CostPercent               *float64 `json:"cost_percent"`
 }
 
 type ShardReservation struct {

@@ -10,7 +10,9 @@ latency thresholds.
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
 > price-snapshot cost accounting, configurable trace redaction, bounded Prometheus metrics, and a
 > Promptfoo durable replay bridge. The development stack persists traces and metrics and provisions
-> Grafana. M3 is implemented in `v0.3.0-alpha.1`; fault injection and autoscaling remain planned.
+> Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 reliability behavior is available from source
+> and is being validated for `v0.4.0-alpha.1`; the public manifests remain on v0.3 until that release
+> is verified and digest-pinned. Event-driven autoscaling remains planned.
 
 ## Why this project
 
@@ -42,6 +44,8 @@ engineering questions that appear after a workflow becomes a service:
 - Bounded Result API RED/Token/cost Prometheus metrics.
 - A development-only persistent Tempo/Prometheus stack with a provisioned Grafana run drill-down.
 - Optional Promptfoo replay of sensitive durable output without another model call.
+- Source-built deterministic fault scenarios with stable failure categories and per-attempt evidence.
+- Explicit full-Agent retry budgets, Worker-local circuit breakers, and durable partial cancellation.
 
 ## Architecture
 
@@ -212,6 +216,27 @@ omit plus explicitly redacted content. The E2E uses test-only Secrets and replac
 AgentStorm component images with source-built `:dev` images. See [Result API](docs/result-api.md) and
 [observability](docs/observability.md) for the storage and signal contracts.
 
+### Source-built reliability validation
+
+The result-stack E2E uses only the fake Provider to exercise latency, timeout, HTTP, malformed
+response, rate-limit, and tool failures. It also checks deterministic selection across sharding and
+concurrency, conservative and explicitly ambiguous retries, circuit transitions, quality versus
+infrastructure reporting, and durable cancellation:
+
+```bash
+CLUSTER_PROVIDER=kind ENABLE_RELIABILITY_E2E=true make e2e-results-local
+```
+
+Reliability is configured under immutable `spec.reliability`; the scenario document is stored in a
+separate ConfigMap and snapshotted by the Controller before a Job starts. A retry repeats the entire
+Agent execution and can duplicate model charges and tool side effects. Ambiguous timeout, HTTP 5xx,
+and malformed-response retries therefore require an explicit opt-in. Circuit breakers are scoped to
+one Worker process, not the whole Run. See the [FaultScenario contract](docs/fault-scenarios.md).
+
+Setting `spec.cancel: true` first attempts to persist a `cancelled` terminal record, then removes the
+Job. Completed cases remain readable as a partial run; cancellation still completes when the Result
+API is unavailable, with the persistence failure exposed through the CR condition and Event.
+
 ### Optional Promptfoo replay
 
 A completed run can be replayed through Promptfoo without issuing another model request when the
@@ -292,7 +317,7 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Add controlled fault injection and reliability experiments.
+1. Verify and publish the M4 reliability images, then pin the public manifests to their digests.
 2. Add KEDA-based queue scaling and resource-aware scheduling.
 3. Publish Helm charts, reproducible benchmarks, and a public demo.
 

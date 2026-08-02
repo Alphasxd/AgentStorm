@@ -30,6 +30,14 @@ data:
             expr: histogram_quantile(0.95, sum by (le, route) (rate(agentstorm_result_api_http_request_duration_seconds_bucket[5m])))
           - record: agentstorm:result_api_cost_usd:rate5m
             expr: sum by (direction) (rate(agentstorm_result_api_cost_usd_total[5m]))
+          - record: agentstorm:result_api_case_failures:rate5m
+            expr: sum by (category) (rate(agentstorm_result_api_case_failures_total[5m]))
+          - record: agentstorm:result_api_retry_success:ratio5m
+            expr: sum(rate(agentstorm_result_api_retries_total{outcome="succeeded"}[5m])) / clamp_min(sum(rate(agentstorm_result_api_retries_total[5m])), 0.000001)
+          - record: agentstorm:result_api_injected_faults:rate5m
+            expr: sum by (fault) (rate(agentstorm_result_api_injected_faults_total[5m]))
+          - record: agentstorm:result_api_circuit_events:rate5m
+            expr: sum by (event) (rate(agentstorm_result_api_circuit_events_total[5m]))
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

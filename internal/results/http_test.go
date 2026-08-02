@@ -138,6 +138,7 @@ func TestServiceErrorsHaveStableHTTPMappings(t *testing.T) {
 }
 
 func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) {
+	finalizeCalls := 0
 	handler := newTestHandler(t, repositoryStub{
 		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
 			return ShardReservation{Pricing: &RunPricing{
@@ -146,17 +147,37 @@ func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) 
 			}}, nil
 		},
 		finalizeShard: func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error) {
-			return true, nil
+			finalizeCalls++
+			return finalizeCalls == 1, nil
 		},
 	}, objectStoreStub{
 		put: func(context.Context, string, []byte, string, string) error { return nil },
 	})
 	upload := testShard("run-sensitive-id", 0, "case-sensitive-id", false)
-	upload.Cases[0].FailureKind = "provider-secret-material"
+	complete := true
+	upload.Cases[0].FailureKind = "provider"
+	upload.Cases[0].FailureCategory = "provider"
+	upload.Cases[0].ErrorCode = "circuit_open"
+	upload.Cases[0].Assertions = nil
 	upload.Summary.InputTokens = 7
 	upload.Summary.OutputTokens = 11
+	upload.Summary.UsageComplete = &complete
 	upload.Cases[0].InputTokens = 7
 	upload.Cases[0].OutputTokens = 11
+	upload.Cases[0].UsageComplete = &complete
+	upload.Cases[0].Attempts = []AttemptResult{
+		{
+			Number: 1, LatencyMS: 2, Outcome: "failed", FailureCategory: "provider",
+			ErrorCode: "malformed_response", InjectedRule: "sensitive-rule-id",
+			InjectedFault: "malformed_response", Ambiguous: true, RetryDecision: "retry_ambiguous",
+			InputTokens: 7, OutputTokens: 11, UsageComplete: &complete, CircuitEvents: []string{"open"},
+		},
+		{
+			Number: 2, LatencyMS: 0, Outcome: "rejected", FailureCategory: "provider",
+			ErrorCode: "circuit_open", RetryDecision: "not_retryable", UsageComplete: &complete,
+			CircuitEvents: []string{"reject"},
+		},
+	}
 	payload, err := json.Marshal(upload)
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +190,14 @@ func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) 
 	if response.Code != http.StatusCreated {
 		t.Fatalf("upload returned %d: %s", response.Code, response.Body.String())
 	}
+	duplicateRequest := httptest.NewRequest(http.MethodPut, "/v1/runs/run-sensitive-id/shards/0", bytes.NewReader(payload))
+	duplicateRequest.Header.Set("Authorization", "Bearer write-secret")
+	duplicateRequest.Header.Set("Idempotency-Key", "run/run-sensitive-id/shard/0")
+	duplicateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateResponse, duplicateRequest)
+	if duplicateResponse.Code != http.StatusOK {
+		t.Fatalf("duplicate upload returned %d: %s", duplicateResponse.Code, duplicateResponse.Body.String())
+	}
 	unmatchedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unmatchedResponse, httptest.NewRequest("PRIVATE-METHOD", "/private-path", nil))
 
@@ -180,19 +209,29 @@ func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) 
 	metrics := metricsResponse.Body.String()
 	for _, expected := range []string{
 		`agentstorm_result_api_shard_uploads_total{outcome="created"} 1`,
-		`agentstorm_result_api_cases_total{failure_kind="other",result="failure"} 1`,
+		`agentstorm_result_api_shard_uploads_total{outcome="duplicate"} 1`,
+		`agentstorm_result_api_cases_total{failure_kind="provider",result="failure"} 1`,
+		`agentstorm_result_api_case_failures_total{category="provider"} 1`,
+		`agentstorm_result_api_attempts_total{outcome="failed"} 1`,
+		`agentstorm_result_api_attempts_total{outcome="rejected"} 1`,
+		`agentstorm_result_api_retry_decisions_total{decision="retry_ambiguous"} 1`,
+		`agentstorm_result_api_retry_decisions_total{decision="not_retryable"} 1`,
+		`agentstorm_result_api_retries_total{decision="retry_ambiguous",outcome="rejected"} 1`,
+		`agentstorm_result_api_injected_faults_total{fault="malformed_response"} 1`,
+		`agentstorm_result_api_circuit_events_total{event="open"} 1`,
+		`agentstorm_result_api_circuit_events_total{event="reject"} 1`,
 		`agentstorm_result_api_tokens_total{direction="input"} 7`,
 		`agentstorm_result_api_tokens_total{direction="output"} 11`,
 		`agentstorm_result_api_cost_usd_total{direction="input"} 1.4e-05`,
 		`agentstorm_result_api_cost_usd_total{direction="output"} 4.4e-05`,
-		`agentstorm_result_api_http_requests_total{method="PUT",route="PUT /v1/runs/{runID}/shards/{index}",status_class="2xx"} 1`,
+		`agentstorm_result_api_http_requests_total{method="PUT",route="PUT /v1/runs/{runID}/shards/{index}",status_class="2xx"} 2`,
 		`agentstorm_result_api_http_requests_total{method="other",route="unmatched",status_class="4xx"} 1`,
 	} {
 		if !strings.Contains(metrics, expected) {
 			t.Fatalf("metrics do not contain %q:\n%s", expected, metrics)
 		}
 	}
-	for _, forbidden := range []string{"run-sensitive-id", "case-sensitive-id", "provider-secret-material", "write-secret", "PRIVATE-METHOD", "/private-path"} {
+	for _, forbidden := range []string{"run-sensitive-id", "case-sensitive-id", "sensitive-rule-id", "write-secret", "PRIVATE-METHOD", "/private-path"} {
 		if strings.Contains(metrics, forbidden) {
 			t.Fatalf("metrics contain high-cardinality or sensitive value %q", forbidden)
 		}

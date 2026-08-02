@@ -15,7 +15,7 @@ result-read access. The public Kubernetes stack restricts metrics access with Ne
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | none | Process liveness |
 | `GET` | `/readyz` | none | PostgreSQL and object-store readiness |
-| `GET` | `/metrics` | none | Prometheus RED, result, case, token, and cost counters |
+| `GET` | `/metrics` | none | Prometheus RED, result, reliability, token, and cost counters |
 | `PUT` | `/v1/runs/{runID}` | writer | Register immutable run metadata and expected shards |
 | `PUT` | `/v1/runs/{runID}/terminal` | writer | Persist `cancelled` or `harness_failed` without exception text |
 | `PUT` | `/v1/runs/{runID}/shards/{index}` | writer | Persist one complete shard document |
@@ -34,10 +34,12 @@ or terminal status conflicts, and a complete run cannot be moved backwards. Comp
 shards may arrive after a terminal update. `GET /v1/runs/{runID}` then reports `partial: true` and a
 structured `terminal_reason`; Promptfoo and baseline comparison continue to require `complete`.
 
-Run comparison reports candidate-minus-baseline deltas for success and failure rates, P50/P95/P99
-latency, token counts, and derived USD cost. Latency percentage deltas are `null` when the baseline
-value is zero. Cost fields are fixed-precision decimal strings and remain `null` when a run did not
-register an explicit `spec.target.pricing` snapshot; AgentStorm never guesses current provider prices.
+Run comparison reports candidate-minus-baseline deltas for success and failure rates, quality and
+infrastructure failure counts/rates, attempt and retry effectiveness, injected faults, circuit
+rejections, P50/P95/P99 latency, Token counts, and derived USD cost. Percentage deltas are `null`
+when the baseline value is zero. Cost fields are fixed-precision decimal strings and remain `null`
+when a run did not register an explicit `spec.target.pricing` snapshot; AgentStorm never guesses
+current Provider prices.
 Case pages also return ordered tool paths, structured assertion outcomes, attempt history, stable
 failure category/code, and usage completeness. Assertion values and custom messages remain omitted
 unless sensitive result upload was explicitly enabled. A case and run cost remains `null` whenever
@@ -121,7 +123,8 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
 The `:dev` image and disabled NetworkPolicy selectors are intentionally limited to this local
 overlay. `config/dev/telemetry` composes this stack with persistent Prometheus scraping, while
 per-run and per-case investigation remains in Tempo rather than high-cardinality metric labels. The
-public stack uses the `v0.3.0-alpha.1` Result API image-index digest.
+public stack uses the `v0.3.0-alpha.1` Result API image-index digest until the verified M4 release
+is pinned.
 
 ## Sensitive content
 
