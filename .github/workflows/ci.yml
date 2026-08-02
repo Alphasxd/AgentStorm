@@ -180,8 +180,8 @@ jobs:
           KEEP_E2E_RESOURCES: 'false'
           SKIP_IMAGE_BUILD: 'true'
           LOAD_LOCAL_IMAGES: 'false'
-          CONTROLLER_IMAGE: ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef
-          WORKER_IMAGE: ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
+          CONTROLLER_IMAGE: ghcr.io/alphasxd/agentstorm-controller@sha256:28b5ba2bc2a1d2a8fa4e00154483981e1c5459229d44cefbc1a9bab0065f2eb0
+          WORKER_IMAGE: ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
         run: make e2e-local
 
   published-result-stack-smoke:
@@ -206,7 +206,10 @@ jobs:
           KEEP_E2E_RESOURCES: 'false'
           SKIP_IMAGE_BUILD: 'true'
           LOAD_LOCAL_IMAGES: 'false'
-          CONTROLLER_IMAGE: ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef
-          WORKER_IMAGE: ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
-          RESULT_API_IMAGE: ghcr.io/alphasxd/agentstorm-result-api@sha256:e9b90e95e28a8130f166c7ad84f2d44eed455f3601f245ac1b6f83d7947572e8
+          ENABLE_TELEMETRY_E2E: 'true'
+          ENABLE_RELIABILITY_E2E: 'true'
+          EXPECT_COST_ACCOUNTING: 'true'
+          CONTROLLER_IMAGE: ghcr.io/alphasxd/agentstorm-controller@sha256:28b5ba2bc2a1d2a8fa4e00154483981e1c5459229d44cefbc1a9bab0065f2eb0
+          WORKER_IMAGE: ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
+          RESULT_API_IMAGE: ghcr.io/alphasxd/agentstorm-result-api@sha256:b09a346666c08747948f33089c53cf77a0c6c626f8c0242d3098353f4dbd0162
         run: make e2e-results-local

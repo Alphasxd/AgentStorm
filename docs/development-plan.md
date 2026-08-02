@@ -83,7 +83,7 @@ price-snapshot cost accounting, redaction controls, and optional no-model Prompt
 `config/dev/telemetry` runs single-replica Tempo, Prometheus, and Grafana workloads for local
 evaluation; they are not a production HA topology.
 
-## M4: Fault injection and reliability testing — release pending
+## M4: Fault injection and reliability testing — implemented
 
 - [x] Add adapter middleware for latency, timeout, HTTP error, malformed response, rate-limit, and tool-error injection.
 - [x] Add Provider retry budgets, Worker-local circuit-breaker experiments, and durable cancellation propagation.
@@ -96,10 +96,11 @@ Acceptance criteria:
 - [x] A rerun with the same seed selects the same failure points across shard and concurrency layouts.
 - [x] Reports distinguish quality regression from infrastructure instability.
 
-The no-cost source-built result-stack E2E covers all six faults, safe and ambiguous retry policy,
-Token/cost completeness, circuit open/reject/half-open/close transitions, partial cancellation, and
-quality/infrastructure aggregates. M4 remains release-pending until `v0.4.0-alpha.1` is verified on
-both published architectures and the public manifests are pinned to its image-index digests.
+Release `v0.4.0-alpha.1` publishes verified immutable Controller, Worker, and Result API
+multi-architecture images. The no-cost published-image gates cover all six faults, safe and
+ambiguous retry policy, Token/cost completeness, circuit open/reject/half-open/close transitions,
+partial cancellation, and quality/infrastructure aggregates on amd64 and arm64. Public manifests
+pin the verified v0.4 image-index digests.
 
 ## M5: Event-driven scaling and scheduling
 

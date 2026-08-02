@@ -10,9 +10,9 @@ latency thresholds.
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
 > price-snapshot cost accounting, configurable trace redaction, bounded Prometheus metrics, and a
 > Promptfoo durable replay bridge. The development stack persists traces and metrics and provisions
-> Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 reliability behavior is available from source
-> and is being validated for `v0.4.0-alpha.1`; the public manifests remain on v0.3 until that release
-> is verified and digest-pinned. Event-driven autoscaling remains planned.
+> Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 fault injection, conservative full-Agent
+> retry, Worker-local circuit breaking, durable cancellation, and quality/infrastructure reporting
+> are implemented in `v0.4.0-alpha.1`. Event-driven autoscaling remains planned.
 
 ## Why this project
 
@@ -111,7 +111,7 @@ make build
 ## Released Kubernetes quickstart
 
 Prerequisite: `kubectl` access to a Kubernetes cluster. The public manifests use immutable
-`v0.3.0-alpha.1` image-index digests and need no local image build or registry credentials.
+`v0.4.0-alpha.1` image-index digests and need no local image build or registry credentials.
 
 ```bash
 kubectl apply -k config/default
@@ -125,24 +125,24 @@ kubectl get agenttestrun/agentstorm-demo
 The released images are public for anonymous pulls:
 
 ```text
-ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef
-ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
-ghcr.io/alphasxd/agentstorm-result-api@sha256:e9b90e95e28a8130f166c7ad84f2d44eed455f3601f245ac1b6f83d7947572e8
+ghcr.io/alphasxd/agentstorm-controller@sha256:28b5ba2bc2a1d2a8fa4e00154483981e1c5459229d44cefbc1a9bab0065f2eb0
+ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
+ghcr.io/alphasxd/agentstorm-result-api@sha256:b09a346666c08747948f33089c53cf77a0c6c626f8c0242d3098353f4dbd0162
 ```
 
 All three images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
 
 ```bash
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef \
+  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:28b5ba2bc2a1d2a8fa4e00154483981e1c5459229d44cefbc1a9bab0065f2eb0 \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0 \
+  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118 \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:e9b90e95e28a8130f166c7ad84f2d44eed455f3601f245ac1b6f83d7947572e8 \
+  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:b09a346666c08747948f33089c53cf77a0c6c626f8c0242d3098353f4dbd0162 \
   --repo Alphasxd/AgentStorm
 ```
 
@@ -216,15 +216,36 @@ omit plus explicitly redacted content. The E2E uses test-only Secrets and replac
 AgentStorm component images with source-built `:dev` images. See [Result API](docs/result-api.md) and
 [observability](docs/observability.md) for the storage and signal contracts.
 
-### Source-built reliability validation
+### Reliability validation
 
-The result-stack E2E uses only the fake Provider to exercise latency, timeout, HTTP, malformed
-response, rate-limit, and tool failures. It also checks deterministic selection across sharding and
-concurrency, conservative and explicitly ambiguous retries, circuit transitions, quality versus
-infrastructure reporting, and durable cancellation:
+M4 ships in the released images. The no-cost result-stack E2E uses only the fake Provider to
+exercise latency, timeout, HTTP, malformed-response, rate-limit, and tool failures. It also checks
+deterministic selection across sharding and concurrency, conservative and explicitly ambiguous
+retries, circuit transitions, quality versus infrastructure reporting, and durable cancellation:
 
 ```bash
 CLUSTER_PROVIDER=kind ENABLE_RELIABILITY_E2E=true make e2e-results-local
+```
+
+To enable a deterministic scenario for a released Run, apply the sample ConfigMap and add this
+fragment to `spec`:
+
+```bash
+kubectl -n agentstorm-system apply -f config/samples/fault-scenario.yaml
+```
+
+```yaml
+reliability:
+  seed: 42
+  scenarioRef:
+    name: agentstorm-fault-scenario
+    key: scenario.json
+  retry:
+    maxAttempts: 3
+    allowAmbiguousRetries: false
+  circuitBreaker:
+    failureThreshold: 5
+    openDurationMs: 30000
 ```
 
 Reliability is configured under immutable `spec.reliability`; the scenario document is stored in a
@@ -292,7 +313,7 @@ spec:
   telemetry:
     contentMode: omit
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
     imagePullPolicy: IfNotPresent
 ```
 
@@ -317,9 +338,8 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Verify and publish the M4 reliability images, then pin the public manifests to their digests.
-2. Add KEDA-based queue scaling and resource-aware scheduling.
-3. Publish Helm charts, reproducible benchmarks, and a public demo.
+1. Add KEDA-based queue scaling and resource-aware scheduling.
+2. Publish Helm charts, reproducible benchmarks, and a public demo.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

@@ -66,5 +66,5 @@ It uses the fake Provider and validates all supported fault types, same-seed sel
 different shard/concurrency layouts, conservative versus opted-in ambiguous retry, Token/cost
 completeness, every circuit transition, report separation, and partial cancellation.
 
-Until the `v0.4.0-alpha.1` images are published, use Controller and Worker images built from the
-same source revision when exercising this contract.
+The public manifests pin the verified `v0.4.0-alpha.1` Controller, Worker, and Result API
+image-index digests. Keep all three components on the same release when enabling reliability.

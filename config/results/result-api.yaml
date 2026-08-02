@@ -38,7 +38,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: result-api
-          image: ghcr.io/alphasxd/agentstorm-result-api@sha256:e9b90e95e28a8130f166c7ad84f2d44eed455f3601f245ac1b6f83d7947572e8
+          image: ghcr.io/alphasxd/agentstorm-result-api@sha256:b09a346666c08747948f33089c53cf77a0c6c626f8c0242d3098353f4dbd0162
           imagePullPolicy: IfNotPresent
           env:
             - name: AGENTSTORM_DATABASE_URL
