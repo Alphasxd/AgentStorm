@@ -14,6 +14,7 @@ import (
 
 	agentstormv1alpha1 "github.com/Alphasxd/AgentStorm/api/v1alpha1"
 	"github.com/Alphasxd/AgentStorm/internal/reliability"
+	"github.com/Alphasxd/AgentStorm/internal/results"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,10 +112,12 @@ func (c ResultSinkConfig) Enabled() bool {
 // AgentTestRunReconciler turns an AgentTestRun into an indexed Kubernetes Job.
 type AgentTestRunReconciler struct {
 	client.Client
-	APIReader  client.Reader
-	Scheme     *runtime.Scheme
-	ResultSink ResultSinkConfig
-	Telemetry  TelemetryConfig
+	APIReader    client.Reader
+	Scheme       *runtime.Scheme
+	ResultSink   ResultSinkConfig
+	Telemetry    TelemetryConfig
+	ResultWriter ResultWriter
+	Recorder     record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=agentstorm.io,resources=agenttestruns,verbs=get;list;watch;create;update;patch;delete
@@ -143,6 +147,24 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	jobName := childName(run.Name, "worker")
 	if run.Spec.Cancel {
+		if r.ResultSink.Enabled() {
+			if err := r.persistTerminal(ctx, run, results.TerminalRequest{
+				Status: results.RunCancelled, ReasonCode: "cancellation_requested",
+			}); err != nil {
+				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+					Type: conditionResultSink, Status: metav1.ConditionFalse, Reason: "TerminalWriteFailed",
+					Message: "run cancellation could not be persisted to the durable result sink", ObservedGeneration: run.Generation,
+				})
+				if r.Recorder != nil {
+					r.Recorder.Event(run, corev1.EventTypeWarning, "ResultTerminalWriteFailed", "durable cancellation could not be persisted")
+				}
+			} else {
+				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+					Type: conditionResultSink, Status: metav1.ConditionTrue, Reason: "CancelledPersisted",
+					Message: "run cancellation was persisted to the durable result sink", ObservedGeneration: run.Generation,
+				})
+			}
+		}
 		if err := r.cancelJob(ctx, run.Namespace, jobName); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -257,6 +279,31 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.ensureWorkerConfig(ctx, run, scenario); err != nil {
 		return ctrl.Result{}, err
 	}
+	if r.ResultSink.Enabled() {
+		token, err := r.resultWriteToken(ctx, run)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		writer := r.ResultWriter
+		if writer == nil {
+			writer = NewHTTPResultWriter(r.ResultSink)
+		}
+		if err := writer.Register(ctx, string(run.UID), token, buildResultRegistration(run, scenario)); err != nil {
+			run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+				Type: conditionResultSink, Status: metav1.ConditionFalse, Reason: "RegistrationFailed",
+				Message: "run registration with the durable result sink failed", ObservedGeneration: run.Generation,
+			})
+			if err := r.patchStatus(ctx, before, run); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionResultSink, Status: metav1.ConditionTrue, Reason: "Registered",
+			Message: "run is registered with the durable result sink", ObservedGeneration: run.Generation,
+		})
+	}
 
 	job, created, err := r.ensureJob(ctx, run)
 	if err != nil {
@@ -312,12 +359,46 @@ func (r *AgentTestRunReconciler) resultSinkReady(ctx context.Context, run *agent
 	if err != nil {
 		return false, "", "", err
 	}
-	if _, exists := secret.Data[r.ResultSink.WriteTokenSecretKey]; !exists {
-		if _, exists = secret.StringData[r.ResultSink.WriteTokenSecretKey]; !exists {
-			return false, "KeyMissing", "result sink write-token Secret key is not available", nil
-		}
+	if value, exists := secret.Data[r.ResultSink.WriteTokenSecretKey]; exists && len(value) > 0 {
+		return true, "Available", "result sink write-token Secret is available", nil
 	}
-	return true, "Available", "result sink write-token Secret is available", nil
+	if value, exists := secret.StringData[r.ResultSink.WriteTokenSecretKey]; exists && strings.TrimSpace(value) != "" {
+		return true, "Available", "result sink write-token Secret is available", nil
+	}
+	return false, "KeyMissing", "result sink write-token Secret key is not available", nil
+}
+
+func (r *AgentTestRunReconciler) resultWriteToken(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) ([]byte, error) {
+	secret := &corev1.Secret{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{
+		Namespace: run.Namespace,
+		Name:      r.ResultSink.WriteTokenSecretName,
+	}, secret); err != nil {
+		return nil, err
+	}
+	if value := secret.Data[r.ResultSink.WriteTokenSecretKey]; len(value) > 0 {
+		return append([]byte(nil), value...), nil
+	}
+	if value := secret.StringData[r.ResultSink.WriteTokenSecretKey]; strings.TrimSpace(value) != "" {
+		return []byte(value), nil
+	}
+	return nil, fmt.Errorf("result sink write token is unavailable")
+}
+
+func (r *AgentTestRunReconciler) persistTerminal(ctx context.Context, run *agentstormv1alpha1.AgentTestRun, terminal results.TerminalRequest) error {
+	token, err := r.resultWriteToken(ctx, run)
+	if err != nil {
+		return err
+	}
+	writer := r.ResultWriter
+	if writer == nil {
+		writer = NewHTTPResultWriter(r.ResultSink)
+	}
+	return writer.Terminal(ctx, string(run.UID), token, terminal)
 }
 
 func (r *AgentTestRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -690,6 +771,7 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig,
 	if resultSink.Enabled() {
 		env = append(env,
 			corev1.EnvVar{Name: "AGENTSTORM_RESULT_API_URL", Value: resultSink.URL},
+			corev1.EnvVar{Name: "AGENTSTORM_RESULT_PRE_REGISTERED", Value: "true"},
 			corev1.EnvVar{
 				Name: "AGENTSTORM_RESULT_WRITE_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
@@ -721,8 +803,9 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					RestartPolicy:                corev1.RestartPolicyNever,
-					AutomountServiceAccountToken: ptr.To(false),
+					RestartPolicy:                 corev1.RestartPolicyNever,
+					TerminationGracePeriodSeconds: ptr.To[int64](30),
+					AutomountServiceAccountToken:  ptr.To(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},

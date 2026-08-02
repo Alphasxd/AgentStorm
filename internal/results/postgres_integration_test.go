@@ -159,6 +159,67 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 
 func stringPointer(value string) *string { return &value }
 
+func TestTerminalRunRemainsPartialAfterLateShard(t *testing.T) {
+	databaseURL := os.Getenv("AGENTSTORM_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENTSTORM_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := ApplyMigrations(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	runID := fmt.Sprintf("terminal-%d", time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM agentstorm_runs WHERE id = $1`, runID) })
+	service := NewService(NewPostgresRepository(pool), &captureObjectStore{})
+	registration := testRegistration(2)
+	registration.Target.Pricing = &RunPricing{
+		InputUSDPerMillionTokens: "2", OutputUSDPerMillionTokens: "4",
+	}
+	if _, err := service.RegisterRun(ctx, runID, "run/"+runID, registration); err != nil {
+		t.Fatal(err)
+	}
+	terminal := TerminalRequest{Status: RunCancelled, ReasonCode: "user_requested"}
+	key := "run/" + runID + "/terminal/cancelled"
+	result, err := service.TerminateRun(ctx, runID, key, terminal)
+	if err != nil || !result.Created {
+		t.Fatalf("terminal result=%#v err=%v", result, err)
+	}
+	result, err = service.TerminateRun(ctx, runID, key, terminal)
+	if err != nil || result.Created {
+		t.Fatalf("duplicate terminal result=%#v err=%v", result, err)
+	}
+	if _, err := service.TerminateRun(ctx, runID, key, TerminalRequest{
+		Status: RunCancelled, ReasonCode: "different_reason",
+	}); err != ErrConflict {
+		t.Fatalf("different terminal content should conflict, got %v", err)
+	}
+	incomplete := false
+	partial := testShard(runID, 0, "partial", true)
+	partial.Cases[0].InputTokens = 7
+	partial.Cases[0].UsageComplete = &incomplete
+	partial.Summary.InputTokens = 7
+	partial.Summary.UsageComplete = &incomplete
+	if _, err := service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", partial); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := service.GetRun(ctx, runID)
+	if err != nil || detail.Status != RunCancelled || !detail.Partial || detail.ReceivedShards != 1 ||
+		detail.TerminalReason == nil || detail.TerminalReason.ReasonCode != "user_requested" {
+		t.Fatalf("terminal detail=%#v err=%v", detail, err)
+	}
+	if detail.Summary == nil || detail.Summary.UsageComplete || detail.Summary.CostUSD != nil {
+		t.Fatalf("unknown attempt usage must keep aggregate cost null: %#v", detail.Summary)
+	}
+	if _, err := service.Compare(ctx, runID, runID); err != ErrNotReady {
+		t.Fatalf("terminal run must not be comparable, got %v", err)
+	}
+}
+
 type captureObjectStore struct {
 	mutex sync.Mutex
 	keys  []string

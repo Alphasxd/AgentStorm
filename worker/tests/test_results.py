@@ -5,15 +5,20 @@ import unittest
 from typing import Any
 
 from agentstorm_worker.config import (
+    CircuitBreakerConfig,
     DatasetConfig,
     EvaluationConfig,
+    FaultRuleConfig,
+    FaultScenarioConfig,
+    PricingConfig,
+    ReliabilityConfig,
+    RetryConfig,
     RunConfig,
     SourceConfig,
     TargetConfig,
     WorkloadConfig,
-    PricingConfig,
 )
-from agentstorm_worker.models import AssertionOutcome, CaseResult, RunSummary
+from agentstorm_worker.models import AssertionOutcome, AttemptResult, CaseResult, RunSummary
 from agentstorm_worker.results import ResultClient, ResultSinkConfig
 
 
@@ -84,6 +89,18 @@ class ResultClientTest(unittest.TestCase):
             error="private error",
             input_tokens=3,
             output_tokens=5,
+            failure_category="evaluation",
+            error_code="assertion_failed",
+            attempts=[
+                AttemptResult(
+                    number=1,
+                    latency_ms=8,
+                    outcome="succeeded",
+                    retry_decision="not_needed",
+                    input_tokens=3,
+                    output_tokens=5,
+                )
+            ],
             tool_path=["safe.lookup"],
             assertions=[
                 AssertionOutcome(
@@ -114,6 +131,9 @@ class ResultClientTest(unittest.TestCase):
             case["idempotency_key"], "run/run-1/case/case+with+space/iteration/0"
         )
         self.assertEqual(case["failure_kind"], "assertion")
+        self.assertEqual(case["failure_category"], "evaluation")
+        self.assertEqual(case["error_code"], "assertion_failed")
+        self.assertEqual(case["attempts"][0]["number"], 1)
         self.assertEqual(case["tool_path"], ["safe.lookup"])
         self.assertEqual(
             case["assertions"],
@@ -202,6 +222,73 @@ class ResultClientTest(unittest.TestCase):
                 "input_usd_per_million_tokens": "2.5",
                 "output_usd_per_million_tokens": "10",
             },
+        )
+
+    def test_registers_full_reliability_snapshot(self) -> None:
+        opener = RecordingOpener()
+        client = ResultClient(
+            ResultSinkConfig(base_url="http://results.example", write_token="test-token"),
+            opener=opener,
+        )
+        base = run_config()
+        config = RunConfig(
+            run_id=base.run_id,
+            source=base.source,
+            dataset=base.dataset,
+            target=base.target,
+            workload=base.workload,
+            evaluation=base.evaluation,
+            reliability=ReliabilityConfig(
+                seed=42,
+                retry=RetryConfig(max_attempts=3, jitter_ratio=0.2),
+                circuit_breaker=CircuitBreakerConfig(5, 30000),
+                scenario=FaultScenarioConfig(
+                    source_name="faults",
+                    source_key="scenario.json",
+                    digest="sha256:" + "a" * 64,
+                    rules=(
+                        FaultRuleConfig(
+                            name="first",
+                            fault="rate_limit",
+                            probability=0.25,
+                            case_ids=("case-a",),
+                            iterations=(0,),
+                            attempts=(1,),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        client.register_run(config, expected_shards=2)
+
+        reliability = json.loads(opener.requests[0][0].data)["reliability"]
+        self.assertEqual(reliability["seed"], 42)
+        self.assertEqual(reliability["retry"]["max_attempts"], 3)
+        self.assertEqual(reliability["circuit_breaker"]["failure_threshold"], 5)
+        self.assertEqual(reliability["scenario"]["source"]["name"], "faults")
+        self.assertEqual(
+            reliability["scenario"]["document"]["rules"][0]["caseIDs"],
+            ["case-a"],
+        )
+
+    def test_marks_terminal_without_error_content(self) -> None:
+        opener = RecordingOpener()
+        client = ResultClient(
+            ResultSinkConfig(base_url="http://results.example", write_token="test-token"),
+            opener=opener,
+        )
+
+        client.mark_terminal("run-1", "cancelled", "worker_terminated")
+
+        request, _ = opener.requests[0]
+        self.assertTrue(request.full_url.endswith("/v1/runs/run-1/terminal"))
+        self.assertEqual(
+            request.get_header("Idempotency-key"), "run/run-1/terminal/cancelled"
+        )
+        self.assertEqual(
+            json.loads(request.data),
+            {"status": "cancelled", "reason_code": "worker_terminated"},
         )
 
 

@@ -65,10 +65,33 @@ func (h *HTTPHandler) routes() {
 	h.mux.HandleFunc("GET /readyz", h.ready)
 	h.mux.Handle("GET /metrics", h.metricsAPI)
 	h.mux.HandleFunc("PUT /v1/runs/{runID}", h.requireWrite(h.registerRun))
+	h.mux.HandleFunc("PUT /v1/runs/{runID}/terminal", h.requireWrite(h.terminateRun))
 	h.mux.HandleFunc("PUT /v1/runs/{runID}/shards/{index}", h.requireWrite(h.uploadShard))
 	h.mux.HandleFunc("GET /v1/runs/{runID}", h.requireRead(h.getRun))
 	h.mux.HandleFunc("GET /v1/runs/{runID}/cases", h.requireRead(h.listCases))
 	h.mux.HandleFunc("GET /v1/comparisons", h.requireRead(h.compare))
+}
+
+func (h *HTTPHandler) terminateRun(writer http.ResponseWriter, request *http.Request) {
+	var terminal TerminalRequest
+	if err := decodeJSON(writer, request, &terminal); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	result, err := h.service.TerminateRun(
+		request.Context(), request.PathValue("runID"), request.Header.Get("Idempotency-Key"), terminal,
+	)
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	status := http.StatusOK
+	if result.Created {
+		status = http.StatusCreated
+	}
+	writeJSON(writer, status, map[string]any{
+		"run_id": request.PathValue("runID"), "status": terminal.Status, "created": result.Created,
+	})
 }
 
 func (h *HTTPHandler) requireWrite(next http.HandlerFunc) http.HandlerFunc {

@@ -88,6 +88,7 @@ import sys
 run = json.load(open(sys.argv[1], encoding="utf-8"))
 assert run["status"] == "collecting", run
 assert run["received_shards"] == 1, run
+assert run["partial"] is True, run
 PY
 
 run_shard 1
@@ -105,12 +106,17 @@ run = json.load(open(sys.argv[1], encoding="utf-8"))
 page = json.load(open(sys.argv[2], encoding="utf-8"))
 assert run["status"] == "complete", run
 assert run["received_shards"] == 2, run
+assert run["partial"] is False, run
 assert run["summary"]["total"] == 2, run
 assert run["summary"]["succeeded"] == 2, run
+assert run["summary"]["usage_complete"] is True, run
 assert len(page["cases"]) == 2, page
 for case in page["cases"]:
     assert "output" not in case, case
     assert "error" not in case, case
+    assert case["usage_complete"] is True, case
+    assert len(case["attempts"]) == 1, case
+    assert case["attempts"][0]["outcome"] == "succeeded", case
 PY
 
 echo "Result pipeline integration passed: run_id=$run_id"

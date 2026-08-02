@@ -93,6 +93,26 @@ func TestRegistrationRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestTerminalEndpointIsWriteAuthenticatedAndIdempotent(t *testing.T) {
+	handler := newTestHandler(t, repositoryStub{
+		terminateRun: func(_ context.Context, runID, key, hash string, terminal TerminalRequest) (bool, error) {
+			if runID != "run-1" || key != "run/run-1/terminal/cancelled" || hash == "" || terminal.ReasonCode != "user_requested" {
+				t.Fatalf("unexpected terminal request")
+			}
+			return true, nil
+		},
+	}, objectStoreStub{})
+	payload := bytes.NewBufferString(`{"status":"cancelled","reason_code":"user_requested"}`)
+	request := httptest.NewRequest(http.MethodPut, "/v1/runs/run-1/terminal", payload)
+	request.Header.Set("Authorization", "Bearer write-secret")
+	request.Header.Set("Idempotency-Key", "run/run-1/terminal/cancelled")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("terminal endpoint returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestServiceErrorsHaveStableHTTPMappings(t *testing.T) {
 	handler := newTestHandler(t, repositoryStub{
 		getRun:  func(context.Context, string) (RunDetail, error) { return RunDetail{}, ErrNotFound },

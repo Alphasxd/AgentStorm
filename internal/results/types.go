@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Alphasxd/AgentStorm/internal/reliability"
 )
 
 const SchemaVersion = "v1alpha1"
@@ -32,12 +34,45 @@ func validationErrorf(format string, arguments ...any) error {
 }
 
 type Registration struct {
-	SchemaVersion  string     `json:"schema_version"`
-	ExpectedShards int        `json:"expected_shards"`
-	Source         RunSource  `json:"source"`
-	Target         RunTarget  `json:"target"`
-	Dataset        RunDataset `json:"dataset"`
-	Evaluation     Evaluation `json:"evaluation"`
+	SchemaVersion  string          `json:"schema_version"`
+	ExpectedShards int             `json:"expected_shards"`
+	Source         RunSource       `json:"source"`
+	Target         RunTarget       `json:"target"`
+	Dataset        RunDataset      `json:"dataset"`
+	Evaluation     Evaluation      `json:"evaluation"`
+	Reliability    *RunReliability `json:"reliability,omitempty"`
+}
+
+type RunReliability struct {
+	Seed           *int64                    `json:"seed,omitempty"`
+	Retry          RunRetry                  `json:"retry"`
+	CircuitBreaker *RunCircuitBreaker        `json:"circuit_breaker,omitempty"`
+	Scenario       *RunFaultScenarioSnapshot `json:"scenario,omitempty"`
+}
+
+type RunRetry struct {
+	MaxAttempts            int32   `json:"max_attempts"`
+	InitialBackoffMS       int64   `json:"initial_backoff_ms"`
+	MaxBackoffMS           int64   `json:"max_backoff_ms"`
+	MaxCumulativeBackoffMS int64   `json:"max_cumulative_backoff_ms"`
+	JitterRatio            float64 `json:"jitter_ratio"`
+	AllowAmbiguousRetries  bool    `json:"allow_ambiguous_retries"`
+}
+
+type RunCircuitBreaker struct {
+	FailureThreshold int32 `json:"failure_threshold"`
+	OpenDurationMS   int64 `json:"open_duration_ms"`
+}
+
+type RunFaultScenarioSnapshot struct {
+	Source   RunScenarioSource         `json:"source"`
+	Digest   string                    `json:"digest"`
+	Document reliability.FaultScenario `json:"document"`
+}
+
+type RunScenarioSource struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 type RunSource struct {
@@ -74,30 +109,52 @@ type ShardUpload struct {
 }
 
 type ShardSummary struct {
-	Total        int     `json:"total"`
-	Succeeded    int     `json:"succeeded"`
-	Failed       int     `json:"failed"`
-	DurationMS   float64 `json:"duration_ms"`
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
+	Total         int     `json:"total"`
+	Succeeded     int     `json:"succeeded"`
+	Failed        int     `json:"failed"`
+	DurationMS    float64 `json:"duration_ms"`
+	InputTokens   int64   `json:"input_tokens"`
+	OutputTokens  int64   `json:"output_tokens"`
+	UsageComplete *bool   `json:"usage_complete,omitempty"`
 }
 
 type CaseResult struct {
-	IdempotencyKey string            `json:"idempotency_key"`
-	CaseID         string            `json:"case_id"`
-	Iteration      int               `json:"iteration"`
-	Success        bool              `json:"success"`
-	LatencyMS      float64           `json:"latency_ms"`
-	InputTokens    int64             `json:"input_tokens"`
-	OutputTokens   int64             `json:"output_tokens"`
-	FailureKind    string            `json:"failure_kind,omitempty"`
-	Output         *string           `json:"output,omitempty"`
-	Error          *string           `json:"error,omitempty"`
-	ToolPath       []string          `json:"tool_path,omitempty"`
-	Assertions     []AssertionResult `json:"assertions,omitempty"`
-	InputCostUSD   *string           `json:"input_cost_usd"`
-	OutputCostUSD  *string           `json:"output_cost_usd"`
-	CostUSD        *string           `json:"cost_usd"`
+	IdempotencyKey  string            `json:"idempotency_key"`
+	CaseID          string            `json:"case_id"`
+	Iteration       int               `json:"iteration"`
+	Success         bool              `json:"success"`
+	LatencyMS       float64           `json:"latency_ms"`
+	InputTokens     int64             `json:"input_tokens"`
+	OutputTokens    int64             `json:"output_tokens"`
+	FailureKind     string            `json:"failure_kind,omitempty"`
+	FailureCategory string            `json:"failure_category,omitempty"`
+	ErrorCode       string            `json:"error_code,omitempty"`
+	Attempts        []AttemptResult   `json:"attempts,omitempty"`
+	UsageComplete   *bool             `json:"usage_complete,omitempty"`
+	Output          *string           `json:"output,omitempty"`
+	Error           *string           `json:"error,omitempty"`
+	ToolPath        []string          `json:"tool_path,omitempty"`
+	Assertions      []AssertionResult `json:"assertions,omitempty"`
+	InputCostUSD    *string           `json:"input_cost_usd"`
+	OutputCostUSD   *string           `json:"output_cost_usd"`
+	CostUSD         *string           `json:"cost_usd"`
+}
+
+type AttemptResult struct {
+	Number          int      `json:"number"`
+	LatencyMS       float64  `json:"latency_ms"`
+	Outcome         string   `json:"outcome"`
+	FailureCategory string   `json:"failure_category,omitempty"`
+	ErrorCode       string   `json:"error_code,omitempty"`
+	InjectedRule    string   `json:"injected_rule,omitempty"`
+	InjectedFault   string   `json:"injected_fault,omitempty"`
+	Ambiguous       bool     `json:"ambiguous"`
+	RetryDecision   string   `json:"retry_decision"`
+	BackoffMS       int64    `json:"backoff_ms"`
+	InputTokens     int64    `json:"input_tokens"`
+	OutputTokens    int64    `json:"output_tokens"`
+	UsageComplete   *bool    `json:"usage_complete,omitempty"`
+	CircuitEvents   []string `json:"circuit_events,omitempty"`
 }
 
 type AssertionResult struct {
@@ -111,9 +168,22 @@ type AssertionResult struct {
 type RunStatus string
 
 const (
-	RunCollecting RunStatus = "collecting"
-	RunComplete   RunStatus = "complete"
+	RunCollecting    RunStatus = "collecting"
+	RunComplete      RunStatus = "complete"
+	RunCancelled     RunStatus = "cancelled"
+	RunHarnessFailed RunStatus = "harness_failed"
 )
+
+type TerminalRequest struct {
+	Status     RunStatus `json:"status"`
+	ReasonCode string    `json:"reason_code"`
+}
+
+type TerminalReason struct {
+	Status     RunStatus `json:"status"`
+	ReasonCode string    `json:"reason_code"`
+	At         time.Time `json:"at"`
+}
 
 type Aggregate struct {
 	Total            int64   `json:"total"`
@@ -130,17 +200,20 @@ type Aggregate struct {
 	OutputCostUSD    *string `json:"output_cost_usd"`
 	CostUSD          *string `json:"cost_usd"`
 	ThresholdsPassed bool    `json:"thresholds_passed"`
+	UsageComplete    bool    `json:"usage_complete"`
 }
 
 type RunDetail struct {
-	ID             string       `json:"id"`
-	Registration   Registration `json:"registration"`
-	Status         RunStatus    `json:"status"`
-	ReceivedShards int          `json:"received_shards"`
-	Summary        *Aggregate   `json:"summary,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	CompletedAt    *time.Time   `json:"completed_at,omitempty"`
+	ID             string          `json:"id"`
+	Registration   Registration    `json:"registration"`
+	Status         RunStatus       `json:"status"`
+	ReceivedShards int             `json:"received_shards"`
+	Summary        *Aggregate      `json:"summary,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	Partial        bool            `json:"partial"`
+	TerminalReason *TerminalReason `json:"terminal_reason,omitempty"`
 }
 
 type CasePage struct {
@@ -182,9 +255,14 @@ type ShardResult struct {
 	OutputCostUSD *string
 }
 
+type TerminalResult struct {
+	Created bool
+}
+
 type Repository interface {
 	Ready(context.Context) error
 	RegisterRun(context.Context, string, string, string, Registration) (bool, error)
+	TerminateRun(context.Context, string, string, string, TerminalRequest) (bool, error)
 	ReserveShard(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error)
 	FinalizeShard(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error)
 	GetRun(context.Context, string) (RunDetail, error)

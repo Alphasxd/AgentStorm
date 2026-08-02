@@ -16,6 +16,9 @@ spec:
               app.kubernetes.io/name: agentstorm-worker
         - podSelector:
             matchLabels:
+              app.kubernetes.io/name: agentstorm-controller
+        - podSelector:
+            matchLabels:
               agentstorm.io/result-reader: "true"
         - podSelector:
             matchLabels:

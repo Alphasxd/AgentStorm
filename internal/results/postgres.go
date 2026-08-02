@@ -101,6 +101,50 @@ func (r *PostgresRepository) RegisterRun(ctx context.Context, runID, key, hash s
 	return false, nil
 }
 
+func (r *PostgresRepository) TerminateRun(ctx context.Context, runID, key, hash string, terminal TerminalRequest) (bool, error) {
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin terminal update: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+
+	var status RunStatus
+	var existingKey, existingHash *string
+	if err := transaction.QueryRow(ctx, `
+		SELECT status, terminal_key, terminal_hash
+		FROM agentstorm_runs
+		WHERE id = $1
+		FOR UPDATE`, runID).Scan(&status, &existingKey, &existingHash); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, fmt.Errorf("read run terminal state: %w", err)
+	}
+	if status == RunComplete {
+		return false, ErrConflict
+	}
+	if status == RunCancelled || status == RunHarnessFailed {
+		if existingKey == nil || existingHash == nil || *existingKey != key || *existingHash != hash || status != terminal.Status {
+			return false, ErrConflict
+		}
+		if err := transaction.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit duplicate terminal update: %w", err)
+		}
+		return false, nil
+	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE agentstorm_runs
+		SET status = $2, terminal_key = $3, terminal_hash = $4,
+		    terminal_reason_code = $5, terminal_at = now(), updated_at = now()
+		WHERE id = $1`, runID, terminal.Status, key, hash, terminal.ReasonCode); err != nil {
+		return false, fmt.Errorf("persist terminal update: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit terminal update: %w", err)
+	}
+	return true, nil
+}
+
 func (r *PostgresRepository) ReserveShard(
 	ctx context.Context,
 	runID string,
@@ -224,9 +268,12 @@ func (r *PostgresRepository) FinalizeShard(
 	}
 
 	for _, item := range cases {
-		inputCost, outputCost, totalCost, err := costsForTokens(
-			pricing, item.InputTokens, item.OutputTokens,
-		)
+		var inputCost, outputCost, totalCost *string
+		if usageComplete(item.UsageComplete) {
+			inputCost, outputCost, totalCost, err = costsForTokens(
+				pricing, item.InputTokens, item.OutputTokens,
+			)
+		}
 		if err != nil {
 			return false, fmt.Errorf("calculate case cost: %w", err)
 		}
@@ -237,6 +284,10 @@ func (r *PostgresRepository) FinalizeShard(
 		if err != nil {
 			return false, fmt.Errorf("marshal case assertions: %w", err)
 		}
+		attemptsPayload, err := json.Marshal(item.Attempts)
+		if err != nil {
+			return false, fmt.Errorf("marshal case attempts: %w", err)
+		}
 		itemHash, err := contentHash(item)
 		if err != nil {
 			return false, fmt.Errorf("hash case result: %w", err)
@@ -246,14 +297,16 @@ func (r *PostgresRepository) FinalizeShard(
 			INSERT INTO agentstorm_case_results
 				(run_id, case_id, iteration, shard_index, idempotency_key, payload_hash,
 				 success, latency_ms, input_tokens, output_tokens, failure_kind, output, error,
-				 tool_path, assertions, input_cost_usd, output_cost_usd, cost_usd)
+				 tool_path, assertions, input_cost_usd, output_cost_usd, cost_usd,
+				 failure_category, error_code, attempts, usage_complete)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			        $16, $17, $18)
+			        $16, $17, $18, $19, $20, $21, $22)
 			ON CONFLICT DO NOTHING
 			RETURNING case_id`, runID, item.CaseID, item.Iteration, shardIndex, item.IdempotencyKey,
 			itemHash, item.Success, item.LatencyMS, item.InputTokens, item.OutputTokens,
 			item.FailureKind, item.Output, item.Error, item.ToolPath, assertionsPayload,
-			item.InputCostUSD, item.OutputCostUSD, item.CostUSD).Scan(&inserted)
+			item.InputCostUSD, item.OutputCostUSD, item.CostUSD, item.FailureCategory,
+			item.ErrorCode, attemptsPayload, usageComplete(item.UsageComplete)).Scan(&inserted)
 		if err == nil {
 			continue
 		}
@@ -306,7 +359,8 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			COALESCE(sum(output_tokens), 0),
 			CASE WHEN count(*) > 0 AND count(input_cost_usd) = count(*) THEN sum(input_cost_usd)::text END,
 			CASE WHEN count(*) > 0 AND count(output_cost_usd) = count(*) THEN sum(output_cost_usd)::text END,
-			CASE WHEN count(*) > 0 AND count(cost_usd) = count(*) THEN sum(cost_usd)::text END
+			CASE WHEN count(*) > 0 AND count(cost_usd) = count(*) THEN sum(cost_usd)::text END,
+			COALESCE(bool_and(usage_complete), true)
 		FROM agentstorm_case_results
 		WHERE run_id = $1`, runID).Scan(
 		&aggregate.Total,
@@ -320,6 +374,7 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 		&aggregate.InputCostUSD,
 		&aggregate.OutputCostUSD,
 		&aggregate.CostUSD,
+		&aggregate.UsageComplete,
 	); err != nil {
 		return fmt.Errorf("aggregate run: %w", err)
 	}
@@ -349,8 +404,8 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 		INSERT INTO agentstorm_run_summaries
 			(run_id, total, succeeded, failed, success_rate, failure_rate, p50_ms, p95_ms,
 			 p99_ms, input_tokens, output_tokens, thresholds_passed,
-			 input_cost_usd, output_cost_usd, cost_usd)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			 input_cost_usd, output_cost_usd, cost_usd, usage_complete)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (run_id) DO UPDATE SET
 			total = EXCLUDED.total,
 			succeeded = EXCLUDED.succeeded,
@@ -366,10 +421,11 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			input_cost_usd = EXCLUDED.input_cost_usd,
 			output_cost_usd = EXCLUDED.output_cost_usd,
 			cost_usd = EXCLUDED.cost_usd,
+			usage_complete = EXCLUDED.usage_complete,
 			updated_at = now()`, runID, aggregate.Total, aggregate.Succeeded, aggregate.Failed,
 		aggregate.SuccessRate, aggregate.FailureRate, aggregate.P50MS, aggregate.P95MS,
 		aggregate.P99MS, aggregate.InputTokens, aggregate.OutputTokens, aggregate.ThresholdsPassed,
-		aggregate.InputCostUSD, aggregate.OutputCostUSD, aggregate.CostUSD); err != nil {
+		aggregate.InputCostUSD, aggregate.OutputCostUSD, aggregate.CostUSD, aggregate.UsageComplete); err != nil {
 		return fmt.Errorf("persist run aggregate: %w", err)
 	}
 
@@ -381,8 +437,13 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 	}
 	if _, err := transaction.Exec(ctx, `
 		UPDATE agentstorm_runs
-		SET status = $2, updated_at = now(),
-		    completed_at = CASE WHEN $2 = 'complete' THEN COALESCE(completed_at, $3) ELSE completed_at END
+		SET status = CASE WHEN status IN ('cancelled', 'harness_failed') THEN status ELSE $2 END,
+		    updated_at = now(),
+		    completed_at = CASE
+		        WHEN status NOT IN ('cancelled', 'harness_failed') AND $2 = 'complete'
+		        THEN COALESCE(completed_at, $3)
+		        ELSE completed_at
+		    END
 		WHERE id = $1`, runID, status, completedAt); err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
@@ -407,17 +468,22 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 	var registrationPayload []byte
 	var summary Aggregate
 	var summaryPresent bool
+	var expectedShards int
+	var terminalReason *string
+	var terminalAt *time.Time
 	err := r.pool.QueryRow(ctx, `
 		SELECT r.id, r.registration, r.status,
 		       count(sr.shard_index) FILTER (WHERE sr.status = 'complete'),
 		       r.created_at, r.updated_at, r.completed_at,
+		       r.expected_shards, r.terminal_reason_code, r.terminal_at,
 		       (rs.run_id IS NOT NULL),
 		       COALESCE(rs.total, 0), COALESCE(rs.succeeded, 0), COALESCE(rs.failed, 0),
 		       COALESCE(rs.success_rate, 0), COALESCE(rs.failure_rate, 0),
 		       COALESCE(rs.p50_ms, 0), COALESCE(rs.p95_ms, 0), COALESCE(rs.p99_ms, 0),
 		       COALESCE(rs.input_tokens, 0), COALESCE(rs.output_tokens, 0),
 		       COALESCE(rs.thresholds_passed, false),
-		       rs.input_cost_usd::text, rs.output_cost_usd::text, rs.cost_usd::text
+		       rs.input_cost_usd::text, rs.output_cost_usd::text, rs.cost_usd::text,
+		       COALESCE(rs.usage_complete, true)
 		FROM agentstorm_runs r
 		LEFT JOIN agentstorm_shard_receipts sr ON sr.run_id = r.id
 		LEFT JOIN agentstorm_run_summaries rs ON rs.run_id = r.id
@@ -430,6 +496,9 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		&detail.CreatedAt,
 		&detail.UpdatedAt,
 		&detail.CompletedAt,
+		&expectedShards,
+		&terminalReason,
+		&terminalAt,
 		&summaryPresent,
 		&summary.Total,
 		&summary.Succeeded,
@@ -445,6 +514,7 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		&summary.InputCostUSD,
 		&summary.OutputCostUSD,
 		&summary.CostUSD,
+		&summary.UsageComplete,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -457,6 +527,13 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 	}
 	if summaryPresent {
 		detail.Summary = &summary
+	}
+	detail.Partial = detail.Status == RunCancelled || detail.Status == RunHarnessFailed ||
+		(detail.Status == RunCollecting && detail.ReceivedShards > 0 && detail.ReceivedShards < expectedShards)
+	if terminalReason != nil && terminalAt != nil {
+		detail.TerminalReason = &TerminalReason{
+			Status: detail.Status, ReasonCode: *terminalReason, At: *terminalAt,
+		}
 	}
 	return detail, nil
 }
@@ -485,7 +562,8 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 	rows, err := r.pool.Query(ctx, `
 		SELECT idempotency_key, case_id, iteration, success, latency_ms,
 		       input_tokens, output_tokens, failure_kind, output, error, tool_path, assertions,
-		       input_cost_usd::text, output_cost_usd::text, cost_usd::text
+		       input_cost_usd::text, output_cost_usd::text, cost_usd::text,
+		       failure_category, error_code, attempts, usage_complete
 		FROM agentstorm_case_results
 		WHERE run_id = $1
 		  AND ($2::boolean = false OR success = false)
@@ -501,6 +579,8 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 	for rows.Next() {
 		var item CaseResult
 		var assertionsPayload []byte
+		var attemptsPayload []byte
+		var itemUsageComplete bool
 		if err := rows.Scan(
 			&item.IdempotencyKey,
 			&item.CaseID,
@@ -517,12 +597,20 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 			&item.InputCostUSD,
 			&item.OutputCostUSD,
 			&item.CostUSD,
+			&item.FailureCategory,
+			&item.ErrorCode,
+			&attemptsPayload,
+			&itemUsageComplete,
 		); err != nil {
 			return CasePage{}, fmt.Errorf("scan case: %w", err)
 		}
 		if err := json.Unmarshal(assertionsPayload, &item.Assertions); err != nil {
 			return CasePage{}, fmt.Errorf("decode case assertions: %w", err)
 		}
+		if err := json.Unmarshal(attemptsPayload, &item.Attempts); err != nil {
+			return CasePage{}, fmt.Errorf("decode case attempts: %w", err)
+		}
+		item.UsageComplete = &itemUsageComplete
 		page.Cases = append(page.Cases, item)
 	}
 	if err := rows.Err(); err != nil {

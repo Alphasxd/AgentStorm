@@ -11,6 +11,7 @@ skip_image_build="${SKIP_IMAGE_BUILD:-false}"
 load_local_images="${LOAD_LOCAL_IMAGES:-true}"
 telemetry_e2e="${ENABLE_TELEMETRY_E2E:-}"
 expect_cost_accounting="${EXPECT_COST_ACCOUNTING:-}"
+reliability_e2e="${ENABLE_RELIABILITY_E2E:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 result_api_image="${RESULT_API_IMAGE:-agentstorm-result-api:dev}"
@@ -63,8 +64,16 @@ if [[ -z "$expect_cost_accounting" ]]; then
     expect_cost_accounting="false"
   fi
 fi
+if [[ -z "$reliability_e2e" ]]; then
+  if [[ "$skip_image_build" == "false" ]]; then
+    reliability_e2e="true"
+  else
+    reliability_e2e="false"
+  fi
+fi
 require_boolean ENABLE_TELEMETRY_E2E "$telemetry_e2e"
 require_boolean EXPECT_COST_ACCOUNTING "$expect_cost_accounting"
+require_boolean ENABLE_RELIABILITY_E2E "$reliability_e2e"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 require_command curl
@@ -128,10 +137,12 @@ kubectl_cmd=("$kubectl_bin" --context "$kube_context")
 test_dir="$(mktemp -d)"
 
 stop_port_forwards() {
-  for pid in "${port_forward_pids[@]}"; do
-    kill "$pid" >/dev/null 2>&1 || true
-    wait "$pid" >/dev/null 2>&1 || true
-  done
+  if (( ${#port_forward_pids[@]} > 0 )); then
+    for pid in "${port_forward_pids[@]}"; do
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    done
+  fi
   port_forward_pids=()
 }
 
@@ -198,11 +209,12 @@ cleanup_stack() {
     agentstorm-results-baseline \
     agentstorm-results-candidate \
     agentstorm-results-failure \
+    agentstorm-results-cancel \
     agentstorm-results-redacted \
     agentstorm-results-reference; do
     delete_run "$run_name" || true
   done
-  "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset agentstorm-results-cancel-scenario -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete deployment agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
     -n "$e2e_namespace" --ignore-not-found >/dev/null || true
@@ -326,6 +338,19 @@ data:
   redacted.jsonl: |
     {"id":"case-redacted","input":"contact customer-42@example.com","metadata":{"tenant":{"name":"team-blue","api_key":"metadata-sensitive-canary"},"internal":"internal-canary"}}
 YAML
+
+if [[ "$reliability_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-results-cancel-scenario
+  namespace: $e2e_namespace
+data:
+  scenario.json: |
+    {"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"hold-first","fault":"latency","probability":1,"caseIDs":["case-a"],"delayMs":30000}]}
+YAML
+fi
 
 # The running API keeps its already-resolved credentials, while the controller must gate new Jobs
 # until the per-namespace worker-write Secret exists again.
@@ -463,11 +488,51 @@ spec:
 YAML
 }
 
+create_cancel_run() {
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-results-cancel
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: cases.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 120
+  reliability:
+    seed: 42
+    scenarioRef:
+      name: agentstorm-results-cancel-scenario
+      key: scenario.json
+    retry:
+      maxAttempts: 1
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
 create_run agentstorm-results-baseline 2.5 10
 create_run agentstorm-results-candidate 5 20
 create_failure_run
 if [[ "$telemetry_e2e" == "true" ]]; then
   create_redacted_run
+fi
+if [[ "$reliability_e2e" == "true" ]]; then
+  create_cancel_run
+  "${kubectl_cmd[@]}" wait --for=create job/agentstorm-results-cancel-worker -n "$e2e_namespace" --timeout="$wait_timeout"
+  "${kubectl_cmd[@]}" patch agenttestrun agentstorm-results-cancel -n "$e2e_namespace" --type=merge -p '{"spec":{"cancel":true}}'
+  "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Cancelled agenttestrun/agentstorm-results-cancel -n "$e2e_namespace" --timeout="$wait_timeout"
 fi
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-baseline -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-candidate -n "$e2e_namespace" --timeout="$wait_timeout"
@@ -479,12 +544,20 @@ fi
 baseline_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-baseline -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 candidate_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-candidate -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 failure_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-failure -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+cancel_id=""
+if [[ "$reliability_e2e" == "true" ]]; then
+  cancel_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-cancel -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+fi
 redacted_id=""
 if [[ "$telemetry_e2e" == "true" ]]; then
   redacted_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-redacted -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 fi
 if [[ -z "$baseline_id" || -z "$candidate_id" || -z "$failure_id" || "$baseline_id" == "$candidate_id" ]]; then
   echo "invalid durable run identifiers" >&2
+  exit 1
+fi
+if [[ "$reliability_e2e" == "true" && -z "$cancel_id" ]]; then
+  echo "invalid durable cancellation run identifier" >&2
   exit 1
 fi
 
@@ -515,6 +588,10 @@ curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$candidate_id" >"$test_dir/candidate.json"
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$failure_id" >"$test_dir/failure.json"
+if [[ "$reliability_e2e" == "true" ]]; then
+  curl --fail --silent --header "Authorization: Bearer $read_token" \
+    "$base_url/v1/runs/$cancel_id" >"$test_dir/cancel.json"
+fi
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$baseline_id/cases?limit=10" >"$test_dir/baseline-cases.json"
 curl --fail --silent --header "Authorization: Bearer $read_token" \
@@ -525,20 +602,23 @@ if [[ "$telemetry_e2e" == "true" ]]; then
   curl --fail --silent "$base_url/metrics" >"$test_dir/metrics.txt"
 fi
 
-python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" "$expect_cost_accounting" <<'PY'
+python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/cancel.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" "$cancel_id" "$expect_cost_accounting" "$reliability_e2e" <<'PY'
 import json
 import sys
 
 baseline = json.load(open(sys.argv[1], encoding="utf-8"))
 candidate = json.load(open(sys.argv[2], encoding="utf-8"))
 failure = json.load(open(sys.argv[3], encoding="utf-8"))
-cases = json.load(open(sys.argv[4], encoding="utf-8"))
-failure_cases = json.load(open(sys.argv[5], encoding="utf-8"))
-comparison = json.load(open(sys.argv[6], encoding="utf-8"))
-baseline_id = sys.argv[7]
-candidate_id = sys.argv[8]
-failure_id = sys.argv[9]
-expect_cost_accounting = sys.argv[10] == "true"
+cases = json.load(open(sys.argv[5], encoding="utf-8"))
+failure_cases = json.load(open(sys.argv[6], encoding="utf-8"))
+comparison = json.load(open(sys.argv[7], encoding="utf-8"))
+baseline_id = sys.argv[8]
+candidate_id = sys.argv[9]
+failure_id = sys.argv[10]
+cancel_id = sys.argv[11]
+expect_cost_accounting = sys.argv[12] == "true"
+reliability_e2e = sys.argv[13] == "true"
+cancel = json.load(open(sys.argv[4], encoding="utf-8")) if reliability_e2e else None
 
 for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["id"] == run_id, run
@@ -557,6 +637,12 @@ assert failure["status"] == "complete", failure
 assert failure["summary"]["total"] == 1, failure
 assert failure["summary"]["succeeded"] == 0, failure
 assert failure["summary"]["failed"] == 1, failure
+
+if reliability_e2e:
+    assert cancel["id"] == cancel_id, cancel
+    assert cancel["status"] == "cancelled", cancel
+    assert cancel["partial"] is True, cancel
+    assert cancel["terminal_reason"]["reason_code"] == "cancellation_requested", cancel
 
 assert len(cases["cases"]) == 2, cases
 for case in cases["cases"]:

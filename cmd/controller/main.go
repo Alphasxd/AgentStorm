@@ -97,6 +97,7 @@ func main() {
 		Scheme:     manager.GetScheme(),
 		ResultSink: resultSink,
 		Telemetry:  telemetry,
+		Recorder:   manager.GetEventRecorderFor("agentstorm-controller"),
 	}).SetupWithManager(manager); err != nil {
 		ctrl.Log.Error(err, "unable to create controller")
 		os.Exit(1)

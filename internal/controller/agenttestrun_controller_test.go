@@ -3,11 +3,13 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	agentstormv1alpha1 "github.com/Alphasxd/AgentStorm/api/v1alpha1"
+	"github.com/Alphasxd/AgentStorm/internal/results"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -19,6 +21,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+type resultWriterStub struct {
+	register func(context.Context, string, []byte, results.Registration) error
+	terminal func(context.Context, string, []byte, results.TerminalRequest) error
+}
+
+func (s resultWriterStub) Register(ctx context.Context, runID string, token []byte, registration results.Registration) error {
+	if s.register != nil {
+		return s.register(ctx, runID, token, registration)
+	}
+	return nil
+}
+
+func (s resultWriterStub) Terminal(ctx context.Context, runID string, token []byte, terminal results.TerminalRequest) error {
+	if s.terminal != nil {
+		return s.terminal(ctx, runID, token, terminal)
+	}
+	return nil
+}
 
 func TestReconcileCreatesIndexedWorkerJob(t *testing.T) {
 	scheme := testScheme(t)
@@ -59,6 +80,9 @@ func TestReconcileCreatesIndexedWorkerJob(t *testing.T) {
 	assertEnv(t, job.Spec.Template.Spec.Containers[0].Env, "AGENTSTORM_SHARD_COUNT", "2")
 	assertSecretEnv(t, job.Spec.Template.Spec.Containers[0].Env, "OPENAI_API_KEY", "provider-credentials", "api-key")
 	assertWorkerSecurity(t, job.Spec.Template.Spec)
+	if job.Spec.Template.Spec.TerminationGracePeriodSeconds == nil || *job.Spec.Template.Spec.TerminationGracePeriodSeconds != 30 {
+		t.Fatalf("termination grace = %v, want 30", job.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	}
 
 	config := &corev1.ConfigMap{}
 	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-config"}, config); err != nil {
@@ -133,11 +157,24 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	if err := resultSink.ValidateAndDefault(); err != nil {
 		t.Fatalf("validate result sink: %v", err)
 	}
-	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme, ResultSink: resultSink}
+	registrationCalled := false
+	reconciler := &AgentTestRunReconciler{
+		Client: client, Scheme: scheme, ResultSink: resultSink,
+		ResultWriter: resultWriterStub{register: func(_ context.Context, runID string, token []byte, registration results.Registration) error {
+			registrationCalled = true
+			if runID != "run-1" || string(token) != "result-test-only-value" || registration.Target.Pricing == nil {
+				t.Fatalf("unexpected result registration: run=%q registration=%#v", runID, registration)
+			}
+			return nil
+		}},
+	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
 
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+	if !registrationCalled {
+		t.Fatal("controller did not register the run before creating the Job")
 	}
 	job := &batchv1.Job{}
 	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, job); err != nil {
@@ -145,6 +182,7 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	}
 	env := job.Spec.Template.Spec.Containers[0].Env
 	assertEnv(t, env, "AGENTSTORM_RESULT_API_URL", "http://agentstorm-result-api:8080")
+	assertEnv(t, env, "AGENTSTORM_RESULT_PRE_REGISTERED", "true")
 	assertEnv(t, env, "AGENTSTORM_INCLUDE_SENSITIVE_RESULTS", "false")
 	assertEnv(t, env, "AGENTSTORM_RESULT_TIMEOUT_SECONDS", "30")
 	assertSecretEnv(t, env, "AGENTSTORM_RESULT_WRITE_TOKEN", "agentstorm-result-auth", "write-token")
@@ -208,6 +246,47 @@ func TestReconcileWaitsForResultSinkSecret(t *testing.T) {
 	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionResultSink)
 	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunPending || condition == nil || condition.Reason != "SecretMissing" {
 		t.Fatalf("status = %#v, want Pending with result sink SecretMissing", updated.Status)
+	}
+}
+
+func TestReconcileKeepsRunPendingWhenResultRegistrationFails(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentstorm-result-auth", Namespace: "default"},
+		Data:       map[string][]byte{"write-token": []byte("result-test-only-value")},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset, secret).Build()
+	reconciler := &AgentTestRunReconciler{
+		Client: client, Scheme: scheme,
+		ResultSink: ResultSinkConfig{
+			URL: "http://agentstorm-result-api:8080", WriteTokenSecretName: "agentstorm-result-auth",
+			WriteTokenSecretKey: "write-token", TimeoutSeconds: 30,
+		},
+		ResultWriter: resultWriterStub{register: func(context.Context, string, []byte, results.Registration) error {
+			return errors.New("sink unavailable")
+		}},
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("reconcile result=%#v err=%v", result, err)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+		t.Fatal("worker Job should not exist before durable registration succeeds")
+	}
+	updated := &agentstormv1alpha1.AgentTestRun{}
+	if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionResultSink)
+	if condition == nil || condition.Reason != "RegistrationFailed" {
+		t.Fatalf("result sink condition = %#v", condition)
 	}
 }
 
@@ -613,8 +692,26 @@ func TestReconcileCancelsExistingJob(t *testing.T) {
 	run := testRun()
 	run.Spec.Cancel = true
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "demo-worker", Namespace: "default"}}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, job).Build()
-	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentstorm-result-auth", Namespace: "default"},
+		Data:       map[string][]byte{"write-token": []byte("result-test-only-value")},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, job, secret).Build()
+	terminalCalled := false
+	reconciler := &AgentTestRunReconciler{
+		Client: client, Scheme: scheme,
+		ResultSink: ResultSinkConfig{
+			URL: "http://agentstorm-result-api:8080", WriteTokenSecretName: "agentstorm-result-auth",
+			WriteTokenSecretKey: "write-token", TimeoutSeconds: 30,
+		},
+		ResultWriter: resultWriterStub{terminal: func(_ context.Context, runID string, token []byte, terminal results.TerminalRequest) error {
+			terminalCalled = true
+			if runID != "run-1" || string(token) != "result-test-only-value" || terminal.Status != results.RunCancelled {
+				t.Fatalf("unexpected terminal write")
+			}
+			return nil
+		}},
+	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
 
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
@@ -630,11 +727,56 @@ func TestReconcileCancelsExistingJob(t *testing.T) {
 	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunCancelled {
 		t.Fatalf("phase = %q, want %q", updated.Status.Phase, agentstormv1alpha1.AgentTestRunCancelled)
 	}
+	if !terminalCalled {
+		t.Fatal("controller did not persist cancellation before deleting the Job")
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionResultSink)
+	if condition == nil || condition.Reason != "CancelledPersisted" {
+		t.Fatalf("result sink condition = %#v", condition)
+	}
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("reconcile terminal run: %v", err)
 	}
 	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
 		t.Fatal("terminal cancelled run recreated its worker Job")
+	}
+}
+
+func TestReconcileCancellationWinsWhenResultSinkIsUnavailable(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	run.Spec.Cancel = true
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "demo-worker", Namespace: "default"}}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agentstorm-result-auth", Namespace: "default"},
+		Data:       map[string][]byte{"write-token": []byte("result-test-only-value")},
+	}
+	kubernetesClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, job, secret).Build()
+	reconciler := &AgentTestRunReconciler{
+		Client: kubernetesClient, Scheme: scheme,
+		ResultSink: ResultSinkConfig{
+			URL: "http://agentstorm-result-api:8080", WriteTokenSecretName: "agentstorm-result-auth",
+			WriteTokenSecretKey: "write-token", TimeoutSeconds: 30,
+		},
+		ResultWriter: resultWriterStub{terminal: func(context.Context, string, []byte, results.TerminalRequest) error {
+			return errors.New("sink unavailable")
+		}},
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := kubernetesClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+		t.Fatal("worker Job still exists after cancellation")
+	}
+	updated := &agentstormv1alpha1.AgentTestRun{}
+	if err := kubernetesClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionResultSink)
+	if updated.Status.Phase != agentstormv1alpha1.AgentTestRunCancelled || condition == nil || condition.Reason != "TerminalWriteFailed" {
+		t.Fatalf("cancellation status = %#v", updated.Status)
 	}
 }
 

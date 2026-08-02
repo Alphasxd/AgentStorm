@@ -124,7 +124,11 @@ class WorkloadRunner:
             reliability.circuit_breaker if reliability is not None else None
         )
 
-    async def execute(self, cases: list[TestCase]) -> tuple[list[CaseResult], RunSummary]:
+    async def execute(
+        self,
+        cases: list[TestCase],
+        stop_event: asyncio.Event | None = None,
+    ) -> tuple[list[CaseResult], RunSummary]:
         self._evaluators = EvaluatorRegistry(cases)
         started = time.perf_counter()
         selected = [
@@ -137,13 +141,41 @@ class WorkloadRunner:
             for iteration in range(self._config.workload.iterations)
             for case in selected
         ]
-        semaphore = asyncio.Semaphore(self._config.workload.concurrency)
+        stop = stop_event or asyncio.Event()
+        results: list[CaseResult] = []
+        next_index = 0
+        index_lock = asyncio.Lock()
 
-        async def bounded(case: TestCase, iteration: int) -> CaseResult:
-            async with semaphore:
-                return await self._execute_case(case, iteration)
+        async def worker() -> None:
+            nonlocal next_index
+            while not stop.is_set():
+                async with index_lock:
+                    if stop.is_set() or next_index >= len(work):
+                        return
+                    case, iteration = work[next_index]
+                    next_index += 1
+                results.append(await self._execute_case(case, iteration, stop))
 
-        results = await asyncio.gather(*(bounded(case, iteration) for case, iteration in work))
+        tasks = [
+            asyncio.create_task(worker())
+            for _ in range(min(self._config.workload.concurrency, len(work)))
+        ]
+        if tasks:
+            gathered = asyncio.gather(*tasks)
+            stop_waiter = asyncio.create_task(stop.wait())
+            await asyncio.wait(
+                {gathered, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop.is_set():
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(gathered, return_exceptions=True)
+            else:
+                await gathered
+            stop_waiter.cancel()
+            await asyncio.gather(stop_waiter, return_exceptions=True)
         return results, summarize(
             self._config.run_id,
             self._shard_index,
@@ -153,7 +185,9 @@ class WorkloadRunner:
             duration_ms=(time.perf_counter() - started) * 1000,
         )
 
-    async def _execute_case(self, case: TestCase, iteration: int) -> CaseResult:
+    async def _execute_case(
+        self, case: TestCase, iteration: int, stop_event: asyncio.Event
+    ) -> CaseResult:
         case_started = time.perf_counter()
         case_attributes: dict[str, str | int | bool | float] = {
             "agentstorm.run.id": self._config.run_id,
@@ -201,7 +235,7 @@ class WorkloadRunner:
                 )
             else:
                 result = await self._execute_permitted_case(
-                    case, iteration, permit, attempts, tool_path, case_started
+                    case, iteration, permit, attempts, tool_path, case_started, stop_event
                 )
             case_span.set_attribute("agentstorm.case.success", result.success)
             case_span.set_attribute(
@@ -227,6 +261,7 @@ class WorkloadRunner:
         attempts: list[AttemptResult],
         tool_path: list[str],
         case_started: float,
+        stop_event: asyncio.Event,
     ) -> CaseResult:
         reliability = self._config.reliability
         retry = reliability.retry if reliability is not None else None
@@ -240,6 +275,8 @@ class WorkloadRunner:
         self._trace_circuit_events(permit.events)
 
         while True:
+            if stop_event.is_set():
+                raise asyncio.CancelledError
             remaining = max(0.0, deadline - time.perf_counter())
             with self._telemetry.start_span(
                 "agentstorm.attempt",
@@ -302,6 +339,8 @@ class WorkloadRunner:
 
             if execution_error is None or not attempt.retry_decision.startswith("retry_"):
                 break
+            if stop_event.is_set():
+                raise asyncio.CancelledError
             with self._telemetry.start_span(
                 "agentstorm.retry",
                 {
@@ -312,7 +351,13 @@ class WorkloadRunner:
                     "agentstorm.retry.backoff_ms": attempt.backoff_ms,
                 },
             ):
-                await asyncio.sleep(attempt.backoff_ms / 1000)
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=attempt.backoff_ms / 1000
+                    )
+                    raise asyncio.CancelledError
+                except TimeoutError:
+                    pass
             cumulative_backoff_ms += attempt.backoff_ms
             attempt_number += 1
 
@@ -442,6 +487,10 @@ class WorkloadRunner:
                     ),
                     timeout=remaining_seconds,
                 )
+            except asyncio.CancelledError:
+                lifecycle.close("cancelled")
+                provider_span.set_error("cancelled")
+                raise
             except Exception as exc:  # noqa: BLE001 - adapter boundary
                 provider_error_type = type(exc).__name__
                 execution_error = classify_adapter_exception(exc)

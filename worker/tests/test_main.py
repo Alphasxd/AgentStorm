@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentstorm_worker.__main__ import execute
+from agentstorm_worker.__main__ import _finish_cancelled, execute
 from agentstorm_worker.adapters import AgentLifecycle
-from agentstorm_worker.models import AdapterResponse
+from agentstorm_worker.models import AdapterResponse, RunSummary
 
 
 class OrderingAdapter:
@@ -45,8 +45,35 @@ class RecordingResultClient:
         if self.fail_upload:
             raise RuntimeError("upload failed")
 
+    def mark_terminal(self, run_id: str, status: str, reason_code: str) -> None:
+        del run_id, status, reason_code
+        self.events.append("terminal")
+
 
 class MainTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_flush_marks_terminal_before_partial_upload(self) -> None:
+        events: list[str] = []
+        client = RecordingResultClient(events)
+        summary = RunSummary(
+            run_id="run-1",
+            shard_index=0,
+            shard_count=1,
+            duration_ms=1,
+            total=0,
+            succeeded=0,
+            failed=0,
+            success_rate=0,
+            error_rate=0,
+            p95_latency_ms=0,
+            input_tokens=0,
+            output_tokens=0,
+            thresholds_passed=True,
+            threshold_failures=[],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            await _finish_cancelled(client, "run-1", 0, [], summary, directory)
+        self.assertEqual(events, ["terminal", "upload"])
+
     async def test_registers_before_provider_and_uploads_after_execution(self) -> None:
         events: list[str] = []
         with tempfile.TemporaryDirectory() as directory:
@@ -117,9 +144,9 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
                     return_value=OrderingAdapter(events),
                 ),
             ):
-                with self.assertRaisesRegex(RuntimeError, "registration failed"):
-                    await execute(args)
+                exit_code = await execute(args)
 
+        self.assertEqual(exit_code, 3)
         self.assertEqual(events, ["register"])
 
     async def test_upload_failure_fails_the_worker(self) -> None:
@@ -153,10 +180,10 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
                     {"AGENTSTORM_SHARD_INDEX": "0", "AGENTSTORM_SHARD_COUNT": "1"},
                 ),
             ):
-                with self.assertRaisesRegex(RuntimeError, "upload failed"):
-                    await execute(args)
+                exit_code = await execute(args)
 
-        self.assertEqual(events, ["register", "provider", "upload"])
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(events, ["register", "provider", "upload", "terminal"])
 
 
 if __name__ == "__main__":
