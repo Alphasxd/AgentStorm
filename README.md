@@ -8,9 +8,10 @@ latency thresholds.
 > Status: early alpha. Public multi-architecture controller, worker, and Result API images are
 > available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
-> price-snapshot cost accounting, configurable trace redaction, and bounded Prometheus metrics. The
-> development stack persists traces and metrics and provisions Grafana; the optional Promptfoo
-> bridge, fault injection, and autoscaling remain planned.
+> price-snapshot cost accounting, configurable trace redaction, bounded Prometheus metrics, and a
+> source-tree Promptfoo durable replay bridge. The development stack persists traces and metrics
+> and provisions Grafana. M3 remains open until the `v0.3.0-alpha.1` release is verified and pinned;
+> fault injection and autoscaling remain planned.
 
 ## Why this project
 
@@ -41,6 +42,7 @@ engineering questions that appear after a workflow becomes a service:
 - Default-omit worker OpenTelemetry spans with explicitly gated configurable redaction.
 - Bounded Result API RED/Token/cost Prometheus metrics.
 - A development-only persistent Tempo/Prometheus stack with a provisioned Grafana run drill-down.
+- Optional Promptfoo replay of sensitive durable output without another model call.
 
 ## Architecture
 
@@ -211,6 +213,29 @@ omit plus explicitly redacted content. The E2E uses test-only Secrets and replac
 AgentStorm component images with source-built `:dev` images. See [Result API](docs/result-api.md) and
 [observability](docs/observability.md) for the storage and signal contracts.
 
+### Optional Promptfoo replay
+
+A completed run can be replayed through Promptfoo without issuing another model request when the
+controller was explicitly configured to upload sensitive durable output. The generator accepts the
+read token only from `AGENTSTORM_RESULT_READ_TOKEN`; neither the token nor model outputs are written
+to its config. It maps exact, contains, regex, and JSON Schema assertions, while latency, tool-path,
+and trusted Python outcomes remain AgentStorm-authored metadata.
+
+```bash
+export AGENTSTORM_RESULT_READ_TOKEN="$READ_TOKEN"
+python3 integrations/promptfoo/generate.py \
+  --result-api-url http://127.0.0.1:18080 \
+  --run-id "$RUN_ID" \
+  --dataset examples/datasets/basic.jsonl \
+  --output .out/promptfoo.json
+
+PROMPTFOO_DISABLE_TELEMETRY=true PROMPTFOO_PYTHON=python3 \
+  npx --yes promptfoo@0.121.19 eval --config .out/promptfoo.json --no-cache
+```
+
+The default Result API path omits output, so replay fails safely unless sensitive durable results
+were enabled before execution. See the [Promptfoo integration guide](integrations/promptfoo/README.md).
+
 Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
 when switching modes. The CRD definition is installed cluster-wide, while `AgentTestRun` resources
 remain namespaced in both modes.
@@ -261,13 +286,14 @@ cmd/controller/     controller-manager entrypoint
 internal/controller reconciliation and Job construction
 config/             CRD, RBAC, deployment, and samples
 worker/             Python Agent execution worker
+integrations/       Optional external evaluator bridges
 examples/           local run configuration and datasets
 docs/               architecture, roadmap, and reference designs
 ```
 
 ## Development roadmap
 
-1. Finish the optional Promptfoo replay bridge.
+1. Verify and digest-pin the `v0.3.0-alpha.1` M3 release.
 2. Add controlled fault injection and reliability experiments.
 3. Add KEDA-based queue scaling and resource-aware scheduling.
 4. Publish Helm charts, reproducible benchmarks, and a public demo.

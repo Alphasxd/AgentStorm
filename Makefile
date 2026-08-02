@@ -6,7 +6,7 @@ RESULT_API_IMAGE ?= agentstorm-result-api:dev
 ENVTEST_K8S_VERSION ?= v1.33.0
 PYTHON ?= python3
 
-.PHONY: fmt vet test test-envtest test-results-integration test-result-pipeline build build-result-api worker-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local e2e-results-local
+.PHONY: fmt vet test test-envtest test-results-integration test-result-pipeline test-promptfoo build build-result-api worker-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local e2e-results-local
 
 fmt:
 	gofmt -w $$(find api cmd internal -name '*.go')
@@ -26,6 +26,10 @@ test-results-integration:
 
 test-result-pipeline:
 	./hack/test-result-pipeline.sh
+
+test-promptfoo:
+	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=integrations/promptfoo $(PYTHON) -m unittest discover -s integrations/promptfoo/tests -v
+	./hack/test-promptfoo-replay.sh
 
 build:
 	mkdir -p bin
