@@ -34,6 +34,11 @@ register an explicit `spec.target.pricing` snapshot; AgentStorm never guesses cu
 Case pages also return ordered tool paths and structured assertion outcomes. Assertion values and
 custom messages remain omitted unless sensitive result upload was explicitly enabled.
 
+The optional [Promptfoo replay bridge](../integrations/promptfoo/README.md) reads only these public
+run and case endpoints. It refuses collecting runs and case pages without durable output, and it
+never triggers a Provider or model request. Read access remains protected by the Result API bearer
+token; the generated Promptfoo config contains neither that token nor saved model output.
+
 ## Configuration
 
 The service reads configuration from environment variables:

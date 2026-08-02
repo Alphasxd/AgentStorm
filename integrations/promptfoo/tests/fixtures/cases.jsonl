@@ -1,0 +1,5 @@
+{"id":"exact-case","input":"ignored during replay","assertions":[{"type":"exact","value":"alpha"}]}
+{"id":"contains-case","input":"ignored during replay","expected_contains":"needle"}
+{"id":"regex-case","input":"ignored during replay","assertions":[{"type":"regex","pattern":"ticket-[0-9]+"}]}
+{"id":"schema-case","input":"ignored during replay","assertions":[{"type":"json_schema","schema":{"type":"object","properties":{"ok":{"const":true}},"required":["ok"],"additionalProperties":false}}]}
+{"id":"agentstorm-only-case","input":"ignored during replay","assertions":[{"type":"latency","max_ms":100},{"type":"tool_path","path":["fake.echo"]},{"type":"python","entrypoint":"trusted_checks:accept"}]}
