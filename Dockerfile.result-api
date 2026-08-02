@@ -5,6 +5,7 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/result-api ./cmd/result-api
+COPY internal/reliability ./internal/reliability
 COPY internal/results ./internal/results
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /result-api ./cmd/result-api
 

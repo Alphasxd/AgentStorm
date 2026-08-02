@@ -276,6 +276,28 @@ class CircuitBreakerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.calls, 0)
 
 
+class CancellationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_event_cancels_inflight_and_does_not_schedule_more_cases(self) -> None:
+        adapter = SlowAdapter()
+        runner = WorkloadRunner(
+            run_config(ReliabilityConfig(), concurrency=2, timeout_seconds=60), adapter
+        )
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            runner.execute(
+                [TestCase(f"case-{index}", "hello") for index in range(10)],
+                stop_event=stop_event,
+            )
+        )
+        await asyncio.wait_for(adapter.started.wait(), timeout=1)
+        stop_event.set()
+        results, summary = await asyncio.wait_for(task, timeout=1)
+
+        self.assertEqual(results, [])
+        self.assertEqual(summary.total, 0)
+        self.assertLessEqual(adapter.calls, 2)
+
+
 async def run_one(
     reliability_config: ReliabilityConfig,
     adapter: object,
@@ -364,6 +386,19 @@ class ToolAdapter:
                 ToolLifecycleEvent("tool-1", "lookup")
             )
         return AdapterResponse("unused", input_tokens=2, output_tokens=3)
+
+
+class SlowAdapter:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+
+    async def run(self, case: TestCase, lifecycle: object | None = None) -> AdapterResponse:
+        del case, lifecycle
+        self.calls += 1
+        self.started.set()
+        await asyncio.sleep(30)
+        return AdapterResponse("unused")
 
 
 if __name__ == "__main__":

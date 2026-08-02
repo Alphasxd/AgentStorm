@@ -13,6 +13,7 @@ import (
 type repositoryStub struct {
 	ready         func(context.Context) error
 	registerRun   func(context.Context, string, string, string, Registration) (bool, error)
+	terminateRun  func(context.Context, string, string, string, TerminalRequest) (bool, error)
 	reserveShard  func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error)
 	finalizeShard func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error)
 	getRun        func(context.Context, string) (RunDetail, error)
@@ -29,6 +30,13 @@ func (s repositoryStub) Ready(ctx context.Context) error {
 
 func (s repositoryStub) RegisterRun(ctx context.Context, runID, key, hash string, registration Registration) (bool, error) {
 	return s.registerRun(ctx, runID, key, hash, registration)
+}
+
+func (s repositoryStub) TerminateRun(ctx context.Context, runID, key, hash string, terminal TerminalRequest) (bool, error) {
+	if s.terminateRun == nil {
+		return false, nil
+	}
+	return s.terminateRun(ctx, runID, key, hash, terminal)
 }
 
 func (s repositoryStub) ReserveShard(ctx context.Context, runID string, index int, key, hash, objectKey string, summary ShardSummary) (ShardReservation, error) {
@@ -146,6 +154,32 @@ func TestRegisterRunValidatesPriceSnapshot(t *testing.T) {
 	registration.Target.Pricing.InputUSDPerMillionTokens = "2.5"
 	if err := validateRegistration("run-1", "run/run-1", registration); err != nil {
 		t.Fatalf("valid price snapshot failed: %v", err)
+	}
+}
+
+func TestTerminateRunUsesStableIdempotency(t *testing.T) {
+	called := false
+	service := NewService(repositoryStub{
+		terminateRun: func(_ context.Context, runID, key, hash string, terminal TerminalRequest) (bool, error) {
+			called = true
+			if runID != "run-1" || key != "run/run-1/terminal/cancelled" || hash == "" ||
+				terminal.Status != RunCancelled || terminal.ReasonCode != "user_requested" {
+				t.Fatalf("unexpected terminal request: %q %q %q %#v", runID, key, hash, terminal)
+			}
+			return true, nil
+		},
+	}, objectStoreStub{})
+
+	result, err := service.TerminateRun(context.Background(), "run-1", "run/run-1/terminal/cancelled", TerminalRequest{
+		Status: RunCancelled, ReasonCode: "user_requested",
+	})
+	if err != nil || !result.Created || !called {
+		t.Fatalf("terminal update failed: result=%#v err=%v", result, err)
+	}
+	if _, err := service.TerminateRun(context.Background(), "run-1", "wrong", TerminalRequest{
+		Status: RunComplete, ReasonCode: "invalid reason",
+	}); err == nil {
+		t.Fatal("invalid terminal request should fail")
 	}
 }
 
@@ -294,6 +328,55 @@ func TestValidateShardChecksStructuredAssertions(t *testing.T) {
 	}}
 	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
 		t.Fatal("expected successful case with failed assertion to fail")
+	}
+}
+
+func TestValidateShardChecksAttemptTokensAndUsageCompleteness(t *testing.T) {
+	complete := true
+	incomplete := false
+	upload := testShard("run-1", 0, "case-1", false)
+	upload.Cases[0].FailureKind = "provider"
+	upload.Cases[0].FailureCategory = "provider"
+	upload.Cases[0].ErrorCode = "rate_limited"
+	upload.Cases[0].Assertions = nil
+	upload.Cases[0].InputTokens = 3
+	upload.Cases[0].OutputTokens = 5
+	upload.Cases[0].UsageComplete = &complete
+	upload.Cases[0].Attempts = []AttemptResult{{
+		Number: 1, LatencyMS: 2, Outcome: "failed", FailureCategory: "provider",
+		ErrorCode: "rate_limited", RetryDecision: "attempt_limit", InputTokens: 3,
+		OutputTokens: 5, UsageComplete: &complete,
+	}}
+	upload.Summary.InputTokens = 3
+	upload.Summary.OutputTokens = 5
+	upload.Summary.UsageComplete = &complete
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err != nil {
+		t.Fatalf("valid attempts failed: %v", err)
+	}
+
+	upload.Cases[0].Attempts[0].UsageComplete = &incomplete
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
+		t.Fatal("inconsistent attempt usage completeness should fail")
+	}
+}
+
+func TestUploadShardNormalizesLegacyWorkerClassification(t *testing.T) {
+	service := NewService(repositoryStub{
+		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+			return ShardReservation{}, nil
+		},
+		finalizeShard: func(_ context.Context, _ string, _ int, _ string, cases []CaseResult, _ *RunPricing) (bool, error) {
+			if len(cases) != 1 || cases[0].FailureCategory != "evaluation" ||
+				cases[0].ErrorCode != "legacy_assertion_failure" || !usageComplete(cases[0].UsageComplete) {
+				t.Fatalf("legacy case was not normalized: %#v", cases)
+			}
+			return true, nil
+		},
+	}, objectStoreStub{put: func(context.Context, string, []byte, string, string) error { return nil }})
+	if _, err := service.UploadShard(
+		context.Background(), "run-1", 0, "run/run-1/shard/0", testShard("run-1", 0, "case-1", false),
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

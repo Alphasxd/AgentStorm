@@ -78,7 +78,8 @@ handoff input, or exception-message content. See
 ClickHouse should only be added after event volume and comparison queries justify it. The project
 must not introduce a database solely to enlarge the technology list.
 
-Result API clients first register the expected shard count, then upload one idempotent shard
+The controller first registers the expected shard count and immutable execution snapshot, then
+workers upload one idempotent shard
 document. The service reserves the shard in PostgreSQL, writes the canonical JSON as a gzip object,
 and only then commits case rows and recomputes the run aggregate. A retry with the same key and body
 is a no-op; reusing a key with different content is a conflict. A run becomes complete only when
@@ -92,7 +93,7 @@ every expected shard receipt is finalized.
 | Provider timeout/error | Case fails; worker continues | Error taxonomy and retry policy |
 | Worker pod failure | Job fails, no automatic replay | Explicit idempotent retry command |
 | Controller restart | Reconcile reconstructs state from API objects | Leader-election tests |
-| Run cancellation | Job deleted, run marked Cancelled | Grace period and partial result flush |
+| Run cancellation | Durable terminal is attempted, in-flight work stops, partial results flush, then the Job is deleted | Cross-Worker cancellation coordination in M5 |
 | Result upload failure | Worker exits non-zero and the Job fails | Durable worker outbox |
 
 Expensive model calls make hidden retries dangerous. Future retries must use the idempotency key

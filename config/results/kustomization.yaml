@@ -33,3 +33,19 @@ patches:
           ports:
             - protocol: TCP
               port: 8080
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: agentstorm-controller
+    patch: |-
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: agentstorm-result-api
+          ports:
+            - protocol: TCP
+              port: 8080

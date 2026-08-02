@@ -17,6 +17,7 @@ result-read access. The public Kubernetes stack restricts metrics access with Ne
 | `GET` | `/readyz` | none | PostgreSQL and object-store readiness |
 | `GET` | `/metrics` | none | Prometheus RED, result, case, token, and cost counters |
 | `PUT` | `/v1/runs/{runID}` | writer | Register immutable run metadata and expected shards |
+| `PUT` | `/v1/runs/{runID}/terminal` | writer | Persist `cancelled` or `harness_failed` without exception text |
 | `PUT` | `/v1/runs/{runID}/shards/{index}` | writer | Persist one complete shard document |
 | `GET` | `/v1/runs/{runID}` | reader | Read status, received shards, and aggregates |
 | `GET` | `/v1/runs/{runID}/cases` | reader | Page through cases; `failed=true` filters failures |
@@ -27,12 +28,20 @@ shard carries `run/{runID}/case/{urlEncodedCaseID}/iteration/{iteration}`. Sendi
 canonical body again returns success without changing counters. Reusing an identity with different
 content returns HTTP `409`.
 
+A terminal key is `run/{runID}/terminal/{status}` and accepts only a stable `reason_code` plus
+`cancelled` or `harness_failed`. Repeating the same terminal request is a no-op; changing the reason
+or terminal status conflicts, and a complete run cannot be moved backwards. Completed partial
+shards may arrive after a terminal update. `GET /v1/runs/{runID}` then reports `partial: true` and a
+structured `terminal_reason`; Promptfoo and baseline comparison continue to require `complete`.
+
 Run comparison reports candidate-minus-baseline deltas for success and failure rates, P50/P95/P99
 latency, token counts, and derived USD cost. Latency percentage deltas are `null` when the baseline
 value is zero. Cost fields are fixed-precision decimal strings and remain `null` when a run did not
 register an explicit `spec.target.pricing` snapshot; AgentStorm never guesses current provider prices.
-Case pages also return ordered tool paths and structured assertion outcomes. Assertion values and
-custom messages remain omitted unless sensitive result upload was explicitly enabled.
+Case pages also return ordered tool paths, structured assertion outcomes, attempt history, stable
+failure category/code, and usage completeness. Assertion values and custom messages remain omitted
+unless sensitive result upload was explicitly enabled. A case and run cost remains `null` whenever
+any attempt has unknown Token usage, while known Token totals are still retained.
 
 The optional [Promptfoo replay bridge](../integrations/promptfoo/README.md) reads only these public
 run and case endpoints. It refuses collecting runs and case pages without durable output, and it
@@ -59,10 +68,12 @@ The service reads configuration from environment variables:
 Database migrations are embedded in the binary and applied under a PostgreSQL advisory lock before
 the service starts accepting traffic.
 
-The controller enables worker uploads with `--result-api-url`. It reads no Result API token itself;
-instead it verifies the per-run-namespace Secret named by `--result-write-token-secret-name` and
-injects only the selected key into the worker container. `--include-sensitive-results` is disabled
-by default, and `--result-upload-timeout` defaults to 30 seconds.
+The controller enables durable results with `--result-api-url`. Before creating a Job it reads the
+selected key from the per-run-namespace Secret named by `--result-write-token-secret-name`, registers
+the immutable run/reliability snapshot, and discards its in-memory copy after the request. The token
+is never serialized to a ConfigMap, status, Event, log, or fixture. Workers receive the same selected
+Secret key only as an environment reference for shard and terminal writes. `--include-sensitive-results`
+is disabled by default, and `--result-upload-timeout` defaults to 30 seconds.
 
 ## Public Kubernetes stack
 

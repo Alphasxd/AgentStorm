@@ -12,11 +12,15 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/Alphasxd/AgentStorm/internal/reliability"
 )
 
 var (
-	runIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
-	pricePattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
+	runIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
+	pricePattern      = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
+	reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 type Service struct {
@@ -49,10 +53,23 @@ func (s *Service) RegisterRun(ctx context.Context, runID, idempotencyKey string,
 	return s.repository.RegisterRun(ctx, runID, idempotencyKey, payloadHash, registration)
 }
 
+func (s *Service) TerminateRun(ctx context.Context, runID, idempotencyKey string, terminal TerminalRequest) (TerminalResult, error) {
+	if err := validateTerminal(runID, idempotencyKey, terminal); err != nil {
+		return TerminalResult{}, err
+	}
+	payloadHash, err := contentHash(terminal)
+	if err != nil {
+		return TerminalResult{}, fmt.Errorf("hash terminal request: %w", err)
+	}
+	created, err := s.repository.TerminateRun(ctx, runID, idempotencyKey, payloadHash, terminal)
+	return TerminalResult{Created: created}, err
+}
+
 func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int, idempotencyKey string, upload ShardUpload) (ShardResult, error) {
 	if err := validateShard(runID, shardIndex, idempotencyKey, upload); err != nil {
 		return ShardResult{}, err
 	}
+	normalizeShard(&upload)
 
 	payload, err := json.Marshal(upload)
 	if err != nil {
@@ -83,13 +100,62 @@ func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int,
 	if err != nil || !created {
 		return ShardResult{}, err
 	}
-	inputCost, outputCost, _, err := costsForTokens(
-		reservation.Pricing, upload.Summary.InputTokens, upload.Summary.OutputTokens,
-	)
+	var inputCost, outputCost *string
+	if usageComplete(upload.Summary.UsageComplete) {
+		inputCost, outputCost, _, err = costsForTokens(
+			reservation.Pricing, upload.Summary.InputTokens, upload.Summary.OutputTokens,
+		)
+	}
 	if err != nil {
 		return ShardResult{}, fmt.Errorf("calculate shard cost: %w", err)
 	}
 	return ShardResult{Created: true, InputCostUSD: inputCost, OutputCostUSD: outputCost}, nil
+}
+
+func normalizeShard(upload *ShardUpload) {
+	if upload.Summary.UsageComplete == nil {
+		upload.Summary.UsageComplete = boolPointer(true)
+	}
+	for index := range upload.Cases {
+		item := &upload.Cases[index]
+		if item.UsageComplete == nil {
+			item.UsageComplete = boolPointer(true)
+		}
+		for attemptIndex := range item.Attempts {
+			if item.Attempts[attemptIndex].UsageComplete == nil {
+				item.Attempts[attemptIndex].UsageComplete = boolPointer(true)
+			}
+		}
+		if item.Success || item.FailureCategory != "" {
+			continue
+		}
+		switch item.FailureKind {
+		case "assertion":
+			item.FailureCategory = "evaluation"
+			if item.ErrorCode == "" {
+				item.ErrorCode = "legacy_assertion_failure"
+			}
+		case "tool":
+			item.FailureCategory = "tool"
+			if item.ErrorCode == "" {
+				item.ErrorCode = "legacy_tool_failure"
+			}
+		case "harness":
+			item.FailureCategory = "harness"
+			if item.ErrorCode == "" {
+				item.ErrorCode = "legacy_harness_failure"
+			}
+		default:
+			item.FailureCategory = "provider"
+			if item.ErrorCode == "" {
+				item.ErrorCode = "legacy_provider_failure"
+			}
+		}
+	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func (s *Service) GetRun(ctx context.Context, runID string) (RunDetail, error) {
@@ -169,7 +235,59 @@ func validateRegistration(runID, idempotencyKey string, registration Registratio
 	if registration.Evaluation.MaxP95MS != nil && (!validMetric(*registration.Evaluation.MaxP95MS) || *registration.Evaluation.MaxP95MS < 0) {
 		return validationError("max_p95_ms must not be negative")
 	}
+	if reliability := registration.Reliability; reliability != nil {
+		if reliability.Seed != nil && *reliability.Seed < 0 {
+			return validationError("reliability seed must not be negative")
+		}
+		retry := reliability.Retry
+		if retry.MaxAttempts < 1 || retry.MaxAttempts > 10 || retry.InitialBackoffMS < 1 ||
+			retry.MaxBackoffMS < retry.InitialBackoffMS || retry.MaxCumulativeBackoffMS < 1 ||
+			!validMetric(retry.JitterRatio) || retry.JitterRatio < 0 || retry.JitterRatio > 1 {
+			return validationError("reliability retry snapshot is invalid")
+		}
+		if breaker := reliability.CircuitBreaker; breaker != nil && (breaker.FailureThreshold < 1 || breaker.OpenDurationMS < 1) {
+			return validationError("reliability circuit breaker snapshot is invalid")
+		}
+		if scenario := reliability.Scenario; scenario != nil {
+			if reliability.Seed == nil || strings.TrimSpace(scenario.Source.Name) == "" ||
+				strings.TrimSpace(scenario.Source.Key) == "" || !digestPattern.MatchString(scenario.Digest) {
+				return validationError("reliability scenario snapshot is invalid")
+			}
+			canonical, _, digest, err := reliabilityScenarioDigest(scenario.Document)
+			if err != nil || len(canonical) > 64*1024 || digest != scenario.Digest {
+				return validationError("reliability scenario digest does not match its normalized document")
+			}
+		}
+	}
 	return nil
+}
+
+func validateTerminal(runID, idempotencyKey string, terminal TerminalRequest) error {
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	if terminal.Status != RunCancelled && terminal.Status != RunHarnessFailed {
+		return validationError("terminal status must be cancelled or harness_failed")
+	}
+	if idempotencyKey != fmt.Sprintf("run/%s/terminal/%s", runID, terminal.Status) {
+		return validationError("invalid terminal idempotency key")
+	}
+	if !reasonCodePattern.MatchString(terminal.ReasonCode) {
+		return validationError("terminal reason_code must be a stable lowercase identifier")
+	}
+	return nil
+}
+
+func reliabilityScenarioDigest(document reliability.FaultScenario) ([]byte, []byte, string, error) {
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	_, canonical, digest, err := reliability.ParseScenario(payload)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return canonical, nil, digest, nil
 }
 
 func validateShard(runID string, shardIndex int, idempotencyKey string, upload ShardUpload) error {
@@ -201,6 +319,7 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 	}
 	seen := make(map[string]struct{}, len(upload.Cases))
 	var caseInputTokens, caseOutputTokens int64
+	allUsageComplete := true
 	for index, item := range upload.Cases {
 		if strings.TrimSpace(item.CaseID) == "" {
 			return validationErrorf("cases[%d].case_id is required", index)
@@ -224,6 +343,7 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 			return validationErrorf("cases[%d] contains a negative metric", index)
 		}
 		if invalidText(item.FailureKind, 128) ||
+			invalidText(item.FailureCategory, 64) || invalidText(item.ErrorCode, 128) ||
 			(item.Output != nil && invalidText(*item.Output, maxRequestBytes)) ||
 			(item.Error != nil && invalidText(*item.Error, maxRequestBytes)) {
 			return validationErrorf("cases[%d] contains invalid text", index)
@@ -231,6 +351,49 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		if item.InputCostUSD != nil || item.OutputCostUSD != nil || item.CostUSD != nil {
 			return validationErrorf("cases[%d] cost is calculated by the Result API", index)
 		}
+		if item.FailureCategory != "" && !validFailureCategory(item.FailureCategory) {
+			return validationErrorf("cases[%d].failure_category is invalid", index)
+		}
+		if item.ErrorCode != "" && !reasonCodePattern.MatchString(item.ErrorCode) {
+			return validationErrorf("cases[%d].error_code is invalid", index)
+		}
+		var attemptInputTokens, attemptOutputTokens int64
+		attemptsUsageComplete := true
+		if len(item.Attempts) > 10 {
+			return validationErrorf("cases[%d].attempts cannot contain more than 10 items", index)
+		}
+		for attemptIndex, attempt := range item.Attempts {
+			if attempt.Number != attemptIndex+1 || !validMetric(attempt.LatencyMS) || attempt.LatencyMS < 0 ||
+				attempt.BackoffMS < 0 || attempt.InputTokens < 0 || attempt.OutputTokens < 0 ||
+				!validAttemptOutcome(attempt.Outcome) || strings.TrimSpace(attempt.RetryDecision) == "" ||
+				invalidText(attempt.RetryDecision, 64) || invalidText(attempt.InjectedRule, 128) ||
+				invalidText(attempt.ErrorCode, 128) || invalidText(attempt.FailureCategory, 64) ||
+				(attempt.FailureCategory != "" && !validFailureCategory(attempt.FailureCategory)) ||
+				(attempt.ErrorCode != "" && !reasonCodePattern.MatchString(attempt.ErrorCode)) {
+				return validationErrorf("cases[%d].attempts[%d] is invalid", index, attemptIndex)
+			}
+			if attempt.InjectedFault != "" && !validInjectedFault(attempt.InjectedFault) {
+				return validationErrorf("cases[%d].attempts[%d].injected_fault is invalid", index, attemptIndex)
+			}
+			for _, event := range attempt.CircuitEvents {
+				if !validCircuitEvent(event) {
+					return validationErrorf("cases[%d].attempts[%d].circuit_events is invalid", index, attemptIndex)
+				}
+			}
+			if attempt.InputTokens > math.MaxInt64-attemptInputTokens || attempt.OutputTokens > math.MaxInt64-attemptOutputTokens {
+				return validationError("attempt token totals exceed the supported range")
+			}
+			attemptInputTokens += attempt.InputTokens
+			attemptOutputTokens += attempt.OutputTokens
+			attemptsUsageComplete = attemptsUsageComplete && usageComplete(attempt.UsageComplete)
+		}
+		if len(item.Attempts) > 0 && (attemptInputTokens != item.InputTokens || attemptOutputTokens != item.OutputTokens) {
+			return validationErrorf("cases[%d] token counts do not match attempt totals", index)
+		}
+		if len(item.Attempts) > 0 && usageComplete(item.UsageComplete) != attemptsUsageComplete {
+			return validationErrorf("cases[%d].usage_complete does not match attempts", index)
+		}
+		allUsageComplete = allUsageComplete && usageComplete(item.UsageComplete)
 		if len(item.ToolPath) > 1000 {
 			return validationErrorf("cases[%d].tool_path cannot contain more than 1000 items", index)
 		}
@@ -271,7 +434,40 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 	if caseInputTokens != upload.Summary.InputTokens || caseOutputTokens != upload.Summary.OutputTokens {
 		return validationError("summary token counts do not match case totals")
 	}
+	if upload.Summary.UsageComplete != nil && *upload.Summary.UsageComplete != allUsageComplete {
+		return validationError("summary usage_complete does not match cases")
+	}
 	return nil
+}
+
+func usageComplete(value *bool) bool {
+	return value == nil || *value
+}
+
+func validFailureCategory(value string) bool {
+	return value == "evaluation" || value == "provider" || value == "tool" || value == "harness"
+}
+
+func validAttemptOutcome(value string) bool {
+	return value == "succeeded" || value == "failed" || value == "rejected" || value == "cancelled"
+}
+
+func validInjectedFault(value string) bool {
+	switch value {
+	case "latency", "timeout", "http_error", "malformed_response", "rate_limit", "tool_error":
+		return true
+	default:
+		return false
+	}
+}
+
+func validCircuitEvent(value string) bool {
+	switch value {
+	case "open", "reject", "half_open", "close", "reopen":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateRunID(runID string) error {
