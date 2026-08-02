@@ -41,6 +41,45 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.evaluation.min_success_rate, 1.0)
             self.assertEqual(cases[0].case_id, "case-1")
 
+    def test_loads_and_validates_price_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "run.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "fake",
+                            "pricing": {
+                                "inputUSDPerMillionTokens": "2.50",
+                                "outputUSDPerMillionTokens": "10",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(config_path)
+            self.assertIsNotNone(config.target.pricing)
+            assert config.target.pricing is not None
+            self.assertEqual(config.target.pricing.input_usd_per_million_tokens, "2.50")
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "fake",
+                            "pricing": {
+                                "inputUSDPerMillionTokens": "automatic",
+                                "outputUSDPerMillionTokens": "10",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "non-negative decimal"):
+                load_run_config(config_path)
+
     def test_rejects_duplicate_case_ids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dataset_path = Path(directory) / "cases.jsonl"

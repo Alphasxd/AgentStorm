@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,6 +17,7 @@ type resultMetrics struct {
 	shardUploads     *prometheus.CounterVec
 	cases            *prometheus.CounterVec
 	tokens           *prometheus.CounterVec
+	costUSD          *prometheus.CounterVec
 }
 
 func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
@@ -57,6 +59,12 @@ func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
 			Name:      "tokens_total",
 			Help:      "Total tokens from uniquely persisted shards by direction.",
 		}, []string{"direction"}),
+		costUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm",
+			Subsystem: "result_api",
+			Name:      "cost_usd_total",
+			Help:      "Total derived USD cost from uniquely persisted priced shards by direction.",
+		}, []string{"direction"}),
 	}
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
@@ -66,6 +74,7 @@ func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
 		metrics.shardUploads,
 		metrics.cases,
 		metrics.tokens,
+		metrics.costUSD,
 	)
 	return metrics, registry
 }
@@ -93,9 +102,9 @@ func (m *resultMetrics) observeRegistration(created bool, err error) {
 	m.runRegistrations.WithLabelValues(operationOutcome(created, err)).Inc()
 }
 
-func (m *resultMetrics) observeShard(created bool, upload ShardUpload, err error) {
-	m.shardUploads.WithLabelValues(operationOutcome(created, err)).Inc()
-	if err != nil || !created {
+func (m *resultMetrics) observeShard(result ShardResult, upload ShardUpload, err error) {
+	m.shardUploads.WithLabelValues(operationOutcome(result.Created, err)).Inc()
+	if err != nil || !result.Created {
 		return
 	}
 	for _, item := range upload.Cases {
@@ -109,6 +118,12 @@ func (m *resultMetrics) observeShard(created bool, upload ShardUpload, err error
 	}
 	m.tokens.WithLabelValues("input").Add(float64(upload.Summary.InputTokens))
 	m.tokens.WithLabelValues("output").Add(float64(upload.Summary.OutputTokens))
+	if result.InputCostUSD != nil && result.OutputCostUSD != nil {
+		inputCost, _ := strconv.ParseFloat(*result.InputCostUSD, 64)
+		outputCost, _ := strconv.ParseFloat(*result.OutputCostUSD, 64)
+		m.costUSD.WithLabelValues("input").Add(inputCost)
+		m.costUSD.WithLabelValues("output").Add(outputCost)
+	}
 }
 
 func operationOutcome(created bool, err error) string {

@@ -128,27 +128,27 @@ func (h *HTTPHandler) registerRun(writer http.ResponseWriter, request *http.Requ
 func (h *HTTPHandler) uploadShard(writer http.ResponseWriter, request *http.Request) {
 	index, err := strconv.Atoi(request.PathValue("index"))
 	if err != nil {
-		h.metrics.observeShard(false, ShardUpload{}, validationError("shard index must be an integer"))
+		h.metrics.observeShard(ShardResult{}, ShardUpload{}, validationError("shard index must be an integer"))
 		writeError(writer, http.StatusBadRequest, "invalid_request", "shard index must be an integer")
 		return
 	}
 	var upload ShardUpload
 	if err := decodeJSON(writer, request, &upload); err != nil {
-		h.metrics.observeShard(false, ShardUpload{}, validationError(err.Error()))
+		h.metrics.observeShard(ShardResult{}, ShardUpload{}, validationError(err.Error()))
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	created, err := h.service.UploadShard(request.Context(), request.PathValue("runID"), index, request.Header.Get("Idempotency-Key"), upload)
-	h.metrics.observeShard(created, upload, err)
+	result, err := h.service.UploadShard(request.Context(), request.PathValue("runID"), index, request.Header.Get("Idempotency-Key"), upload)
+	h.metrics.observeShard(result, upload, err)
 	if err != nil {
 		writeServiceError(writer, err)
 		return
 	}
 	status := http.StatusOK
-	if created {
+	if result.Created {
 		status = http.StatusCreated
 	}
-	writeJSON(writer, status, map[string]any{"run_id": request.PathValue("runID"), "shard_index": index, "created": created})
+	writeJSON(writer, status, map[string]any{"run_id": request.PathValue("runID"), "shard_index": index, "created": result.Created})
 }
 
 func (h *HTTPHandler) getRun(writer http.ResponseWriter, request *http.Request) {

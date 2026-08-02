@@ -15,6 +15,7 @@ from .adapters import (
 from .config import EvaluationConfig, RunConfig
 from .evaluators import EvaluationContext, EvaluatorRegistry
 from .models import CaseResult, RunSummary, TestCase
+from .pricing import case_costs, sum_costs
 from .telemetry import DetachedTraceSpan, NoopTelemetry, TelemetryClient
 
 
@@ -196,6 +197,11 @@ class WorkloadRunner:
                 success = all(outcome.passed for outcome in outcomes)
                 failed_types = [outcome.type for outcome in outcomes if not outcome.passed]
                 error = None if success else f"failed assertions: {', '.join(failed_types)}"
+                input_cost, output_cost, total_cost = case_costs(
+                    self._config.target.pricing,
+                    response.input_tokens or 0,
+                    response.output_tokens or 0,
+                )
                 result = CaseResult(
                     case_id=case.case_id,
                     iteration=iteration,
@@ -208,6 +214,9 @@ class WorkloadRunner:
                     output_tokens=response.output_tokens,
                     tool_path=lifecycle.tool_path,
                     assertions=outcomes,
+                    input_cost_usd=input_cost,
+                    output_cost_usd=output_cost,
+                    cost_usd=total_cost,
                 )
             except Exception as exc:  # noqa: BLE001 - provider errors are test results
                 case_span.set_error(type(exc).__name__)
@@ -269,6 +278,9 @@ def summarize(
         p95_latency_ms=p95,
         input_tokens=sum(result.input_tokens or 0 for result in results),
         output_tokens=sum(result.output_tokens or 0 for result in results),
+        input_cost_usd=sum_costs([result.input_cost_usd for result in results]),
+        output_cost_usd=sum_costs([result.output_cost_usd for result in results]),
+        cost_usd=sum_costs([result.cost_usd for result in results]),
         thresholds_passed=not failures,
         threshold_failures=failures,
     )

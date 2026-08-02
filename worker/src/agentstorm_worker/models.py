@@ -63,6 +63,9 @@ class CaseResult:
     output_tokens: int | None = None
     tool_path: list[str] = field(default_factory=list)
     assertions: list[AssertionOutcome] = field(default_factory=list)
+    input_cost_usd: str | None = None
+    output_cost_usd: str | None = None
+    cost_usd: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,6 +87,9 @@ class RunSummary:
     output_tokens: int
     thresholds_passed: bool
     threshold_failures: list[str]
+    input_cost_usd: str | None = None
+    output_cost_usd: str | None = None
+    cost_usd: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

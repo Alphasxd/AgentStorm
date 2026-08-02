@@ -11,6 +11,7 @@ from agentstorm_worker.config import (
     SourceConfig,
     TargetConfig,
     WorkloadConfig,
+    PricingConfig,
 )
 from agentstorm_worker.models import AssertionOutcome, CaseResult, RunSummary
 from agentstorm_worker.results import ResultClient, ResultSinkConfig
@@ -172,6 +173,36 @@ class ResultClientTest(unittest.TestCase):
                     write_token="test-token",
                 )
             )
+
+    def test_registers_immutable_price_snapshot(self) -> None:
+        opener = RecordingOpener()
+        client = ResultClient(
+            ResultSinkConfig(base_url="http://results.example", write_token="test-token"),
+            opener=opener,
+        )
+        config = run_config()
+        config = RunConfig(
+            run_id=config.run_id,
+            source=config.source,
+            dataset=config.dataset,
+            target=TargetConfig(
+                provider="fake",
+                pricing=PricingConfig("2.5", "10"),
+            ),
+            workload=config.workload,
+            evaluation=config.evaluation,
+        )
+
+        client.register_run(config, expected_shards=2)
+
+        registration = json.loads(opener.requests[0][0].data)
+        self.assertEqual(
+            registration["target"]["pricing"],
+            {
+                "input_usd_per_million_tokens": "2.5",
+                "output_usd_per_million_tokens": "10",
+            },
+        )
 
 
 if __name__ == "__main__":

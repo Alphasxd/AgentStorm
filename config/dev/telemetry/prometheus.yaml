@@ -28,6 +28,8 @@ data:
             expr: sum(rate(agentstorm_result_api_http_requests_total{status_class=~"4xx|5xx"}[5m])) / clamp_min(sum(rate(agentstorm_result_api_http_requests_total[5m])), 0.000001)
           - record: agentstorm:result_api_http_request_duration:p95_5m
             expr: histogram_quantile(0.95, sum by (le, route) (rate(agentstorm_result_api_http_request_duration_seconds_bucket[5m])))
+          - record: agentstorm:result_api_cost_usd:rate5m
+            expr: sum by (direction) (rate(agentstorm_result_api_cost_usd_total[5m]))
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

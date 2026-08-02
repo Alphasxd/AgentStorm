@@ -46,8 +46,14 @@ type RunSource struct {
 }
 
 type RunTarget struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model,omitempty"`
+	Provider string      `json:"provider"`
+	Model    string      `json:"model,omitempty"`
+	Pricing  *RunPricing `json:"pricing,omitempty"`
+}
+
+type RunPricing struct {
+	InputUSDPerMillionTokens  string `json:"input_usd_per_million_tokens"`
+	OutputUSDPerMillionTokens string `json:"output_usd_per_million_tokens"`
 }
 
 type RunDataset struct {
@@ -89,6 +95,9 @@ type CaseResult struct {
 	Error          *string           `json:"error,omitempty"`
 	ToolPath       []string          `json:"tool_path,omitempty"`
 	Assertions     []AssertionResult `json:"assertions,omitempty"`
+	InputCostUSD   *string           `json:"input_cost_usd"`
+	OutputCostUSD  *string           `json:"output_cost_usd"`
+	CostUSD        *string           `json:"cost_usd"`
 }
 
 type AssertionResult struct {
@@ -117,6 +126,9 @@ type Aggregate struct {
 	P99MS            float64 `json:"p99_ms"`
 	InputTokens      int64   `json:"input_tokens"`
 	OutputTokens     int64   `json:"output_tokens"`
+	InputCostUSD     *string `json:"input_cost_usd"`
+	OutputCostUSD    *string `json:"output_cost_usd"`
+	CostUSD          *string `json:"cost_usd"`
 	ThresholdsPassed bool    `json:"thresholds_passed"`
 }
 
@@ -155,17 +167,26 @@ type ComparisonDelta struct {
 	P99Percent   *float64 `json:"p99_percent"`
 	InputTokens  int64    `json:"input_tokens"`
 	OutputTokens int64    `json:"output_tokens"`
+	CostUSD      *string  `json:"cost_usd"`
+	CostPercent  *float64 `json:"cost_percent"`
 }
 
 type ShardReservation struct {
 	AlreadyComplete bool
+	Pricing         *RunPricing
+}
+
+type ShardResult struct {
+	Created       bool
+	InputCostUSD  *string
+	OutputCostUSD *string
 }
 
 type Repository interface {
 	Ready(context.Context) error
 	RegisterRun(context.Context, string, string, string, Registration) (bool, error)
 	ReserveShard(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error)
-	FinalizeShard(context.Context, string, int, string, []CaseResult) (bool, error)
+	FinalizeShard(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error)
 	GetRun(context.Context, string) (RunDetail, error)
 	ListCases(context.Context, string, string, int, bool) (CasePage, error)
 	Compare(context.Context, string, string) (Comparison, error)

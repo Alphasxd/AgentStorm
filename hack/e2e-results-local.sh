@@ -10,6 +10,7 @@ keep_resources="${KEEP_E2E_RESOURCES:-true}"
 skip_image_build="${SKIP_IMAGE_BUILD:-false}"
 load_local_images="${LOAD_LOCAL_IMAGES:-true}"
 telemetry_e2e="${ENABLE_TELEMETRY_E2E:-}"
+expect_cost_accounting="${EXPECT_COST_ACCOUNTING:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 result_api_image="${RESULT_API_IMAGE:-agentstorm-result-api:dev}"
@@ -55,7 +56,15 @@ if [[ -z "$telemetry_e2e" ]]; then
     telemetry_e2e="false"
   fi
 fi
+if [[ -z "$expect_cost_accounting" ]]; then
+  if [[ "$skip_image_build" == "false" ]]; then
+    expect_cost_accounting="true"
+  else
+    expect_cost_accounting="false"
+  fi
+fi
 require_boolean ENABLE_TELEMETRY_E2E "$telemetry_e2e"
+require_boolean EXPECT_COST_ACCOUNTING "$expect_cost_accounting"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 require_command curl
@@ -357,6 +366,8 @@ create_auth_secret
 
 create_run() {
   run_name="$1"
+  input_price="$2"
+  output_price="$3"
   "${kubectl_cmd[@]}" apply -f - <<YAML
 apiVersion: agentstorm.io/v1alpha1
 kind: AgentTestRun
@@ -366,6 +377,9 @@ metadata:
 spec:
   target:
     provider: fake
+    pricing:
+      inputUSDPerMillionTokens: "$input_price"
+      outputUSDPerMillionTokens: "$output_price"
   workload:
     datasetRef:
       name: agentstorm-results-dataset
@@ -412,8 +426,8 @@ spec:
 YAML
 }
 
-create_run agentstorm-results-baseline
-create_run agentstorm-results-candidate
+create_run agentstorm-results-baseline 2.5 10
+create_run agentstorm-results-candidate 5 20
 create_failure_run
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-baseline -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-candidate -n "$e2e_namespace" --timeout="$wait_timeout"
@@ -464,7 +478,7 @@ if [[ "$telemetry_e2e" == "true" ]]; then
   curl --fail --silent "$base_url/metrics" >"$test_dir/metrics.txt"
 fi
 
-python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" <<'PY'
+python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" "$expect_cost_accounting" <<'PY'
 import json
 import sys
 
@@ -477,6 +491,7 @@ comparison = json.load(open(sys.argv[6], encoding="utf-8"))
 baseline_id = sys.argv[7]
 candidate_id = sys.argv[8]
 failure_id = sys.argv[9]
+expect_cost_accounting = sys.argv[10] == "true"
 
 for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["id"] == run_id, run
@@ -486,6 +501,9 @@ for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["summary"]["total"] == 2, run
     assert run["summary"]["succeeded"] == 2, run
     assert run["summary"]["failed"] == 0, run
+if expect_cost_accounting:
+    assert baseline["summary"]["cost_usd"] == "0.000195000000", baseline
+    assert candidate["summary"]["cost_usd"] == "0.000390000000", candidate
 
 assert failure["id"] == failure_id, failure
 assert failure["status"] == "complete", failure
@@ -497,6 +515,8 @@ assert len(cases["cases"]) == 2, cases
 for case in cases["cases"]:
     assert "output" not in case, case
     assert "error" not in case, case
+    if expect_cost_accounting:
+        assert case["cost_usd"] is not None, case
 
 assert len(failure_cases["cases"]) == 1, failure_cases
 assert failure_cases["cases"][0]["failure_kind"] == "assertion", failure_cases
@@ -510,6 +530,9 @@ expected_deltas = {
     "p95_percent", "p99_ms", "p99_percent", "input_tokens", "output_tokens",
 }
 assert expected_deltas <= comparison["delta"].keys(), comparison
+if expect_cost_accounting:
+    assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
+    assert comparison["delta"]["cost_percent"] == 100, comparison
 PY
 
 if [[ "$telemetry_e2e" == "true" ]]; then
@@ -525,6 +548,7 @@ for name in (
     "agentstorm_result_api_shard_uploads_total",
     "agentstorm_result_api_cases_total",
     "agentstorm_result_api_tokens_total",
+    "agentstorm_result_api_cost_usd_total",
 ):
     assert name in metrics, name
 for forbidden in sys.argv[2:]:
@@ -664,6 +688,7 @@ expected_rules = {
     "agentstorm:result_api_http_requests:rate5m",
     "agentstorm:result_api_http_errors:ratio5m",
     "agentstorm:result_api_http_request_duration:p95_5m",
+    "agentstorm:result_api_cost_usd:rate5m",
 }
 assert expected_rules <= recording_rules.keys(), recording_rules
 assert all(recording_rules[name] == "ok" for name in expected_rules), recording_rules
@@ -681,6 +706,7 @@ for title in (
     "Provider errors for Run ID",
     "Selected trace",
     "Result API P95 latency",
+    "Estimated USD cost",
 ):
     assert title in panels, title
 assert "agentstorm.case.success = false" in panels["Failed cases for Run ID"]["targets"][0]["query"]

@@ -17,6 +17,17 @@ The module must already be installed in the Worker image. The function receives 
 `context` and `config` dictionaries and returns either a boolean or a `passed`/`message` object.
 Dataset-provided inline Python is never executed.
 
+An optional immutable target price snapshot enables reproducible USD cost accounting:
+
+```json
+{"target":{"provider":"fake","pricing":{"inputUSDPerMillionTokens":"2.5","outputUSDPerMillionTokens":"10"}}}
+```
+
+Prices are decimal strings, not floating-point values. Local case and summary files expose
+fixed-precision cost strings; when durable ingestion is enabled, the Result API independently
+derives cost from the registered snapshot and persisted Token counts. Missing pricing produces
+`null` cost rather than consulting a mutable provider catalog.
+
 The default `fake` provider has no third-party dependency. Install the optional OpenAI adapter with
 `pip install -e '.[openai]'`. Install OTLP tracing support with `pip install -e '.[telemetry]'`, or
 both integrations with `pip install -e '.[openai,telemetry]'`.

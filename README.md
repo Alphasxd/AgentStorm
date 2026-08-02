@@ -7,9 +7,10 @@ latency thresholds.
 
 > Status: early alpha. Public multi-architecture controller, worker, and Result API images are
 > available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
-> comparison. The first M3 observability foundation provides optional OTLP worker traces and
-> bounded Prometheus metrics. The development stack persists both signals and provisions Grafana;
-> tool/handoff telemetry, provider cost rules, fault injection, and autoscaling remain planned.
+> comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
+> price-snapshot cost accounting, and bounded Prometheus metrics. The development stack persists
+> traces and metrics and provisions Grafana; configurable content redaction, the optional Promptfoo
+> bridge, fault injection, and autoscaling remain planned.
 
 ## Why this project
 
@@ -31,12 +32,13 @@ engineering questions that appear after a workflow becomes a service:
 - Required provider Secret/key readiness gating before worker creation.
 - Python worker with bounded asynchronous concurrency.
 - No-cost deterministic `fake` provider and optional OpenAI Agents SDK adapter.
-- JSONL case results plus success rate, error rate, token counters, and P95 latency summary.
+- JSONL case results with exact/contains/regex/JSON Schema/tool-path/latency/Python assertions.
+- Explicit immutable Provider price snapshots with fixed-precision case, run, and comparison cost.
 - Threshold-based process exit codes suitable for CI and Kubernetes Job status.
 - Hardened worker Pods without ServiceAccount tokens or writable root filesystems.
 - Authenticated, idempotent result ingestion with PostgreSQL metadata, compressed S3 raw shards,
   paginated case queries, and baseline comparisons.
-- Opt-in content-safe worker OpenTelemetry spans and bounded Result API Prometheus RED/Token metrics.
+- Opt-in content-safe worker OpenTelemetry spans and bounded Result API RED/Token/cost metrics.
 - A development-only persistent Tempo/Prometheus stack with a provisioned Grafana run drill-down.
 
 ## Architecture
@@ -222,6 +224,9 @@ metadata:
 spec:
   target:
     provider: fake
+    pricing:
+      inputUSDPerMillionTokens: "2.5"
+      outputUSDPerMillionTokens: "10"
   workload:
     datasetRef:
       name: agentstorm-demo-dataset
@@ -259,8 +264,8 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Add tool/handoff telemetry, provider cost rules, and the remaining assertion plugins.
-2. Add reusable assertions, provider adapters, and controlled fault injection.
+1. Finish configurable trace redaction and the optional Promptfoo replay bridge.
+2. Add controlled fault injection and reliability experiments.
 3. Add KEDA-based queue scaling and resource-aware scheduling.
 4. Publish Helm charts, reproducible benchmarks, and a public demo.
 

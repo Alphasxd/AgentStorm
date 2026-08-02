@@ -14,7 +14,10 @@ import (
 	"strings"
 )
 
-var runIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
+var (
+	runIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
+	pricePattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
+)
 
 type Service struct {
 	repository Repository
@@ -46,14 +49,14 @@ func (s *Service) RegisterRun(ctx context.Context, runID, idempotencyKey string,
 	return s.repository.RegisterRun(ctx, runID, idempotencyKey, payloadHash, registration)
 }
 
-func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int, idempotencyKey string, upload ShardUpload) (bool, error) {
+func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int, idempotencyKey string, upload ShardUpload) (ShardResult, error) {
 	if err := validateShard(runID, shardIndex, idempotencyKey, upload); err != nil {
-		return false, err
+		return ShardResult{}, err
 	}
 
 	payload, err := json.Marshal(upload)
 	if err != nil {
-		return false, fmt.Errorf("marshal shard: %w", err)
+		return ShardResult{}, fmt.Errorf("marshal shard: %w", err)
 	}
 	hash := sha256.Sum256(payload)
 	payloadHash := hex.EncodeToString(hash[:])
@@ -61,20 +64,32 @@ func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int,
 
 	reservation, err := s.repository.ReserveShard(ctx, runID, shardIndex, idempotencyKey, payloadHash, objectKey, upload.Summary)
 	if err != nil {
-		return false, err
+		return ShardResult{}, err
 	}
 	if reservation.AlreadyComplete {
-		return false, nil
+		return ShardResult{}, nil
 	}
 
 	compressed, err := gzipJSON(payload)
 	if err != nil {
-		return false, fmt.Errorf("compress shard: %w", err)
+		return ShardResult{}, fmt.Errorf("compress shard: %w", err)
 	}
 	if err := s.objects.Put(ctx, objectKey, compressed, "application/json", "gzip"); err != nil {
-		return false, fmt.Errorf("store raw shard: %w", err)
+		return ShardResult{}, fmt.Errorf("store raw shard: %w", err)
 	}
-	return s.repository.FinalizeShard(ctx, runID, shardIndex, payloadHash, upload.Cases)
+	created, err := s.repository.FinalizeShard(
+		ctx, runID, shardIndex, payloadHash, upload.Cases, reservation.Pricing,
+	)
+	if err != nil || !created {
+		return ShardResult{}, err
+	}
+	inputCost, outputCost, _, err := costsForTokens(
+		reservation.Pricing, upload.Summary.InputTokens, upload.Summary.OutputTokens,
+	)
+	if err != nil {
+		return ShardResult{}, fmt.Errorf("calculate shard cost: %w", err)
+	}
+	return ShardResult{Created: true, InputCostUSD: inputCost, OutputCostUSD: outputCost}, nil
 }
 
 func (s *Service) GetRun(ctx context.Context, runID string) (RunDetail, error) {
@@ -132,6 +147,11 @@ func validateRegistration(runID, idempotencyKey string, registration Registratio
 	if invalidText(registration.Target.Provider, 128) || invalidText(registration.Target.Model, 512) {
 		return validationError("target fields exceed their size limit or contain NUL")
 	}
+	if registration.Target.Pricing != nil &&
+		(!pricePattern.MatchString(registration.Target.Pricing.InputUSDPerMillionTokens) ||
+			!pricePattern.MatchString(registration.Target.Pricing.OutputUSDPerMillionTokens)) {
+		return validationError("target pricing must contain non-negative decimal USD prices")
+	}
 	if strings.TrimSpace(registration.Dataset.Name) == "" || strings.TrimSpace(registration.Dataset.Key) == "" {
 		return validationError("dataset name and key are required")
 	}
@@ -180,6 +200,7 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		return validationError("a shard cannot contain more than 100000 cases")
 	}
 	seen := make(map[string]struct{}, len(upload.Cases))
+	var caseInputTokens, caseOutputTokens int64
 	for index, item := range upload.Cases {
 		if strings.TrimSpace(item.CaseID) == "" {
 			return validationErrorf("cases[%d].case_id is required", index)
@@ -206,6 +227,9 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 			(item.Output != nil && invalidText(*item.Output, maxRequestBytes)) ||
 			(item.Error != nil && invalidText(*item.Error, maxRequestBytes)) {
 			return validationErrorf("cases[%d] contains invalid text", index)
+		}
+		if item.InputCostUSD != nil || item.OutputCostUSD != nil || item.CostUSD != nil {
+			return validationErrorf("cases[%d] cost is calculated by the Result API", index)
 		}
 		if len(item.ToolPath) > 1000 {
 			return validationErrorf("cases[%d].tool_path cannot contain more than 1000 items", index)
@@ -237,6 +261,15 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		if item.FailureKind == "assertion" && !failedAssertion {
 			return validationErrorf("cases[%d] assertion failure requires a failed assertion", index)
 		}
+		if item.InputTokens > math.MaxInt64-caseInputTokens ||
+			item.OutputTokens > math.MaxInt64-caseOutputTokens {
+			return validationError("case token totals exceed the supported range")
+		}
+		caseInputTokens += item.InputTokens
+		caseOutputTokens += item.OutputTokens
+	}
+	if caseInputTokens != upload.Summary.InputTokens || caseOutputTokens != upload.Summary.OutputTokens {
+		return validationError("summary token counts do not match case totals")
 	}
 	return nil
 }
