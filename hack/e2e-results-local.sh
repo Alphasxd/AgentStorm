@@ -545,7 +545,13 @@ PY
     fi
     sleep 1
   done
-  for span_name in agentstorm.run agentstorm.case gen_ai.invoke_agent agentstorm.evaluate; do
+  for span_name in \
+    agentstorm.run \
+    agentstorm.case \
+    gen_ai.invoke_agent \
+    gen_ai.execute_tool \
+    agentstorm.handoff \
+    agentstorm.evaluate; do
     if [[ "$collector_logs" != *"$span_name"* ]]; then
       echo "collector logs do not contain span $span_name" >&2
       exit 1

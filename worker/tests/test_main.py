@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentstorm_worker.__main__ import execute
+from agentstorm_worker.adapters import AgentLifecycle
 from agentstorm_worker.models import AdapterResponse
 
 
@@ -15,7 +16,10 @@ class OrderingAdapter:
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
-    async def run(self, case: object) -> AdapterResponse:
+    async def run(
+        self, case: object, lifecycle: AgentLifecycle | None = None
+    ) -> AdapterResponse:
+        del case, lifecycle
         self.events.append("provider")
         return AdapterResponse(output="hello")
 

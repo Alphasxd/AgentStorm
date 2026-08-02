@@ -28,7 +28,10 @@ failure exits non-zero. Duplicate case IDs are rejected before any provider call
 Local `results.jsonl` files retain their existing detail. Durable uploads omit output and full error
 text unless the sensitive-result switch is explicitly enabled.
 
-Tracing emits run, case, provider-call, and deterministic-evaluator spans. It records bounded
-identifiers, provider/model names, timings, outcomes, and token counts, but never records prompts,
-model output, expected values, exception messages, API keys, or bearer tokens. See
+Tracing emits run, case, provider-call, local-tool, handoff, and deterministic-evaluator spans. The
+adapter contract exposes content-free lifecycle callbacks; the OpenAI Agents SDK adapter maps its
+run hooks to those callbacks and disables sensitive content in SDK-native tracing. Traces record
+bounded identifiers, provider/model/tool/agent names, timings, outcomes, and token counts, but never
+record prompts, model or tool output, tool arguments, handoff input, expected values, exception
+messages, API keys, or bearer tokens. See
 [`docs/observability.md`](../docs/observability.md) for the complete contract.
