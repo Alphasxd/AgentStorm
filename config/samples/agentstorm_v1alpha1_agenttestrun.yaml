@@ -32,5 +32,5 @@ spec:
   telemetry:
     contentMode: omit
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
     imagePullPolicy: IfNotPresent
