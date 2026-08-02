@@ -13,6 +13,7 @@ import (
 	"time"
 
 	agentstormv1alpha1 "github.com/Alphasxd/AgentStorm/api/v1alpha1"
+	"github.com/Alphasxd/AgentStorm/internal/reliability"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,6 +35,7 @@ const (
 	conditionCredentials = "CredentialsReady"
 	conditionResultSink  = "ResultSinkReady"
 	conditionTelemetry   = "TelemetryReady"
+	conditionScenario    = "ScenarioReady"
 	workerConfigKey      = "run.json"
 )
 
@@ -231,7 +233,28 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Message: message, ObservedGeneration: run.Generation,
 		})
 	}
-	if err := r.ensureWorkerConfig(ctx, run); err != nil {
+	scenario, scenarioReady, reason, message, err := r.scenarioSnapshot(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !scenarioReady {
+		run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionScenario, Status: metav1.ConditionFalse, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+		if err := r.patchStatus(ctx, before, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if run.Spec.Reliability != nil && run.Spec.Reliability.ScenarioRef != nil {
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionScenario, Status: metav1.ConditionTrue, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+	}
+	if err := r.ensureWorkerConfig(ctx, run, scenario); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -334,6 +357,9 @@ func validateAndDefault(run *agentstormv1alpha1.AgentTestRun) error {
 			return fmt.Errorf("telemetry.redaction.patterns[%d] is invalid", index)
 		}
 	}
+	if err := validateReliability(run.Spec.Reliability); err != nil {
+		return err
+	}
 	if strings.TrimSpace(run.Spec.Runner.Image) == "" {
 		return fmt.Errorf("runner.image is required")
 	}
@@ -354,6 +380,61 @@ func validateAndDefault(run *agentstormv1alpha1.AgentTestRun) error {
 	}
 	if run.Spec.Workload.Parallelism < 1 || run.Spec.Workload.ConcurrencyPerWorker < 1 || run.Spec.Workload.Iterations < 1 || run.Spec.Workload.TimeoutSeconds < 1 {
 		return fmt.Errorf("parallelism, concurrencyPerWorker, iterations and timeoutSeconds must be positive")
+	}
+	return nil
+}
+
+func validateReliability(spec *agentstormv1alpha1.AgentReliabilitySpec) error {
+	if spec == nil {
+		return nil
+	}
+	if spec.Seed != nil && *spec.Seed < 0 {
+		return fmt.Errorf("reliability.seed must be non-negative")
+	}
+	if spec.ScenarioRef != nil {
+		if spec.Seed == nil {
+			return fmt.Errorf("reliability.seed is required when scenarioRef is configured")
+		}
+		if strings.TrimSpace(spec.ScenarioRef.Name) == "" || len(utilvalidation.IsDNS1123Subdomain(spec.ScenarioRef.Name)) > 0 {
+			return fmt.Errorf("reliability.scenarioRef.name must be a valid ConfigMap name")
+		}
+		if strings.TrimSpace(spec.ScenarioRef.Key) == "" || len(utilvalidation.IsConfigMapKey(spec.ScenarioRef.Key)) > 0 {
+			return fmt.Errorf("reliability.scenarioRef.key must be a valid ConfigMap key")
+		}
+	}
+	retry := &spec.Retry
+	if retry.MaxAttempts == 0 {
+		retry.MaxAttempts = 1
+	}
+	if retry.InitialBackoffMs == 0 {
+		retry.InitialBackoffMs = 100
+	}
+	if retry.MaxBackoffMs == 0 {
+		retry.MaxBackoffMs = 2000
+	}
+	if retry.MaxCumulativeBackoffMs == 0 {
+		retry.MaxCumulativeBackoffMs = 5000
+	}
+	if retry.JitterRatio == nil {
+		value := 0.2
+		retry.JitterRatio = &value
+	}
+	if retry.MaxAttempts < 1 || retry.MaxAttempts > 10 {
+		return fmt.Errorf("reliability.retry.maxAttempts must be between 1 and 10")
+	}
+	if retry.InitialBackoffMs < 1 || retry.MaxBackoffMs < 1 || retry.MaxCumulativeBackoffMs < 1 {
+		return fmt.Errorf("reliability retry backoff values must be positive")
+	}
+	if retry.InitialBackoffMs > retry.MaxBackoffMs {
+		return fmt.Errorf("reliability.retry.initialBackoffMs cannot exceed maxBackoffMs")
+	}
+	if *retry.JitterRatio < 0 || *retry.JitterRatio > 1 {
+		return fmt.Errorf("reliability.retry.jitterRatio must be between 0 and 1")
+	}
+	if breaker := spec.CircuitBreaker; breaker != nil {
+		if breaker.FailureThreshold < 1 || breaker.OpenDurationMs < 1 {
+			return fmt.Errorf("reliability.circuitBreaker values must be positive")
+		}
 	}
 	return nil
 }
@@ -417,13 +498,21 @@ func (r *AgentTestRunReconciler) credentialsReady(ctx context.Context, run *agen
 }
 
 type workerRunConfig struct {
-	RunID      string                                 `json:"run_id"`
-	Source     workerRunSourceConfig                  `json:"source"`
-	Dataset    workerDatasetConfig                    `json:"dataset"`
-	Target     agentstormv1alpha1.AgentTargetSpec     `json:"target"`
-	Workload   workerWorkloadConfig                   `json:"workload"`
-	Evaluation agentstormv1alpha1.AgentEvaluationSpec `json:"evaluation,omitempty"`
-	Telemetry  agentstormv1alpha1.AgentTelemetrySpec  `json:"telemetry,omitempty"`
+	RunID       string                                 `json:"run_id"`
+	Source      workerRunSourceConfig                  `json:"source"`
+	Dataset     workerDatasetConfig                    `json:"dataset"`
+	Target      agentstormv1alpha1.AgentTargetSpec     `json:"target"`
+	Workload    workerWorkloadConfig                   `json:"workload"`
+	Evaluation  agentstormv1alpha1.AgentEvaluationSpec `json:"evaluation,omitempty"`
+	Telemetry   agentstormv1alpha1.AgentTelemetrySpec  `json:"telemetry,omitempty"`
+	Reliability *workerReliabilityConfig               `json:"reliability,omitempty"`
+}
+
+type workerReliabilityConfig struct {
+	Seed           *int64                                      `json:"seed,omitempty"`
+	Retry          agentstormv1alpha1.AgentRetrySpec           `json:"retry"`
+	CircuitBreaker *agentstormv1alpha1.AgentCircuitBreakerSpec `json:"circuitBreaker,omitempty"`
+	Scenario       *reliability.Snapshot                       `json:"scenario,omitempty"`
 }
 
 type workerRunSourceConfig struct {
@@ -442,7 +531,7 @@ type workerWorkloadConfig struct {
 	TimeoutSeconds int64 `json:"timeout_seconds"`
 }
 
-func (r *AgentTestRunReconciler) ensureWorkerConfig(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) error {
+func (r *AgentTestRunReconciler) ensureWorkerConfig(ctx context.Context, run *agentstormv1alpha1.AgentTestRun, scenario *reliability.Snapshot) error {
 	config := workerRunConfig{
 		RunID:  string(run.UID),
 		Source: workerRunSourceConfig{Namespace: run.Namespace, Name: run.Name},
@@ -458,6 +547,14 @@ func (r *AgentTestRunReconciler) ensureWorkerConfig(ctx context.Context, run *ag
 		},
 		Evaluation: run.Spec.Evaluation,
 		Telemetry:  run.Spec.Telemetry,
+	}
+	if run.Spec.Reliability != nil {
+		config.Reliability = &workerReliabilityConfig{
+			Seed:           run.Spec.Reliability.Seed,
+			Retry:          run.Spec.Reliability.Retry,
+			CircuitBreaker: run.Spec.Reliability.CircuitBreaker,
+			Scenario:       scenario,
+		}
 	}
 	// Secrets are mounted through environment variables and must never be serialized.
 	config.Target.APIKeySecretRef = nil
@@ -487,6 +584,56 @@ func (r *AgentTestRunReconciler) ensureWorkerConfig(ctx context.Context, run *ag
 	}
 	cm.Data[workerConfigKey] = string(payload)
 	return r.Update(ctx, cm)
+}
+
+func (r *AgentTestRunReconciler) scenarioSnapshot(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) (*reliability.Snapshot, bool, string, string, error) {
+	if run.Spec.Reliability == nil || run.Spec.Reliability.ScenarioRef == nil {
+		return nil, true, "NotConfigured", "fault scenario is not configured", nil
+	}
+
+	// Once generated, the worker ConfigMap is the immutable execution snapshot. Source ConfigMap
+	// changes or deletion must not alter an in-flight run.
+	generated := &corev1.ConfigMap{}
+	generatedKey := types.NamespacedName{Namespace: run.Namespace, Name: childName(run.Name, "config")}
+	if err := r.Get(ctx, generatedKey, generated); err == nil {
+		if metav1.IsControlledBy(generated, run) {
+			var config workerRunConfig
+			if payload := generated.Data[workerConfigKey]; payload != "" && json.Unmarshal([]byte(payload), &config) == nil && config.Reliability != nil && config.Reliability.Scenario != nil {
+				return config.Reliability.Scenario, true, "Snapshotted", "fault scenario snapshot is immutable", nil
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return nil, false, "", "", err
+	}
+
+	ref := run.Spec.Reliability.ScenarioRef
+	source := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, source)
+	if apierrors.IsNotFound(err) {
+		return nil, false, "ConfigMapMissing", "referenced fault scenario ConfigMap is not available", nil
+	}
+	if err != nil {
+		return nil, false, "", "", err
+	}
+	payload, exists := source.Data[ref.Key]
+	if !exists {
+		if binary, binaryExists := source.BinaryData[ref.Key]; binaryExists {
+			payload, exists = string(binary), true
+		}
+	}
+	if !exists {
+		return nil, false, "KeyMissing", "referenced fault scenario ConfigMap key is not available", nil
+	}
+	scenario, _, digest, err := reliability.ParseScenario([]byte(payload))
+	if err != nil {
+		return nil, false, "InvalidScenario", "referenced fault scenario failed strict validation", nil
+	}
+	return &reliability.Snapshot{
+		SourceName: ref.Name,
+		SourceKey:  ref.Key,
+		Digest:     digest,
+		Scenario:   scenario,
+	}, true, "Available", "fault scenario is valid and ready to snapshot", nil
 }
 
 func (r *AgentTestRunReconciler) ensureJob(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) (*batchv1.Job, bool, error) {

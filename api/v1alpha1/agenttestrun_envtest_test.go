@@ -92,6 +92,43 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 		t.Fatalf("telemetry content mode = %q, want omit default", stored.Spec.Telemetry.ContentMode)
 	}
 
+	seed := int64(42)
+	reliabilityRun := validEnvtestRun(namespace.Name, "reliability")
+	reliabilityRun.Spec.Reliability = &agentstormv1alpha1.AgentReliabilitySpec{
+		Seed: &seed,
+		ScenarioRef: &agentstormv1alpha1.AgentFaultScenarioRef{
+			Name: "faults",
+			Key:  "scenario.json",
+		},
+	}
+	if err := kubernetesClient.Create(ctx, reliabilityRun); err != nil {
+		t.Fatalf("create reliability AgentTestRun: %v", err)
+	}
+	if err := kubernetesClient.Get(ctx, types.NamespacedName{Namespace: namespace.Name, Name: reliabilityRun.Name}, reliabilityRun); err != nil {
+		t.Fatalf("get reliability AgentTestRun: %v", err)
+	}
+	if reliabilityRun.Spec.Reliability == nil ||
+		reliabilityRun.Spec.Reliability.Retry.MaxAttempts != 1 ||
+		reliabilityRun.Spec.Reliability.Retry.InitialBackoffMs != 100 ||
+		reliabilityRun.Spec.Reliability.Retry.JitterRatio == nil ||
+		*reliabilityRun.Spec.Reliability.Retry.JitterRatio != 0.2 {
+		t.Fatalf("reliability defaults were not applied: %#v", reliabilityRun.Spec.Reliability)
+	}
+	reliabilityRun.Spec.Reliability.Retry.MaxAttempts = 2
+	err = kubernetesClient.Update(ctx, reliabilityRun)
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "reliability is immutable") {
+		t.Fatalf("immutable reliability update error = %v, want CRD CEL rejection", err)
+	}
+
+	missingSeed := validEnvtestRun(namespace.Name, "missing-seed")
+	missingSeed.Spec.Reliability = &agentstormv1alpha1.AgentReliabilitySpec{
+		ScenarioRef: &agentstormv1alpha1.AgentFaultScenarioRef{Name: "faults", Key: "scenario.json"},
+	}
+	err = kubernetesClient.Create(ctx, missingSeed)
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "seed") {
+		t.Fatalf("missing reliability seed error = %v, want CRD CEL rejection", err)
+	}
+
 	stored.Spec.Cancel = true
 	stored.Status.Phase = agentstormv1alpha1.AgentTestRunFailed
 	if err := kubernetesClient.Update(ctx, stored); err != nil {

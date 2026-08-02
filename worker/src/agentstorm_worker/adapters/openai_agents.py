@@ -5,6 +5,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..models import AdapterResponse, TestCase
+from ..execution_errors import classify_adapter_exception
 from .base import AgentLifecycle, HandoffLifecycleEvent, ToolLifecycleEvent
 
 
@@ -100,7 +101,10 @@ class OpenAIAgentsAdapter:
         run_options = {"run_config": self._run_config}
         if lifecycle is not None:
             run_options["hooks"] = _lifecycle_hooks(self._run_hooks, lifecycle)
-        result = await Runner.run(self._agent, case.prompt, **run_options)
+        try:
+            result = await Runner.run(self._agent, case.prompt, **run_options)
+        except Exception as exc:
+            raise classify_adapter_exception(exc) from exc
         usage = result.context_wrapper.usage
         return AdapterResponse(
             output=str(result.final_output),

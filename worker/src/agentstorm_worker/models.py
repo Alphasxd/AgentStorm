@@ -57,6 +57,8 @@ class CaseResult:
     success: bool
     latency_ms: float
     failure_kind: str = ""
+    failure_category: str = ""
+    error_code: str = ""
     output: str = ""
     error: str | None = None
     input_tokens: int | None = None

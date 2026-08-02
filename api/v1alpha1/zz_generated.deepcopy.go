@@ -38,6 +38,31 @@ func (in *AgentTargetSpec) DeepCopyInto(out *AgentTargetSpec) {
 
 func (in *AgentPricingSpec) DeepCopyInto(out *AgentPricingSpec) { *out = *in }
 
+func (in *AgentRetrySpec) DeepCopyInto(out *AgentRetrySpec) {
+	*out = *in
+	if in.JitterRatio != nil {
+		value := *in.JitterRatio
+		out.JitterRatio = &value
+	}
+}
+
+func (in *AgentReliabilitySpec) DeepCopyInto(out *AgentReliabilitySpec) {
+	*out = *in
+	if in.Seed != nil {
+		value := *in.Seed
+		out.Seed = &value
+	}
+	if in.ScenarioRef != nil {
+		out.ScenarioRef = new(AgentFaultScenarioRef)
+		*out.ScenarioRef = *in.ScenarioRef
+	}
+	in.Retry.DeepCopyInto(&out.Retry)
+	if in.CircuitBreaker != nil {
+		out.CircuitBreaker = new(AgentCircuitBreakerSpec)
+		*out.CircuitBreaker = *in.CircuitBreaker
+	}
+}
+
 func (in *AgentTelemetryRedactionSpec) DeepCopyInto(out *AgentTelemetryRedactionSpec) {
 	*out = *in
 	if in.Patterns != nil {
@@ -111,6 +136,10 @@ func (in *AgentTestRunSpec) DeepCopyInto(out *AgentTestRunSpec) {
 	in.Workload.DeepCopyInto(&out.Workload)
 	in.Evaluation.DeepCopyInto(&out.Evaluation)
 	in.Telemetry.DeepCopyInto(&out.Telemetry)
+	if in.Reliability != nil {
+		out.Reliability = new(AgentReliabilitySpec)
+		in.Reliability.DeepCopyInto(out.Reliability)
+	}
 }
 
 func (in *AgentTestRunStatus) DeepCopyInto(out *AgentTestRunStatus) {

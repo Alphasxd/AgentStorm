@@ -89,6 +89,53 @@ type AgentEvaluationSpec struct {
 	MaxP95LatencyMs *int64 `json:"maxP95LatencyMs,omitempty"`
 }
 
+type AgentFaultScenarioRef struct {
+	// Name is the ConfigMap containing the FaultScenario JSON document.
+	Name string `json:"name"`
+	// Key selects the FaultScenario JSON document within the ConfigMap.
+	Key string `json:"key"`
+}
+
+type AgentRetrySpec struct {
+	// MaxAttempts includes the initial attempt. The default preserves the pre-M4 no-retry behavior.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +kubebuilder:default=1
+	MaxAttempts int32 `json:"maxAttempts,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=100
+	InitialBackoffMs int64 `json:"initialBackoffMs,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=2000
+	MaxBackoffMs int64 `json:"maxBackoffMs,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=5000
+	MaxCumulativeBackoffMs int64 `json:"maxCumulativeBackoffMs,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	// +kubebuilder:default=0.2
+	JitterRatio *float64 `json:"jitterRatio,omitempty"`
+	// AllowAmbiguousRetries opts into retrying failures that may have completed provider or tool work.
+	AllowAmbiguousRetries bool `json:"allowAmbiguousRetries,omitempty"`
+}
+
+type AgentCircuitBreakerSpec struct {
+	// +kubebuilder:validation:Minimum=1
+	FailureThreshold int32 `json:"failureThreshold"`
+	// +kubebuilder:validation:Minimum=1
+	OpenDurationMs int64 `json:"openDurationMs"`
+}
+
+type AgentReliabilitySpec struct {
+	// Seed is required when scenarioRef is configured and makes fault selection reproducible.
+	// +kubebuilder:validation:Minimum=0
+	Seed        *int64                 `json:"seed,omitempty"`
+	ScenarioRef *AgentFaultScenarioRef `json:"scenarioRef,omitempty"`
+	// +kubebuilder:default={}
+	Retry          AgentRetrySpec           `json:"retry,omitempty"`
+	CircuitBreaker *AgentCircuitBreakerSpec `json:"circuitBreaker,omitempty"`
+}
+
 type AgentRunnerSpec struct {
 	// Image is the AgentStorm worker image.
 	Image string `json:"image"`
@@ -107,6 +154,10 @@ type AgentTestRunSpec struct {
 	// +kubebuilder:default={}
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="telemetry is immutable; create a new AgentTestRun"
 	Telemetry AgentTelemetrySpec `json:"telemetry,omitempty"`
+	// Reliability configures immutable fault injection, retry, and per-worker circuit breaking.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="reliability is immutable; create a new AgentTestRun"
+	// +kubebuilder:validation:XValidation:rule="!has(self.scenarioRef) || has(self.seed)",message="reliability.seed is required when scenarioRef is configured"
+	Reliability *AgentReliabilitySpec `json:"reliability,omitempty"`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="runner is immutable; create a new AgentTestRun"
 	Runner AgentRunnerSpec `json:"runner"`
 	// Cancel declaratively requests termination of the worker Job.

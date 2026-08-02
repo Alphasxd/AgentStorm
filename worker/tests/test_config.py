@@ -134,6 +134,55 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate dataset case id"):
                 load_dataset(dataset_path)
 
+    def test_loads_strict_reliability_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "run.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {"provider": "fake"},
+                        "reliability": {
+                            "seed": 42,
+                            "retry": {"maxAttempts": 3, "jitterRatio": 0},
+                            "circuitBreaker": {
+                                "failureThreshold": 5,
+                                "openDurationMs": 30000,
+                            },
+                            "scenario": {
+                                "sourceName": "faults",
+                                "sourceKey": "scenario.json",
+                                "digest": "sha256:" + "a" * 64,
+                                "scenario": {
+                                    "apiVersion": "agentstorm.io/v1alpha1",
+                                    "kind": "FaultScenario",
+                                    "rules": [
+                                        {
+                                            "name": "first",
+                                            "fault": "rate_limit",
+                                            "probability": 1,
+                                            "attempts": [1],
+                                        }
+                                    ],
+                                },
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(config_path)
+            self.assertIsNotNone(config.reliability)
+            assert config.reliability is not None
+            self.assertEqual(config.reliability.retry.max_attempts, 3)
+            self.assertEqual(config.reliability.retry.jitter_ratio, 0)
+            self.assertEqual(config.reliability.scenario.rules[0].attempts, (1,))  # type: ignore[union-attr]
+
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            raw["reliability"]["scenario"]["scenario"]["rules"][0]["script"] = "unsafe"
+            config_path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown field"):
+                load_run_config(config_path)
+
     def test_loads_all_assertion_types_and_legacy_contains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dataset_path = Path(directory) / "cases.jsonl"

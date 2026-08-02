@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-fault-scenario
+data:
+  scenario.json: |
+    {
+      "apiVersion": "agentstorm.io/v1alpha1",
+      "kind": "FaultScenario",
+      "rules": [
+        {
+          "name": "first-attempt-rate-limit",
+          "fault": "rate_limit",
+          "probability": 0.25,
+          "caseIDs": ["greeting-1"],
+          "iterations": [0],
+          "attempts": [1]
+        }
+      ]
+    }

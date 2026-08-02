@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -488,6 +489,125 @@ func TestReconcileWaitsForDataset(t *testing.T) {
 	}
 }
 
+func TestReconcileWaitsForValidFaultScenario(t *testing.T) {
+	tests := []struct {
+		name       string
+		scenario   *corev1.ConfigMap
+		wantReason string
+	}{
+		{name: "missing ConfigMap", wantReason: "ConfigMapMissing"},
+		{
+			name: "missing key",
+			scenario: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "faults", Namespace: "default"},
+				Data:       map[string]string{"other.json": `{}`},
+			},
+			wantReason: "KeyMissing",
+		},
+		{
+			name: "invalid document",
+			scenario: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "faults", Namespace: "default"},
+				Data:       map[string]string{"scenario.json": `{"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"bad","fault":"shell","probability":1}]}`},
+			},
+			wantReason: "InvalidScenario",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			run := testRunWithScenario()
+			dataset := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+				Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+			}
+			objects := []client.Object{run, dataset}
+			if test.scenario != nil {
+				objects = append(objects, test.scenario)
+			}
+			kubernetesClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(objects...).Build()
+			reconciler := &AgentTestRunReconciler{Client: kubernetesClient, Scheme: scheme}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+			result, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if result.RequeueAfter == 0 {
+				t.Fatal("expected a requeue while the scenario is unavailable")
+			}
+			if err := kubernetesClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+				t.Fatal("worker Job should not exist before the scenario is ready")
+			}
+			updated := &agentstormv1alpha1.AgentTestRun{}
+			if err := kubernetesClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatalf("get run: %v", err)
+			}
+			condition := meta.FindStatusCondition(updated.Status.Conditions, conditionScenario)
+			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != test.wantReason {
+				t.Fatalf("ScenarioReady = %#v, want false/%s", condition, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestReconcileSnapshotsFaultScenarioWithoutDrift(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRunWithScenario()
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	scenario := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "faults", Namespace: "default"},
+		Data: map[string]string{"scenario.json": `{
+			"apiVersion":"agentstorm.io/v1alpha1",
+			"kind":"FaultScenario",
+			"rules":[{"name":"first","fault":"rate_limit","probability":1,"caseIDs":["1"]}]
+		}`},
+	}
+	kubernetesClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset, scenario).Build()
+	reconciler := &AgentTestRunReconciler{Client: kubernetesClient, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	generated := &corev1.ConfigMap{}
+	generatedKey := types.NamespacedName{Namespace: "default", Name: "demo-config"}
+	if err := kubernetesClient.Get(context.Background(), generatedKey, generated); err != nil {
+		t.Fatalf("get generated config: %v", err)
+	}
+	originalSnapshot := generated.Data[workerConfigKey]
+	var config workerRunConfig
+	if err := json.Unmarshal([]byte(originalSnapshot), &config); err != nil {
+		t.Fatalf("decode generated config: %v", err)
+	}
+	if config.Reliability == nil || config.Reliability.Scenario == nil || config.Reliability.Scenario.Digest == "" {
+		t.Fatalf("generated reliability snapshot = %#v", config.Reliability)
+	}
+	if config.Reliability.Scenario.Scenario.Rules[0].Attempts[0] != 1 {
+		t.Fatalf("scenario attempt default was not normalized: %#v", config.Reliability.Scenario)
+	}
+
+	if err := kubernetesClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "faults"}, scenario); err != nil {
+		t.Fatalf("get source scenario: %v", err)
+	}
+	scenario.Data["scenario.json"] = `{"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[]}`
+	if err := kubernetesClient.Update(context.Background(), scenario); err != nil {
+		t.Fatalf("update source scenario: %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile after source change: %v", err)
+	}
+	if err := kubernetesClient.Get(context.Background(), generatedKey, generated); err != nil {
+		t.Fatalf("get generated config after source change: %v", err)
+	}
+	if generated.Data[workerConfigKey] != originalSnapshot {
+		t.Fatal("generated fault scenario snapshot drifted after source ConfigMap changed")
+	}
+}
+
 func TestReconcileCancelsExistingJob(t *testing.T) {
 	scheme := testScheme(t)
 	run := testRun()
@@ -645,6 +765,19 @@ func testRun() *agentstormv1alpha1.AgentTestRun {
 			Runner: agentstormv1alpha1.AgentRunnerSpec{Image: "agentstorm-worker:test"},
 		},
 	}
+}
+
+func testRunWithScenario() *agentstormv1alpha1.AgentTestRun {
+	run := testRun()
+	seed := int64(42)
+	run.Spec.Reliability = &agentstormv1alpha1.AgentReliabilitySpec{
+		Seed: &seed,
+		ScenarioRef: &agentstormv1alpha1.AgentFaultScenarioRef{
+			Name: "faults",
+			Key:  "scenario.json",
+		},
+	}
+	return run
 }
 
 func assertEnv(t *testing.T, env []corev1.EnvVar, name, want string) {
