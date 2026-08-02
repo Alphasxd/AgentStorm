@@ -1,3 +1,3 @@
 {"id":"echo-1","input":"hello AgentStorm","expected_contains":"hello AgentStorm","metadata":{"category":"smoke"}}
-{"id":"echo-2","input":"test tool-call reliability","expected_contains":"tool-call reliability","metadata":{"category":"smoke"}}
-{"id":"echo-3","input":"measure agent latency","expected_contains":"agent latency","metadata":{"category":"smoke"}}
+{"id":"echo-2","input":"test tool-call reliability","assertions":[{"type":"contains","value":"tool-call reliability"},{"type":"regex","pattern":"^fake response:"},{"type":"tool_path","path":["fake.echo"]}],"metadata":{"category":"smoke"}}
+{"id":"echo-3","input":"measure agent latency","assertions":[{"type":"exact","value":"fake response: measure agent latency"},{"type":"latency","max_ms":1000}],"metadata":{"category":"smoke"}}

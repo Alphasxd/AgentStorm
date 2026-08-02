@@ -13,16 +13,19 @@ from .adapters import (
     ToolLifecycleEvent,
 )
 from .config import EvaluationConfig, RunConfig
+from .evaluators import EvaluationContext, EvaluatorRegistry
 from .models import CaseResult, RunSummary, TestCase
 from .telemetry import DetachedTraceSpan, NoopTelemetry, TelemetryClient
 
 
-class _TelemetryLifecycle(AgentLifecycle):
+class _CaseLifecycle(AgentLifecycle):
     def __init__(self, telemetry: TelemetryClient) -> None:
         self._telemetry = telemetry
         self._tools: dict[str, DetachedTraceSpan] = {}
+        self.tool_path: list[str] = []
 
     def tool_started(self, event: ToolLifecycleEvent) -> None:
+        self.tool_path.append(event.name)
         previous = self._tools.pop(event.invocation_id, None)
         if previous is not None:
             previous.set_error("duplicate_tool_start")
@@ -82,8 +85,10 @@ class WorkloadRunner:
         self._shard_index = shard_index
         self._shard_count = shard_count
         self._telemetry = telemetry or NoopTelemetry()
+        self._evaluators: EvaluatorRegistry | None = None
 
     async def execute(self, cases: list[TestCase]) -> tuple[list[CaseResult], RunSummary]:
+        self._evaluators = EvaluatorRegistry(cases)
         started = time.perf_counter()
         selected = [
             case
@@ -119,7 +124,7 @@ class WorkloadRunner:
             "agentstorm.case.iteration": iteration,
         }
         with self._telemetry.start_span("agentstorm.case", case_attributes) as case_span:
-            lifecycle = _TelemetryLifecycle(self._telemetry)
+            lifecycle = _CaseLifecycle(self._telemetry)
             try:
                 provider_attributes: dict[str, str | int | bool | float] = {
                     "gen_ai.operation.name": "invoke_agent",
@@ -130,6 +135,7 @@ class WorkloadRunner:
                 with self._telemetry.start_span(
                     "gen_ai.invoke_agent", provider_attributes
                 ) as provider_span:
+                    provider_started = time.perf_counter()
                     try:
                         response = await asyncio.wait_for(
                             self._adapter.run(case, lifecycle=lifecycle),
@@ -139,6 +145,7 @@ class WorkloadRunner:
                         lifecycle.close(type(exc).__name__)
                         provider_span.set_error(type(exc).__name__)
                         raise
+                    provider_latency_ms = (time.perf_counter() - provider_started) * 1000
                     lifecycle.close()
                     if response.input_tokens is not None:
                         provider_span.set_attribute(
@@ -149,38 +156,58 @@ class WorkloadRunner:
                             "gen_ai.usage.output_tokens", response.output_tokens
                         )
 
-                evaluator_name = "contains" if case.expected_contains is not None else "none"
-                with self._telemetry.start_span(
-                    "agentstorm.evaluate",
-                    {
-                        "gen_ai.evaluation.name": evaluator_name,
-                        "agentstorm.evaluation.deterministic": True,
-                    },
-                ) as evaluator_span:
-                    success = (
-                        case.expected_contains is None
-                        or case.expected_contains in response.output
-                    )
-                    evaluator_span.set_attribute(
-                        "gen_ai.evaluation.score.label", "pass" if success else "fail"
-                    )
-                    if not success:
-                        evaluator_span.set_error("assertion")
-                error = (
-                    None
-                    if success
-                    else f"output does not contain {case.expected_contains!r}"
+                assert self._evaluators is not None
+                outcomes = await self._evaluators.evaluate(
+                    case,
+                    EvaluationContext(
+                        case_id=case.case_id,
+                        prompt=case.prompt,
+                        output=response.output,
+                        latency_ms=provider_latency_ms,
+                        tool_path=lifecycle.tool_path,
+                        metadata=case.metadata,
+                    ),
                 )
+                if not outcomes:
+                    with self._telemetry.start_span(
+                        "agentstorm.evaluate",
+                        {
+                            "gen_ai.evaluation.name": "none",
+                            "agentstorm.evaluation.index": 0,
+                            "agentstorm.evaluation.deterministic": True,
+                            "gen_ai.evaluation.score.label": "pass",
+                        },
+                    ):
+                        pass
+                for outcome in outcomes:
+                    with self._telemetry.start_span(
+                        "agentstorm.evaluate",
+                        {
+                            "gen_ai.evaluation.name": outcome.type,
+                            "agentstorm.evaluation.index": outcome.index,
+                            "agentstorm.evaluation.deterministic": True,
+                            "gen_ai.evaluation.score.label": (
+                                "pass" if outcome.passed else "fail"
+                            ),
+                        },
+                    ) as evaluator_span:
+                        if not outcome.passed:
+                            evaluator_span.set_error("assertion")
+                success = all(outcome.passed for outcome in outcomes)
+                failed_types = [outcome.type for outcome in outcomes if not outcome.passed]
+                error = None if success else f"failed assertions: {', '.join(failed_types)}"
                 result = CaseResult(
                     case_id=case.case_id,
                     iteration=iteration,
                     success=success,
-                    latency_ms=(time.perf_counter() - started) * 1000,
+                    latency_ms=provider_latency_ms,
                     failure_kind="" if success else "assertion",
                     output=response.output,
                     error=error,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
+                    tool_path=lifecycle.tool_path,
+                    assertions=outcomes,
                 )
             except Exception as exc:  # noqa: BLE001 - provider errors are test results
                 case_span.set_error(type(exc).__name__)

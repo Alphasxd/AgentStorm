@@ -4,6 +4,7 @@ CONTROLLER_IMAGE ?= agentstorm-controller:dev
 WORKER_IMAGE ?= agentstorm-worker:dev
 RESULT_API_IMAGE ?= agentstorm-result-api:dev
 ENVTEST_K8S_VERSION ?= v1.33.0
+PYTHON ?= python3
 
 .PHONY: fmt vet test test-envtest test-results-integration test-result-pipeline build build-result-api worker-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local e2e-results-local
 
@@ -15,7 +16,7 @@ vet:
 
 test:
 	go test ./...
-	PYTHONPATH=worker/src python3 -m unittest discover -s worker/tests -v
+	PYTHONPATH=worker/src $(PYTHON) -m unittest discover -s worker/tests -v
 
 test-envtest:
 	ENVTEST_K8S_VERSION=$(ENVTEST_K8S_VERSION) go test -tags=envtest ./api/v1alpha1 -run TestAgentTestRunCRDContract -count=1
@@ -35,7 +36,7 @@ build-result-api:
 	go build -o bin/agentstorm-result-api ./cmd/result-api
 
 worker-local:
-	PYTHONPATH=worker/src python3 -m agentstorm_worker run \
+	PYTHONPATH=worker/src $(PYTHON) -m agentstorm_worker run \
 		--config examples/run.local.json \
 		--dataset examples/datasets/basic.jsonl \
 		--output .out/local

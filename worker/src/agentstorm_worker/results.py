@@ -136,6 +136,23 @@ class ResultClient:
         }
         if result.failure_kind:
             payload["failure_kind"] = result.failure_kind
+        if result.tool_path:
+            payload["tool_path"] = result.tool_path
+        if result.assertions:
+            payload["assertions"] = [
+                {
+                    "index": outcome.index,
+                    "type": outcome.type,
+                    "passed": outcome.passed,
+                    "reason_code": outcome.reason_code,
+                    **(
+                        {"message": outcome.message}
+                        if self._config.include_sensitive and outcome.message is not None
+                        else {}
+                    ),
+                }
+                for outcome in result.assertions
+            ]
         if self._config.include_sensitive:
             if result.output:
                 payload["output"] = result.output

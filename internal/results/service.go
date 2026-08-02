@@ -207,8 +207,35 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 			(item.Error != nil && invalidText(*item.Error, maxRequestBytes)) {
 			return validationErrorf("cases[%d] contains invalid text", index)
 		}
+		if len(item.ToolPath) > 1000 {
+			return validationErrorf("cases[%d].tool_path cannot contain more than 1000 items", index)
+		}
+		for toolIndex, toolName := range item.ToolPath {
+			if strings.TrimSpace(toolName) == "" || invalidText(toolName, 512) {
+				return validationErrorf("cases[%d].tool_path[%d] is invalid", index, toolIndex)
+			}
+		}
+		if len(item.Assertions) > 100 {
+			return validationErrorf("cases[%d].assertions cannot contain more than 100 items", index)
+		}
+		failedAssertion := false
+		for assertionIndex, assertion := range item.Assertions {
+			if assertion.Index != assertionIndex || invalidText(assertion.Type, 64) ||
+				strings.TrimSpace(assertion.Type) == "" || invalidText(assertion.ReasonCode, 64) ||
+				strings.TrimSpace(assertion.ReasonCode) == "" ||
+				(assertion.Message != nil && invalidText(*assertion.Message, maxRequestBytes)) {
+				return validationErrorf("cases[%d].assertions[%d] is invalid", index, assertionIndex)
+			}
+			failedAssertion = failedAssertion || !assertion.Passed
+		}
 		if !item.Success && strings.TrimSpace(item.FailureKind) == "" {
 			return validationErrorf("cases[%d].failure_kind is required for failed results", index)
+		}
+		if item.Success && failedAssertion {
+			return validationErrorf("cases[%d] cannot succeed with a failed assertion", index)
+		}
+		if item.FailureKind == "assertion" && !failedAssertion {
+			return validationErrorf("cases[%d] assertion failure requires a failed assertion", index)
 		}
 	}
 	return nil

@@ -73,6 +73,7 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	second := testShard(runID, 1, "case-b", false)
 	second.Cases[0].LatencyMS = 30
 	second.Cases[0].OutputTokens = 5
+	second.Cases[0].Assertions[0].Message = stringPointer("sensitive detail")
 	created, err = service.UploadShard(ctx, runID, 1, "run/"+runID+"/shard/1", second)
 	if err != nil || !created {
 		t.Fatalf("upload second shard: created=%v err=%v", created, err)
@@ -90,10 +91,13 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	if detail.Summary.ThresholdsPassed {
 		t.Fatal("50% success rate should fail 60% threshold")
 	}
-
 	failed, err := service.ListCases(ctx, runID, "", 1, true)
 	if err != nil || len(failed.Cases) != 1 || failed.Cases[0].CaseID != "case-b" {
 		t.Fatalf("failed cases: %#v err=%v", failed, err)
+	}
+	if len(failed.Cases[0].Assertions) != 1 || failed.Cases[0].Assertions[0].ReasonCode != "mismatch" ||
+		len(failed.Cases[0].ToolPath) != 1 || failed.Cases[0].ToolPath[0] != "safe.lookup" {
+		t.Fatalf("structured evaluation fields were not persisted: %#v", failed.Cases[0])
 	}
 	firstPage, err := service.ListCases(ctx, runID, "", 1, false)
 	if err != nil || len(firstPage.Cases) != 1 || firstPage.NextCursor == "" {
@@ -135,6 +139,8 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 		t.Fatalf("expected three raw object writes, got %d", store.count())
 	}
 }
+
+func stringPointer(value string) *string { return &value }
 
 type captureObjectStore struct {
 	mutex sync.Mutex

@@ -29,6 +29,8 @@ content returns HTTP `409`.
 
 Run comparison reports candidate-minus-baseline deltas for success and failure rates, P50/P95/P99
 latency, and token counts. Latency percentage deltas are `null` when the baseline value is zero.
+Case pages also return ordered tool paths and structured assertion outcomes. Assertion values and
+custom messages remain omitted unless sensitive result upload was explicitly enabled.
 
 ## Configuration
 
