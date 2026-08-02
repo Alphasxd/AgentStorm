@@ -3,8 +3,9 @@
 The worker reads one run configuration and a JSONL dataset, executes its assigned shard,
 evaluates deterministic assertions, and writes `results.jsonl` plus `summary.json`.
 
-The default `fake` provider has no third-party dependency. Install the optional OpenAI
-adapter with `pip install -e '.[openai]'`.
+The default `fake` provider has no third-party dependency. Install the optional OpenAI adapter with
+`pip install -e '.[openai]'`. Install OTLP tracing support with `pip install -e '.[telemetry]'`, or
+both integrations with `pip install -e '.[openai,telemetry]'`.
 
 The `openai-agents` adapter accepts an explicit model and optional OpenAI-compatible `baseURL`.
 Credentials are read from `OPENAI_API_KEY`; in Kubernetes the controller injects that variable
@@ -20,6 +21,14 @@ failure exits non-zero. Duplicate case IDs are rejected before any provider call
 | `AGENTSTORM_RESULT_WRITE_TOKEN` | required when enabled | Writer bearer token injected from a Secret |
 | `AGENTSTORM_RESULT_TIMEOUT_SECONDS` | `30` | Timeout for each registration or upload request |
 | `AGENTSTORM_INCLUDE_SENSITIVE_RESULTS` | `false` | Include output and full error text in durable uploads |
+| `AGENTSTORM_OTEL_ENABLED` | `false` | Enable worker OpenTelemetry spans |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP HTTP exporter base URL |
+| `OTEL_SERVICE_NAME` | `agentstorm-worker` | Worker trace service name |
 
 Local `results.jsonl` files retain their existing detail. Durable uploads omit output and full error
 text unless the sensitive-result switch is explicitly enabled.
+
+Tracing emits run, case, provider-call, and deterministic-evaluator spans. It records bounded
+identifiers, provider/model names, timings, outcomes, and token counts, but never records prompts,
+model output, expected values, exception messages, API keys, or bearer tokens. See
+[`docs/observability.md`](../docs/observability.md) for the complete contract.

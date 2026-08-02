@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agentstorm-system
+resources:
+  - ../results
+  - collector.yaml
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: agentstorm-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --otel-exporter-otlp-endpoint=http://agentstorm-otel-collector:4318

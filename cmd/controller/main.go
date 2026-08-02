@@ -35,6 +35,7 @@ func main() {
 	var resultWriteTokenSecretKey string
 	var includeSensitiveResults bool
 	var resultUploadTimeout time.Duration
+	var otlpEndpoint string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for the metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address for health probes")
 	flag.BoolVar(&leaderElection, "leader-elect", false, "enable leader election")
@@ -44,6 +45,7 @@ func main() {
 	flag.StringVar(&resultWriteTokenSecretKey, "result-write-token-secret-key", "write-token", "Secret data key containing the Result API write token")
 	flag.BoolVar(&includeSensitiveResults, "include-sensitive-results", false, "upload case output and full error text")
 	flag.DurationVar(&resultUploadTimeout, "result-upload-timeout", 30*time.Second, "timeout for each Result API request")
+	flag.StringVar(&otlpEndpoint, "otel-exporter-otlp-endpoint", "", "OTLP/HTTP base endpoint injected into workers; empty disables tracing")
 	zapOptions := zap.Options{Development: true}
 	zapOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -61,6 +63,11 @@ func main() {
 	}
 	if err := resultSink.ValidateAndDefault(); err != nil {
 		ctrl.Log.Error(err, "invalid result sink configuration")
+		os.Exit(1)
+	}
+	telemetry := agentcontroller.TelemetryConfig{OTLPEndpoint: otlpEndpoint}
+	if err := telemetry.ValidateAndDefault(); err != nil {
+		ctrl.Log.Error(err, "invalid telemetry configuration")
 		os.Exit(1)
 	}
 
@@ -87,6 +94,7 @@ func main() {
 		APIReader:  manager.GetAPIReader(),
 		Scheme:     manager.GetScheme(),
 		ResultSink: resultSink,
+		Telemetry:  telemetry,
 	}).SetupWithManager(manager); err != nil {
 		ctrl.Log.Error(err, "unable to create controller")
 		os.Exit(1)

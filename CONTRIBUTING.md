@@ -36,12 +36,15 @@ CLUSTER_PROVIDER=kind make e2e-results-local
 This command first runs the ordinary namespace-scoped controller E2E, then builds and loads the
 current Result API, deploys the development-only PostgreSQL/MinIO overlay, checks Result API Secret
 gating, runs two concurrent two-shard workloads, and verifies durable run, case, and comparison
-queries. Its `agentstorm-result-storage` and `agentstorm-result-auth` Secrets contain test-only
-values, are labeled `app.kubernetes.io/managed-by=agentstorm-e2e`, and never replace Secrets without
-that label. The result E2E explicitly disables NetworkPolicies only in its local compatibility
-overlay because some nested kind/OrbStack CNI combinations mis-handle standard port-only rules;
-the normal namespace E2E and public `config/results` manifest retain those policies. Set
-`KEEP_E2E_RESOURCES=false` to delete the result stack and its PVCs after the check.
+queries. Source-image runs also deploy a development-only OpenTelemetry Collector, verify worker
+run/case/provider/evaluator spans, query the Result API Prometheus endpoint, and assert that test
+prompts, case IDs, run IDs, and bearer tokens are absent from the relevant telemetry surface. Its
+`agentstorm-result-storage` and `agentstorm-result-auth` Secrets contain test-only values, are labeled
+`app.kubernetes.io/managed-by=agentstorm-e2e`, and never replace Secrets without that label. The
+result E2E explicitly disables NetworkPolicies only in its local compatibility overlay because some
+nested kind/OrbStack CNI combinations mis-handle standard port-only rules; the normal namespace E2E
+and public `config/results` manifest retain those policies. Set `KEEP_E2E_RESOURCES=false` to delete
+the result stack and its PVCs after the check.
 
 Changes to the CRD must update all of the following in one pull request:
 

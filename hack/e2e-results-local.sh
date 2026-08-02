@@ -9,6 +9,7 @@ e2e_namespace="${E2E_NAMESPACE:-agentstorm-system}"
 keep_resources="${KEEP_E2E_RESOURCES:-true}"
 skip_image_build="${SKIP_IMAGE_BUILD:-false}"
 load_local_images="${LOAD_LOCAL_IMAGES:-true}"
+telemetry_e2e="${ENABLE_TELEMETRY_E2E:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 result_api_image="${RESULT_API_IMAGE:-agentstorm-result-api:dev}"
@@ -44,6 +45,14 @@ require_boolean() {
 require_boolean KEEP_E2E_RESOURCES "$keep_resources"
 require_boolean SKIP_IMAGE_BUILD "$skip_image_build"
 require_boolean LOAD_LOCAL_IMAGES "$load_local_images"
+if [[ -z "$telemetry_e2e" ]]; then
+  if [[ "$skip_image_build" == "false" ]]; then
+    telemetry_e2e="true"
+  else
+    telemetry_e2e="false"
+  fi
+fi
+require_boolean ENABLE_TELEMETRY_E2E "$telemetry_e2e"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 require_command curl
@@ -170,9 +179,10 @@ cleanup_stack() {
     delete_run "$run_name" || true
   done
   "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset -n "$e2e_namespace" --ignore-not-found >/dev/null || true
-  "${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete deployment agentstorm-result-api agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete statefulset agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null || true
-  "${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete configmap agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete networkpolicy agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete pvc -n "$e2e_namespace" -l app.kubernetes.io/part-of=agentstorm-results --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete secret -n "$e2e_namespace" -l app.kubernetes.io/managed-by=agentstorm-e2e,app.kubernetes.io/part-of=agentstorm-results --ignore-not-found >/dev/null || true
@@ -190,6 +200,7 @@ diagnostics() {
   "${kubectl_cmd[@]}" get agenttestruns,jobs -n "$e2e_namespace" -o wide >&2 || true
   "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-controller --tail=200 >&2 || true
   "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-result-api --tail=200 >&2 || true
+  "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-otel-collector --tail=200 >&2 || true
   exit "$exit_code"
 }
 trap diagnostics ERR
@@ -215,9 +226,10 @@ done
 # a retained PVC can never be paired with a newly generated password on a later E2E invocation.
 assert_secret_is_managed agentstorm-result-storage
 assert_secret_is_managed agentstorm-result-auth
-"${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
+"${kubectl_cmd[@]}" delete deployment agentstorm-result-api agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
 "${kubectl_cmd[@]}" delete statefulset agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
-"${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null
+"${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null
+"${kubectl_cmd[@]}" delete configmap agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null
 "${kubectl_cmd[@]}" delete networkpolicy agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null
 "${kubectl_cmd[@]}" delete pvc -n "$e2e_namespace" -l app.kubernetes.io/part-of=agentstorm-results --ignore-not-found --wait=true >/dev/null
 delete_managed_secret agentstorm-result-storage
@@ -232,14 +244,24 @@ delete_managed_secret agentstorm-result-auth
   app.kubernetes.io/part-of=agentstorm-results >/dev/null
 create_auth_secret
 
-"${kubectl_cmd[@]}" apply -k "$repo_root/config/dev/results" >/dev/null
+result_overlay="$repo_root/config/dev/results"
+if [[ "$telemetry_e2e" == "true" ]]; then
+  result_overlay="$repo_root/config/dev/telemetry"
+fi
+"${kubectl_cmd[@]}" apply -k "$result_overlay" >/dev/null
 "${kubectl_cmd[@]}" set image deployment/agentstorm-controller -n "$e2e_namespace" "manager=$controller_image" >/dev/null
 "${kubectl_cmd[@]}" set image deployment/agentstorm-result-api -n "$e2e_namespace" "result-api=$result_api_image" >/dev/null
 "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-controller -n "$e2e_namespace" >/dev/null
 "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-result-api -n "$e2e_namespace" >/dev/null
+if [[ "$telemetry_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-otel-collector -n "$e2e_namespace" >/dev/null
+fi
 "${kubectl_cmd[@]}" rollout status statefulset/agentstorm-postgres -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" rollout status statefulset/agentstorm-minio -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" rollout status deployment/agentstorm-result-api -n "$e2e_namespace" --timeout="$wait_timeout"
+if [[ "$telemetry_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" rollout status deployment/agentstorm-otel-collector -n "$e2e_namespace" --timeout="$wait_timeout"
+fi
 "${kubectl_cmd[@]}" rollout status deployment/agentstorm-controller -n "$e2e_namespace" --timeout="$wait_timeout"
 
 "${kubectl_cmd[@]}" apply -f - <<YAML
@@ -366,6 +388,9 @@ curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$baseline_id/cases?limit=10" >"$test_dir/baseline-cases.json"
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/comparisons?baseline=$baseline_id&candidate=$candidate_id" >"$test_dir/comparison.json"
+if [[ "$telemetry_e2e" == "true" ]]; then
+  curl --fail --silent "$base_url/metrics" >"$test_dir/metrics.txt"
+fi
 
 python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/baseline-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" <<'PY'
 import json
@@ -401,4 +426,51 @@ expected_deltas = {
 assert expected_deltas <= comparison["delta"].keys(), comparison
 PY
 
-echo "AgentStorm result-stack E2E passed: context=$kube_context baseline=$baseline_id candidate=$candidate_id result_api_image=$result_api_image"
+if [[ "$telemetry_e2e" == "true" ]]; then
+  python3 - "$test_dir/metrics.txt" "$baseline_id" "$candidate_id" "$write_token" "$read_token" <<'PY'
+import pathlib
+import sys
+
+metrics = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for name in (
+    "agentstorm_result_api_http_requests_total",
+    "agentstorm_result_api_http_request_duration_seconds",
+    "agentstorm_result_api_run_registrations_total",
+    "agentstorm_result_api_shard_uploads_total",
+    "agentstorm_result_api_cases_total",
+    "agentstorm_result_api_tokens_total",
+):
+    assert name in metrics, name
+for forbidden in sys.argv[2:]:
+    assert forbidden not in metrics, forbidden
+assert "case-a" not in metrics
+assert "case-b" not in metrics
+PY
+
+  collector_logs=""
+  for attempt in {1..30}; do
+    collector_logs="$("${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-otel-collector --tail=2000)"
+    if [[ "$collector_logs" == *agentstorm.run* && "$collector_logs" == *gen_ai.invoke_agent* ]]; then
+      break
+    fi
+    if [[ "$attempt" == "30" ]]; then
+      echo "timed out waiting for exported worker spans" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  for span_name in agentstorm.run agentstorm.case gen_ai.invoke_agent agentstorm.evaluate; do
+    if [[ "$collector_logs" != *"$span_name"* ]]; then
+      echo "collector logs do not contain span $span_name" >&2
+      exit 1
+    fi
+  done
+  for sensitive_value in alpha beta; do
+    if [[ "$collector_logs" == *"$sensitive_value"* ]]; then
+      echo "collector logs contain default-redacted dataset content" >&2
+      exit 1
+    fi
+  done
+fi
+
+echo "AgentStorm result-stack E2E passed: context=$kube_context baseline=$baseline_id candidate=$candidate_id result_api_image=$result_api_image telemetry=$telemetry_e2e"

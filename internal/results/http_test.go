@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -112,6 +113,61 @@ func TestServiceErrorsHaveStableHTTPMappings(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		if response.Code != test.code {
 			t.Fatalf("%s got %d: %s", test.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) {
+	handler := newTestHandler(t, repositoryStub{
+		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+			return ShardReservation{}, nil
+		},
+		finalizeShard: func(context.Context, string, int, string, []CaseResult) (bool, error) {
+			return true, nil
+		},
+	}, objectStoreStub{
+		put: func(context.Context, string, []byte, string, string) error { return nil },
+	})
+	upload := testShard("run-sensitive-id", 0, "case-sensitive-id", false)
+	upload.Cases[0].FailureKind = "provider-secret-material"
+	upload.Summary.InputTokens = 7
+	upload.Summary.OutputTokens = 11
+	payload, err := json.Marshal(upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/v1/runs/run-sensitive-id/shards/0", bytes.NewReader(payload))
+	request.Header.Set("Authorization", "Bearer write-secret")
+	request.Header.Set("Idempotency-Key", "run/run-sensitive-id/shard/0")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload returned %d: %s", response.Code, response.Body.String())
+	}
+	unmatchedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unmatchedResponse, httptest.NewRequest("PRIVATE-METHOD", "/private-path", nil))
+
+	metricsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metricsResponse.Code != http.StatusOK {
+		t.Fatalf("metrics returned %d: %s", metricsResponse.Code, metricsResponse.Body.String())
+	}
+	metrics := metricsResponse.Body.String()
+	for _, expected := range []string{
+		`agentstorm_result_api_shard_uploads_total{outcome="created"} 1`,
+		`agentstorm_result_api_cases_total{failure_kind="other",result="failure"} 1`,
+		`agentstorm_result_api_tokens_total{direction="input"} 7`,
+		`agentstorm_result_api_tokens_total{direction="output"} 11`,
+		`agentstorm_result_api_http_requests_total{method="PUT",route="PUT /v1/runs/{runID}/shards/{index}",status_class="2xx"} 1`,
+		`agentstorm_result_api_http_requests_total{method="other",route="unmatched",status_class="4xx"} 1`,
+	} {
+		if !strings.Contains(metrics, expected) {
+			t.Fatalf("metrics do not contain %q:\n%s", expected, metrics)
+		}
+	}
+	for _, forbidden := range []string{"run-sensitive-id", "case-sensitive-id", "provider-secret-material", "write-secret", "PRIVATE-METHOD", "/private-path"} {
+		if strings.Contains(metrics, forbidden) {
+			t.Fatalf("metrics contain high-cardinality or sensitive value %q", forbidden)
 		}
 	}
 }

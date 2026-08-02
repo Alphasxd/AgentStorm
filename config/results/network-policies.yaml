@@ -17,6 +17,9 @@ spec:
         - podSelector:
             matchLabels:
               agentstorm.io/result-reader: "true"
+        - podSelector:
+            matchLabels:
+              agentstorm.io/metrics-reader: "true"
       ports:
         - protocol: TCP
           port: 8080

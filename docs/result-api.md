@@ -7,13 +7,15 @@ complete.
 
 ## HTTP contract
 
-Health endpoints are unauthenticated. All other endpoints require `Authorization: Bearer <token>`.
-Writer and reader tokens are separate so worker Pods do not receive result-read access.
+Health and metrics endpoints are unauthenticated. All other endpoints require
+`Authorization: Bearer <token>`. Writer and reader tokens are separate so worker Pods do not receive
+result-read access. The public Kubernetes stack restricts metrics access with NetworkPolicy.
 
 | Method | Path | Token | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | none | Process liveness |
 | `GET` | `/readyz` | none | PostgreSQL and object-store readiness |
+| `GET` | `/metrics` | none | Prometheus RED, result, case, and token counters |
 | `PUT` | `/v1/runs/{runID}` | writer | Register immutable run metadata and expected shards |
 | `PUT` | `/v1/runs/{runID}/shards/{index}` | writer | Persist one complete shard document |
 | `GET` | `/v1/runs/{runID}` | reader | Read status, received shards, and aggregates |
@@ -105,3 +107,6 @@ Case output and full error text are optional fields. Workers omit them by defaul
 only when the controller's sensitive-result switch is enabled for a controlled environment. Secrets,
 provider API keys, and bearer tokens must never be included in request bodies, raw objects, logs, or
 test fixtures.
+
+See [Observability](observability.md) for the metric labels, cardinality rules, and local OTLP trace
+verification path.

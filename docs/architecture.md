@@ -65,8 +65,12 @@ Worker -> authenticated result API -> PostgreSQL run metadata
                                   -> object storage raw events
 ```
 
-Prometheus metrics and OpenTelemetry traces remain an M3 concern after this result contract has
-stabilized.
+The M3 foundation adds an unauthenticated, NetworkPolicy-restricted `/metrics` endpoint to the
+Result API and optional OTLP/HTTP worker traces. Tracing is enabled only when the controller injects
+an explicitly configured Collector endpoint. Default spans contain correlation IDs, bounded result
+categories, latency, and Token usage, but never prompt, output, expected-value, tool payload, or
+exception-message content. See [observability](observability.md) for the signal contract and current
+limitations.
 
 ClickHouse should only be added after event volume and comparison queries justify it. The project
 must not introduce a database solely to enlarge the technology list.
