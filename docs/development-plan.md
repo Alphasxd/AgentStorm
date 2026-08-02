@@ -57,7 +57,7 @@ Release `v0.2.0-alpha.1` publishes the controller, worker, and Result API as imm
 multi-architecture images. `config/results` is the namespace-scoped public reference stack; its
 single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation, not production HA.
 
-## M3: Agent observability and evaluation
+## M3: Agent observability and evaluation — implemented
 
 - Add OpenTelemetry spans for run, case, model generation, tool call, handoff, and evaluator.
   - [x] Add opt-in run, case, provider invocation, and deterministic evaluator spans.
@@ -76,11 +76,10 @@ Acceptance criteria:
 - [x] Deterministic assertions work without an LLM judge.
 - [x] Sensitive content is absent from default traces and logs.
 
-The M3 source implementation now includes the observability acceptance path, provider-independent
-local-tool/handoff tracing, deterministic assertions, explicit price-snapshot cost accounting,
-redaction controls, and optional no-model Promptfoo replay. M3 remains open until the
-`v0.3.0-alpha.1` images pass release verification and the public manifests are pinned to their
-immutable image-index digests.
+Release `v0.3.0-alpha.1` publishes the controller, worker, and Result API as verified immutable
+multi-architecture images. Public manifests pin their image-index digests. The completed M3 path
+includes provider-independent local-tool/handoff tracing, deterministic assertions, explicit
+price-snapshot cost accounting, redaction controls, and optional no-model Promptfoo replay.
 `config/dev/telemetry` runs single-replica Tempo, Prometheus, and Grafana workloads for local
 evaluation; they are not a production HA topology.
 

@@ -110,7 +110,7 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
 The `:dev` image and disabled NetworkPolicy selectors are intentionally limited to this local
 overlay. `config/dev/telemetry` composes this stack with persistent Prometheus scraping, while
 per-run and per-case investigation remains in Tempo rather than high-cardinality metric labels. The
-public stack uses the `v0.2.0-alpha.1` Result API image-index digest.
+public stack uses the `v0.3.0-alpha.1` Result API image-index digest.
 
 ## Sensitive content
 

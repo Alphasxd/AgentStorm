@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: ghcr.io/alphasxd/agentstorm-controller@sha256:5d6e9785b17036bc3d47157b4d2c39038a92175bbcd6d90252054624b5062f6f
+          image: ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect
