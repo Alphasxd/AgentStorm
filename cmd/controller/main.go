@@ -36,6 +36,7 @@ func main() {
 	var includeSensitiveResults bool
 	var resultUploadTimeout time.Duration
 	var otlpEndpoint string
+	var allowRedactedTelemetry bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for the metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address for health probes")
 	flag.BoolVar(&leaderElection, "leader-elect", false, "enable leader election")
@@ -46,6 +47,7 @@ func main() {
 	flag.BoolVar(&includeSensitiveResults, "include-sensitive-results", false, "upload case output and full error text")
 	flag.DurationVar(&resultUploadTimeout, "result-upload-timeout", 30*time.Second, "timeout for each Result API request")
 	flag.StringVar(&otlpEndpoint, "otel-exporter-otlp-endpoint", "", "OTLP/HTTP base endpoint injected into workers; empty disables tracing")
+	flag.BoolVar(&allowRedactedTelemetry, "allow-redacted-telemetry", false, "allow runs to export sanitized prompt, output, tool, and allowlisted metadata content")
 	zapOptions := zap.Options{Development: true}
 	zapOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -65,7 +67,7 @@ func main() {
 		ctrl.Log.Error(err, "invalid result sink configuration")
 		os.Exit(1)
 	}
-	telemetry := agentcontroller.TelemetryConfig{OTLPEndpoint: otlpEndpoint}
+	telemetry := agentcontroller.TelemetryConfig{OTLPEndpoint: otlpEndpoint, AllowRedacted: allowRedactedTelemetry}
 	if err := telemetry.ValidateAndDefault(); err != nil {
 		ctrl.Log.Error(err, "invalid telemetry configuration")
 		os.Exit(1)

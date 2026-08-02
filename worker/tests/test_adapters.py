@@ -102,7 +102,12 @@ class OpenAIAgentsAdapterTest(unittest.TestCase):
         assert isinstance(lifecycle, RecordingLifecycle)
         self.assertEqual(lifecycle.tools_started[0].name, "safe_lookup")
         self.assertEqual(lifecycle.tools_started[0].call_id, "call-1")
-        self.assertEqual(lifecycle.tools_finished, [(lifecycle.tools_started[0], "")])
+        self.assertEqual(len(lifecycle.tools_finished), 1)
+        finished, error_type = lifecycle.tools_finished[0]
+        self.assertEqual(error_type, "")
+        self.assertEqual(finished.invocation_id, lifecycle.tools_started[0].invocation_id)
+        self.assertIsNone(finished.arguments)
+        self.assertEqual(finished.result, "private tool result")
         self.assertEqual(
             lifecycle.handoffs,
             [
@@ -114,7 +119,6 @@ class OpenAIAgentsAdapterTest(unittest.TestCase):
         )
         rendered = repr((lifecycle.tools_started, lifecycle.tools_finished, lifecycle.handoffs))
         self.assertNotIn("private tool arguments", rendered)
-        self.assertNotIn("private tool result", rendered)
 
 
 if __name__ == "__main__":

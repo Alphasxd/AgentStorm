@@ -88,6 +88,9 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	if stored.Spec.Workload.Parallelism != 1 || stored.Spec.Workload.ConcurrencyPerWorker != 1 || stored.Spec.Workload.Iterations != 1 || stored.Spec.Workload.TimeoutSeconds != 900 {
 		t.Fatalf("CRD defaults were not applied: %#v", stored.Spec.Workload)
 	}
+	if stored.Spec.Telemetry.ContentMode != "omit" {
+		t.Fatalf("telemetry content mode = %q, want omit default", stored.Spec.Telemetry.ContentMode)
+	}
 
 	stored.Spec.Cancel = true
 	stored.Status.Phase = agentstormv1alpha1.AgentTestRunFailed
@@ -138,6 +141,35 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	err = kubernetesClient.Create(ctx, invalidPricing)
 	if !apierrors.IsInvalid(err) {
 		t.Fatalf("invalid pricing error = %v, want Invalid", err)
+	}
+
+	redacted := validEnvtestRun(namespace.Name, "redacted")
+	redacted.Spec.Telemetry = agentstormv1alpha1.AgentTelemetrySpec{
+		ContentMode: "redacted",
+		Redaction: agentstormv1alpha1.AgentTelemetryRedactionSpec{
+			Patterns:     []string{`customer-[0-9]+`},
+			MetadataKeys: []string{"tenant"},
+		},
+	}
+	if err := kubernetesClient.Create(ctx, redacted); err != nil {
+		t.Fatalf("create redacted AgentTestRun: %v", err)
+	}
+	redacted.Spec.Telemetry.ContentMode = "omit"
+	err = kubernetesClient.Update(ctx, redacted)
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "telemetry is immutable") {
+		t.Fatalf("immutable telemetry update error = %v, want CRD CEL rejection", err)
+	}
+
+	tooManyPatterns := validEnvtestRun(namespace.Name, "too-many-patterns")
+	tooManyPatterns.Spec.Telemetry = agentstormv1alpha1.AgentTelemetrySpec{
+		ContentMode: "redacted",
+		Redaction: agentstormv1alpha1.AgentTelemetryRedactionSpec{
+			Patterns: make([]string, 21),
+		},
+	}
+	err = kubernetesClient.Create(ctx, tooManyPatterns)
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("too many redaction patterns error = %v, want Invalid", err)
 	}
 }
 

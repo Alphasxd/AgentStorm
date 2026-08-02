@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
-from contextlib import AbstractContextManager, nullcontext
+import json
+import re
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from importlib.metadata import PackageNotFoundError, version
-from typing import Protocol
+from typing import Iterator, Protocol
+
+from .config import TelemetryConfig
 
 AttributeValue = str | bool | int | float
 
@@ -56,6 +60,144 @@ class NoopTelemetry:
 
     def shutdown(self) -> None:
         return None
+
+
+_SENSITIVE_KEY_SUFFIXES = (
+    "apikey",
+    "auth",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "passphrase",
+    "password",
+    "privatekey",
+    "secret",
+    "sessionid",
+    "token",
+)
+_UNSUPPORTED = object()
+_MAX_CONTENT_BYTES = 2048
+
+
+class ContentSanitizer:
+    def __init__(self, patterns: tuple[str, ...] = ()) -> None:
+        self._patterns = tuple(re.compile(pattern) for pattern in patterns)
+
+    def string(self, value: str) -> str:
+        for pattern in self._patterns:
+            value = pattern.sub("[REDACTED]", value)
+        encoded = value.encode("utf-8")
+        if len(encoded) <= _MAX_CONTENT_BYTES:
+            return value
+        return encoded[:_MAX_CONTENT_BYTES].decode("utf-8", errors="ignore")
+
+    def attribute(self, value: AttributeValue) -> AttributeValue:
+        return self.string(value) if isinstance(value, str) else value
+
+    def sensitive_key(self, value: str) -> bool:
+        return _sensitive_key(value)
+
+    def content(self, value: object) -> str | None:
+        if isinstance(value, str):
+            return self.string(value)
+        cleaned = self._clean(value)
+        if cleaned is _UNSUPPORTED:
+            return None
+        try:
+            rendered = json.dumps(
+                cleaned,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return None
+        return self.string(rendered)
+
+    def _clean(self, value: object) -> object:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return self.string(value)
+        if isinstance(value, dict):
+            cleaned: dict[str, object] = {}
+            for key, item in value.items():
+                if not isinstance(key, str) or _sensitive_key(key):
+                    continue
+                sanitized = self._clean(item)
+                if sanitized is not _UNSUPPORTED:
+                    cleaned[key] = sanitized
+            return cleaned
+        if isinstance(value, (list, tuple)):
+            cleaned_items = []
+            for item in value:
+                sanitized = self._clean(item)
+                if sanitized is not _UNSUPPORTED:
+                    cleaned_items.append(sanitized)
+            return cleaned_items
+        return _UNSUPPORTED
+
+
+def _sensitive_key(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", value.lower())
+    return any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
+
+
+class _SanitizedSpan:
+    def __init__(self, span: TraceSpan, sanitizer: ContentSanitizer) -> None:
+        self._span = span
+        self._sanitizer = sanitizer
+
+    def set_attribute(self, name: str, value: AttributeValue) -> None:
+        self._span.set_attribute(name, self._sanitizer.attribute(value))
+
+    def set_error(self, error_type: str) -> None:
+        self._span.set_error(error_type)
+
+
+class _SanitizedDetachedSpan(_SanitizedSpan):
+    def __init__(self, span: DetachedTraceSpan, sanitizer: ContentSanitizer) -> None:
+        super().__init__(span, sanitizer)
+        self._detached_span = span
+
+    def end(self) -> None:
+        self._detached_span.end()
+
+
+class SanitizingTelemetry:
+    def __init__(self, client: TelemetryClient, sanitizer: ContentSanitizer) -> None:
+        self._client = client
+        self._sanitizer = sanitizer
+
+    @contextmanager
+    def start_span(
+        self, name: str, attributes: dict[str, AttributeValue]
+    ) -> Iterator[TraceSpan]:
+        sanitized = {
+            key: self._sanitizer.attribute(value) for key, value in attributes.items()
+        }
+        with self._client.start_span(name, sanitized) as span:
+            yield _SanitizedSpan(span, self._sanitizer)
+
+    def start_detached_span(
+        self, name: str, attributes: dict[str, AttributeValue]
+    ) -> DetachedTraceSpan:
+        sanitized = {
+            key: self._sanitizer.attribute(value) for key, value in attributes.items()
+        }
+        return _SanitizedDetachedSpan(
+            self._client.start_detached_span(name, sanitized), self._sanitizer
+        )
+
+    def shutdown(self) -> None:
+        self._client.shutdown()
+
+
+def telemetry_with_policy(client: TelemetryClient, config: TelemetryConfig) -> TelemetryClient:
+    if config.content_mode != "redacted" or isinstance(client, SanitizingTelemetry):
+        return client
+    return SanitizingTelemetry(client, ContentSanitizer(config.redaction.patterns))
 
 
 class _OpenTelemetrySpan:
@@ -131,9 +273,12 @@ class OpenTelemetryClient:
         self._provider.shutdown()  # type: ignore[attr-defined]
 
 
-def telemetry_from_environment() -> TelemetryClient:
+def telemetry_from_environment(config: TelemetryConfig | None = None) -> TelemetryClient:
+    config = config or TelemetryConfig()
     enabled = _boolean_environment("AGENTSTORM_OTEL_ENABLED", False)
     if not enabled:
+        if config.content_mode == "redacted":
+            raise RuntimeError("redacted telemetry requires OpenTelemetry to be enabled")
         return NoopTelemetry()
     try:
         from opentelemetry import trace
@@ -158,7 +303,9 @@ def telemetry_from_environment() -> TelemetryClient:
     )
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(provider)
-    return OpenTelemetryClient(provider.get_tracer("agentstorm.worker"), provider)
+    return telemetry_with_policy(
+        OpenTelemetryClient(provider.get_tracer("agentstorm.worker"), provider), config
+    )
 
 
 def _boolean_environment(name: str, fallback: bool) -> bool:

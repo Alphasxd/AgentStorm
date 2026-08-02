@@ -235,12 +235,22 @@ func TestResultSinkConfigValidation(t *testing.T) {
 func TestReconcileConfiguresOptionalWorkerTelemetry(t *testing.T) {
 	scheme := testScheme(t)
 	run := testRun()
+	run.Spec.Telemetry = agentstormv1alpha1.AgentTelemetrySpec{
+		ContentMode: "redacted",
+		Redaction: agentstormv1alpha1.AgentTelemetryRedactionSpec{
+			Patterns:     []string{`customer-[0-9]+`},
+			MetadataKeys: []string{"tenant"},
+		},
+	}
 	dataset := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
 		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"private prompt"}`},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
-	telemetry := TelemetryConfig{OTLPEndpoint: "http://otel-collector:4318/"}
+	telemetry := TelemetryConfig{
+		OTLPEndpoint:  "http://otel-collector:4318/",
+		AllowRedacted: true,
+	}
 	if err := telemetry.ValidateAndDefault(); err != nil {
 		t.Fatalf("validate telemetry: %v", err)
 	}
@@ -268,6 +278,121 @@ func TestReconcileConfiguresOptionalWorkerTelemetry(t *testing.T) {
 		if strings.Contains(configMap.Data[workerConfigKey], forbidden) {
 			t.Fatalf("generated worker ConfigMap contains telemetry or dataset content %q", forbidden)
 		}
+	}
+	if !strings.Contains(configMap.Data[workerConfigKey], `"contentMode": "redacted"`) ||
+		!strings.Contains(configMap.Data[workerConfigKey], "customer-[0-9]+") ||
+		!strings.Contains(configMap.Data[workerConfigKey], `"tenant"`) {
+		t.Fatalf("generated worker ConfigMap is missing redaction policy: %s", configMap.Data[workerConfigKey])
+	}
+	updated := &agentstormv1alpha1.AgentTestRun{}
+	if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, conditionTelemetry)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "Available" {
+		t.Fatalf("TelemetryReady condition = %#v, want true/Available", condition)
+	}
+}
+
+func TestReconcileBlocksRedactedTelemetryWithoutBothControllerGates(t *testing.T) {
+	tests := []struct {
+		name       string
+		telemetry  TelemetryConfig
+		wantReason string
+	}{
+		{
+			name:       "missing endpoint",
+			telemetry:  TelemetryConfig{AllowRedacted: true},
+			wantReason: "EndpointMissing",
+		},
+		{
+			name:       "controller opt in missing",
+			telemetry:  TelemetryConfig{OTLPEndpoint: "http://otel-collector:4318"},
+			wantReason: "RedactedTelemetryDisabled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			run := testRun()
+			run.Spec.Telemetry.ContentMode = "redacted"
+			dataset := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+				Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+			reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme, Telemetry: test.telemetry}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+			result, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if result.RequeueAfter == 0 {
+				t.Fatal("expected a requeue while redacted telemetry is gated")
+			}
+			if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+				t.Fatal("worker Job should not exist before redacted telemetry is ready")
+			}
+			updated := &agentstormv1alpha1.AgentTestRun{}
+			if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatalf("get run: %v", err)
+			}
+			condition := meta.FindStatusCondition(updated.Status.Conditions, conditionTelemetry)
+			if updated.Status.Phase != agentstormv1alpha1.AgentTestRunPending || condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != test.wantReason {
+				t.Fatalf("status = %#v, want Pending with %s", updated.Status, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestValidateAndDefaultRejectsInvalidRedactionBeforeJobCreation(t *testing.T) {
+	tests := []struct {
+		name     string
+		patterns []string
+	}{
+		{name: "invalid regex", patterns: []string{"("}},
+		{name: "too long", patterns: []string{strings.Repeat("x", 257)}},
+		{name: "too many", patterns: make([]string, 21)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			run := testRun()
+			run.Spec.Telemetry = agentstormv1alpha1.AgentTelemetrySpec{
+				ContentMode: "redacted",
+				Redaction: agentstormv1alpha1.AgentTelemetryRedactionSpec{
+					Patterns: test.patterns,
+				},
+			}
+			dataset := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+				Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+			reconciler := &AgentTestRunReconciler{
+				Client: client,
+				Scheme: scheme,
+				Telemetry: TelemetryConfig{
+					OTLPEndpoint:  "http://otel-collector:4318",
+					AllowRedacted: true,
+				},
+			}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			updated := &agentstormv1alpha1.AgentTestRun{}
+			if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatalf("get run: %v", err)
+			}
+			if updated.Status.Phase != agentstormv1alpha1.AgentTestRunFailed {
+				t.Fatalf("phase = %q, want Failed before Job creation", updated.Status.Phase)
+			}
+			if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, &batchv1.Job{}); err == nil {
+				t.Fatal("worker Job was created for invalid redaction policy")
+			}
+		})
 	}
 }
 

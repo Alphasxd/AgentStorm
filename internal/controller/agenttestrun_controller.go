@@ -33,6 +33,7 @@ const (
 	conditionDataset     = "DatasetReady"
 	conditionCredentials = "CredentialsReady"
 	conditionResultSink  = "ResultSinkReady"
+	conditionTelemetry   = "TelemetryReady"
 	workerConfigKey      = "run.json"
 )
 
@@ -47,7 +48,8 @@ type ResultSinkConfig struct {
 }
 
 type TelemetryConfig struct {
-	OTLPEndpoint string
+	OTLPEndpoint  string
+	AllowRedacted bool
 }
 
 func (c *TelemetryConfig) ValidateAndDefault() error {
@@ -211,6 +213,24 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Message: message, ObservedGeneration: run.Generation,
 		})
 	}
+	telemetryReady, reason, message := r.telemetryReady(run)
+	if !telemetryReady {
+		run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionTelemetry, Status: metav1.ConditionFalse, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+		if err := r.patchStatus(ctx, before, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if run.Spec.Telemetry.ContentMode == "redacted" {
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionTelemetry, Status: metav1.ConditionTrue, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+	}
 	if err := r.ensureWorkerConfig(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -235,6 +255,19 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	logger.Info("AgentTestRun reached terminal phase", "phase", run.Status.Phase, "job", job.Name)
 	return ctrl.Result{}, nil
+}
+
+func (r *AgentTestRunReconciler) telemetryReady(run *agentstormv1alpha1.AgentTestRun) (bool, string, string) {
+	if run.Spec.Telemetry.ContentMode != "redacted" {
+		return true, "ContentOmitted", "trace content is omitted"
+	}
+	if !r.Telemetry.Enabled() {
+		return false, "EndpointMissing", "redacted telemetry requires an OTLP endpoint"
+	}
+	if !r.Telemetry.AllowRedacted {
+		return false, "RedactedTelemetryDisabled", "redacted telemetry is disabled by the controller"
+	}
+	return true, "Available", "redacted telemetry is explicitly enabled"
 }
 
 func (r *AgentTestRunReconciler) resultSinkReady(ctx context.Context, run *agentstormv1alpha1.AgentTestRun) (bool, string, string, error) {
@@ -283,6 +316,23 @@ func validateAndDefault(run *agentstormv1alpha1.AgentTestRun) error {
 		(!pricePattern.MatchString(run.Spec.Target.Pricing.InputUSDPerMillionTokens) ||
 			!pricePattern.MatchString(run.Spec.Target.Pricing.OutputUSDPerMillionTokens)) {
 		return fmt.Errorf("target.pricing requires non-negative decimal USD prices")
+	}
+	if run.Spec.Telemetry.ContentMode == "" {
+		run.Spec.Telemetry.ContentMode = "omit"
+	}
+	if run.Spec.Telemetry.ContentMode != "omit" && run.Spec.Telemetry.ContentMode != "redacted" {
+		return fmt.Errorf("telemetry.contentMode must be omit or redacted")
+	}
+	if len(run.Spec.Telemetry.Redaction.Patterns) > 20 {
+		return fmt.Errorf("telemetry.redaction.patterns must contain at most 20 entries")
+	}
+	for index, pattern := range run.Spec.Telemetry.Redaction.Patterns {
+		if len([]byte(pattern)) > 256 {
+			return fmt.Errorf("telemetry.redaction.patterns[%d] must be at most 256 bytes", index)
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("telemetry.redaction.patterns[%d] is invalid", index)
+		}
 	}
 	if strings.TrimSpace(run.Spec.Runner.Image) == "" {
 		return fmt.Errorf("runner.image is required")
@@ -373,6 +423,7 @@ type workerRunConfig struct {
 	Target     agentstormv1alpha1.AgentTargetSpec     `json:"target"`
 	Workload   workerWorkloadConfig                   `json:"workload"`
 	Evaluation agentstormv1alpha1.AgentEvaluationSpec `json:"evaluation,omitempty"`
+	Telemetry  agentstormv1alpha1.AgentTelemetrySpec  `json:"telemetry,omitempty"`
 }
 
 type workerRunSourceConfig struct {
@@ -406,6 +457,7 @@ func (r *AgentTestRunReconciler) ensureWorkerConfig(ctx context.Context, run *ag
 			TimeoutSeconds: run.Spec.Workload.TimeoutSeconds,
 		},
 		Evaluation: run.Spec.Evaluation,
+		Telemetry:  run.Spec.Telemetry,
 	}
 	// Secrets are mounted through environment variables and must never be serialized.
 	config.Target.APIKeySecretRef = nil

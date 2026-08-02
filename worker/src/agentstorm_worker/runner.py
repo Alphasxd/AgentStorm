@@ -16,12 +16,21 @@ from .config import EvaluationConfig, RunConfig
 from .evaluators import EvaluationContext, EvaluatorRegistry
 from .models import CaseResult, RunSummary, TestCase
 from .pricing import case_costs, sum_costs
-from .telemetry import DetachedTraceSpan, NoopTelemetry, TelemetryClient
+from .telemetry import (
+    ContentSanitizer,
+    DetachedTraceSpan,
+    NoopTelemetry,
+    TelemetryClient,
+    telemetry_with_policy,
+)
 
 
 class _CaseLifecycle(AgentLifecycle):
-    def __init__(self, telemetry: TelemetryClient) -> None:
+    def __init__(
+        self, telemetry: TelemetryClient, content_sanitizer: ContentSanitizer | None
+    ) -> None:
         self._telemetry = telemetry
+        self._content_sanitizer = content_sanitizer
         self._tools: dict[str, DetachedTraceSpan] = {}
         self.tool_path: list[str] = []
 
@@ -40,6 +49,10 @@ class _CaseLifecycle(AgentLifecycle):
             attributes["gen_ai.tool.call.id"] = event.call_id
         if event.agent_name is not None:
             attributes["gen_ai.agent.name"] = event.agent_name
+        if self._content_sanitizer is not None and event.arguments is not None:
+            arguments = self._content_sanitizer.content(event.arguments)
+            if arguments is not None:
+                attributes["agentstorm.content.tool.arguments"] = arguments
         self._tools[event.invocation_id] = self._telemetry.start_detached_span(
             "gen_ai.execute_tool", attributes
         )
@@ -51,6 +64,10 @@ class _CaseLifecycle(AgentLifecycle):
             span = self._tools.pop(event.invocation_id)
         if error_type:
             span.set_error(error_type)
+        if self._content_sanitizer is not None and event.result is not None:
+            result = self._content_sanitizer.content(event.result)
+            if result is not None:
+                span.set_attribute("agentstorm.content.tool.result", result)
         span.end()
 
     def handed_off(self, event: HandoffLifecycleEvent) -> None:
@@ -85,7 +102,14 @@ class WorkloadRunner:
         self._adapter = adapter
         self._shard_index = shard_index
         self._shard_count = shard_count
-        self._telemetry = telemetry or NoopTelemetry()
+        self._telemetry = telemetry_with_policy(
+            telemetry or NoopTelemetry(), config.telemetry
+        )
+        self._content_sanitizer = (
+            ContentSanitizer(config.telemetry.redaction.patterns)
+            if config.telemetry.content_mode == "redacted"
+            else None
+        )
         self._evaluators: EvaluatorRegistry | None = None
 
     async def execute(self, cases: list[TestCase]) -> tuple[list[CaseResult], RunSummary]:
@@ -124,8 +148,18 @@ class WorkloadRunner:
             "agentstorm.case.id": case.case_id,
             "agentstorm.case.iteration": iteration,
         }
+        if self._content_sanitizer is not None:
+            case_attributes["agentstorm.content.prompt"] = self._content_sanitizer.string(
+                case.prompt
+            )
+            for key in self._config.telemetry.redaction.metadata_keys:
+                if key not in case.metadata or self._content_sanitizer.sensitive_key(key):
+                    continue
+                value = self._content_sanitizer.content(case.metadata[key])
+                if value is not None:
+                    case_attributes[f"agentstorm.case.metadata.{key}"] = value
         with self._telemetry.start_span("agentstorm.case", case_attributes) as case_span:
-            lifecycle = _CaseLifecycle(self._telemetry)
+            lifecycle = _CaseLifecycle(self._telemetry, self._content_sanitizer)
             try:
                 provider_attributes: dict[str, str | int | bool | float] = {
                     "gen_ai.operation.name": "invoke_agent",
@@ -155,6 +189,11 @@ class WorkloadRunner:
                     if response.output_tokens is not None:
                         provider_span.set_attribute(
                             "gen_ai.usage.output_tokens", response.output_tokens
+                        )
+                    if self._content_sanitizer is not None:
+                        provider_span.set_attribute(
+                            "agentstorm.content.output",
+                            self._content_sanitizer.string(response.output),
                         )
 
                 assert self._evaluators is not None

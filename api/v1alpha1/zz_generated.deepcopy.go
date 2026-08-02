@@ -38,6 +38,21 @@ func (in *AgentTargetSpec) DeepCopyInto(out *AgentTargetSpec) {
 
 func (in *AgentPricingSpec) DeepCopyInto(out *AgentPricingSpec) { *out = *in }
 
+func (in *AgentTelemetryRedactionSpec) DeepCopyInto(out *AgentTelemetryRedactionSpec) {
+	*out = *in
+	if in.Patterns != nil {
+		out.Patterns = append([]string(nil), in.Patterns...)
+	}
+	if in.MetadataKeys != nil {
+		out.MetadataKeys = append([]string(nil), in.MetadataKeys...)
+	}
+}
+
+func (in *AgentTelemetrySpec) DeepCopyInto(out *AgentTelemetrySpec) {
+	*out = *in
+	in.Redaction.DeepCopyInto(&out.Redaction)
+}
+
 func (in *AgentTestRun) DeepCopyInto(out *AgentTestRun) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
@@ -95,6 +110,7 @@ func (in *AgentTestRunSpec) DeepCopyInto(out *AgentTestRunSpec) {
 	in.Target.DeepCopyInto(&out.Target)
 	in.Workload.DeepCopyInto(&out.Workload)
 	in.Evaluation.DeepCopyInto(&out.Evaluation)
+	in.Telemetry.DeepCopyInto(&out.Telemetry)
 }
 
 func (in *AgentTestRunStatus) DeepCopyInto(out *AgentTestRunStatus) {

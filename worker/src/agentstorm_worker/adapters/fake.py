@@ -19,18 +19,26 @@ class FakeAdapter:
             invocation_id="fake-echo",
             name="fake.echo",
             agent_name="fake-router",
+            arguments={"text": case.prompt},
         )
         if lifecycle is not None:
             lifecycle.tool_started(tool_event)
         await asyncio.sleep(self._delay_seconds)
+        output = f"fake response: {case.prompt}"
         if lifecycle is not None:
-            lifecycle.tool_finished(tool_event)
+            lifecycle.tool_finished(
+                ToolLifecycleEvent(
+                    invocation_id=tool_event.invocation_id,
+                    name=tool_event.name,
+                    agent_name=tool_event.agent_name,
+                    arguments=tool_event.arguments,
+                    result={"text": output},
+                )
+            )
             lifecycle.handed_off(
                 HandoffLifecycleEvent(
                     source_agent="fake-router",
                     target_agent="fake-responder",
                 )
             )
-        return AdapterResponse(
-            output=f"fake response: {case.prompt}", input_tokens=11, output_tokens=7
-        )
+        return AdapterResponse(output=output, input_tokens=11, output_tokens=7)

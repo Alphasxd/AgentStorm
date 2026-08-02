@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..models import AdapterResponse, TestCase
 
 
 @dataclass(frozen=True)
 class ToolLifecycleEvent:
-    """Content-free metadata for one provider tool invocation."""
+    """Public lifecycle data for one provider tool invocation."""
 
     invocation_id: str
     name: str
     tool_type: str = "function"
     call_id: str | None = None
     agent_name: str | None = None
+    arguments: Any | None = None
+    result: Any | None = None
 
 
 @dataclass(frozen=True)

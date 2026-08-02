@@ -12,6 +12,7 @@ keep_resources="${KEEP_E2E_RESOURCES:-true}"
 skip_image_build="${SKIP_IMAGE_BUILD:-false}"
 load_local_images="${LOAD_LOCAL_IMAGES:-true}"
 disable_local_network_policies="${DISABLE_LOCAL_NETWORK_POLICIES:-false}"
+expect_redaction="${EXPECT_REDACTION:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 wait_timeout="${E2E_TIMEOUT:-120s}"
@@ -87,6 +88,14 @@ require_boolean KEEP_E2E_RESOURCES "$keep_resources"
 require_boolean SKIP_IMAGE_BUILD "$skip_image_build"
 require_boolean LOAD_LOCAL_IMAGES "$load_local_images"
 require_boolean DISABLE_LOCAL_NETWORK_POLICIES "$disable_local_network_policies"
+if [[ -z "$expect_redaction" ]]; then
+  if [[ "$skip_image_build" == "false" ]]; then
+    expect_redaction="true"
+  else
+    expect_redaction="false"
+  fi
+fi
+require_boolean EXPECT_REDACTION "$expect_redaction"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 
@@ -301,6 +310,51 @@ if ! "${kubectl_cmd[@]}" get configmap agentstorm-demo-dataset -n "$e2e_namespac
   exit 1
 fi
 
+if [[ "$expect_redaction" == "true" ]]; then
+  delete_run agentstorm-redaction-gate
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-redaction-gate
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-demo-dataset
+      key: cases.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 120
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+    maxP95LatencyMs: 1000
+  telemetry:
+    contentMode: redacted
+    redaction:
+      patterns: ['customer-[0-9]+']
+      metadataKeys: [tenant]
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+  "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Pending agenttestrun/agentstorm-redaction-gate -n "$e2e_namespace" --timeout="$wait_timeout"
+  telemetry_reason="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-redaction-gate -n "$e2e_namespace" -o jsonpath='{.status.conditions[?(@.type=="TelemetryReady")].reason}')"
+  if [[ "$telemetry_reason" != "EndpointMissing" ]]; then
+    echo "redacted telemetry gate reason = '$telemetry_reason', want EndpointMissing" >&2
+    exit 1
+  fi
+  if "${kubectl_cmd[@]}" get job agentstorm-redaction-gate-worker -n "$e2e_namespace" >/dev/null 2>&1; then
+    echo "worker Job was created before redacted telemetry became available" >&2
+    exit 1
+  fi
+  delete_run agentstorm-redaction-gate
+fi
+
 delete_run agentstorm-secret-gate
 "${kubectl_cmd[@]}" delete secret agentstorm-e2e-credentials -n "$e2e_namespace" --ignore-not-found
 "${kubectl_cmd[@]}" apply -f - <<YAML
@@ -395,6 +449,7 @@ if [[ "$keep_resources" == "true" ]]; then
   run_success_case
 else
   delete_run agentstorm-demo
+  delete_run agentstorm-redaction-gate
   "${kubectl_cmd[@]}" delete configmap agentstorm-demo-dataset -n "$e2e_namespace" --ignore-not-found
 fi
 

@@ -37,6 +37,23 @@ type AgentPricingSpec struct {
 	OutputUSDPerMillionTokens string `json:"outputUSDPerMillionTokens"`
 }
 
+type AgentTelemetrySpec struct {
+	// ContentMode controls whether sanitized content is added to traces.
+	// +kubebuilder:validation:Enum=omit;redacted
+	// +kubebuilder:default=omit
+	ContentMode string `json:"contentMode,omitempty"`
+	// Redaction configures the sanitizer used when contentMode is redacted.
+	Redaction AgentTelemetryRedactionSpec `json:"redaction,omitempty"`
+}
+
+type AgentTelemetryRedactionSpec struct {
+	// Patterns are regular expressions replaced with [REDACTED].
+	// +kubebuilder:validation:MaxItems=20
+	Patterns []string `json:"patterns,omitempty"`
+	// MetadataKeys explicitly allow selected top-level dataset metadata keys into traces.
+	MetadataKeys []string `json:"metadataKeys,omitempty"`
+}
+
 type AgentWorkloadSpec struct {
 	// DatasetRef points to a JSONL dataset in a ConfigMap.
 	DatasetRef corev1.ConfigMapKeySelector `json:"datasetRef"`
@@ -87,6 +104,9 @@ type AgentTestRunSpec struct {
 	// +kubebuilder:default={}
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="evaluation is immutable; create a new AgentTestRun"
 	Evaluation AgentEvaluationSpec `json:"evaluation"`
+	// +kubebuilder:default={}
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="telemetry is immutable; create a new AgentTestRun"
+	Telemetry AgentTelemetrySpec `json:"telemetry,omitempty"`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="runner is immutable; create a new AgentTestRun"
 	Runner AgentRunnerSpec `json:"runner"`
 	// Cancel declaratively requests termination of the worker Job.
