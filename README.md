@@ -9,9 +9,8 @@ latency thresholds.
 > available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
 > price-snapshot cost accounting, configurable trace redaction, bounded Prometheus metrics, and a
-> source-tree Promptfoo durable replay bridge. The development stack persists traces and metrics
-> and provisions Grafana. M3 remains open until the `v0.3.0-alpha.1` release is verified and pinned;
-> fault injection and autoscaling remain planned.
+> Promptfoo durable replay bridge. The development stack persists traces and metrics and provisions
+> Grafana. M3 is implemented in `v0.3.0-alpha.1`; fault injection and autoscaling remain planned.
 
 ## Why this project
 
@@ -108,7 +107,7 @@ make build
 ## Released Kubernetes quickstart
 
 Prerequisite: `kubectl` access to a Kubernetes cluster. The public manifests use immutable
-`v0.2.0-alpha.1` image-index digests and need no local image build or registry credentials.
+`v0.3.0-alpha.1` image-index digests and need no local image build or registry credentials.
 
 ```bash
 kubectl apply -k config/default
@@ -122,24 +121,24 @@ kubectl get agenttestrun/agentstorm-demo
 The released images are public for anonymous pulls:
 
 ```text
-ghcr.io/alphasxd/agentstorm-controller@sha256:5d6e9785b17036bc3d47157b4d2c39038a92175bbcd6d90252054624b5062f6f
-ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74
-ghcr.io/alphasxd/agentstorm-result-api@sha256:0db0c0eaee89f7a075ab2cde212788a008741b814967c467ff20d08dd64c819c
+ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef
+ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
+ghcr.io/alphasxd/agentstorm-result-api@sha256:e9b90e95e28a8130f166c7ad84f2d44eed455f3601f245ac1b6f83d7947572e8
 ```
 
 All three images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
 
 ```bash
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:5d6e9785b17036bc3d47157b4d2c39038a92175bbcd6d90252054624b5062f6f \
+  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:cfc60058243cbbcdf1be108e0459e05d35b80ec9bd6ae513d5e7640e96a1a9ef \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74 \
+  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0 \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:0db0c0eaee89f7a075ab2cde212788a008741b814967c467ff20d08dd64c819c \
+  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:e9b90e95e28a8130f166c7ad84f2d44eed455f3601f245ac1b6f83d7947572e8 \
   --repo Alphasxd/AgentStorm
 ```
 
@@ -268,7 +267,7 @@ spec:
   telemetry:
     contentMode: omit
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:9b0262a8b782a61fdd5f23d394bac82533d8fc81a8bc17c98bd44eb082908cd0
     imagePullPolicy: IfNotPresent
 ```
 
@@ -293,10 +292,9 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Verify and digest-pin the `v0.3.0-alpha.1` M3 release.
-2. Add controlled fault injection and reliability experiments.
-3. Add KEDA-based queue scaling and resource-aware scheduling.
-4. Publish Helm charts, reproducible benchmarks, and a public demo.
+1. Add controlled fault injection and reliability experiments.
+2. Add KEDA-based queue scaling and resource-aware scheduling.
+3. Publish Helm charts, reproducible benchmarks, and a public demo.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.
