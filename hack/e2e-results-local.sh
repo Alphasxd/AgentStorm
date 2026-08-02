@@ -717,7 +717,7 @@ spec:
       key: circuit.jsonl
     parallelism: 1
     concurrencyPerWorker: 1
-    iterations: 25
+    iterations: 100
     timeoutSeconds: 120
   reliability:
     seed: 42
@@ -728,7 +728,7 @@ spec:
       maxAttempts: 1
     circuitBreaker:
       failureThreshold: 1
-      openDurationMs: 1
+      openDurationMs: 5
   evaluation:
     minSuccessRate: 0
     maxErrorRate: 1
@@ -1050,11 +1050,11 @@ assert selected_a == selected_b, (selected_a, selected_b)
 assert 0 < sum(bool(value) for value in selected_a.values()) < len(selected_a), selected_a
 assert deterministic_a["registration"]["reliability"]["scenario"]["digest"] == deterministic_b["registration"]["reliability"]["scenario"]["digest"], (deterministic_a, deterministic_b)
 
-assert circuit["summary"]["total"] == 100, circuit
-assert circuit["summary"]["attempt_count"] == 100, circuit
+assert circuit["summary"]["total"] == 400, circuit
+assert circuit["summary"]["attempt_count"] == 400, circuit
 assert circuit["summary"]["injected_faults"] == 1, circuit
 assert circuit["summary"]["circuit_rejections"] > 0, circuit
-assert len(circuit_page["cases"]) == 100, circuit_page
+assert len(circuit_page["cases"]) == 400, circuit_page
 circuit_events = {
     event
     for case in circuit_page["cases"]
