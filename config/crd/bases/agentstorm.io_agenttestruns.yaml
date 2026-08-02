@@ -171,6 +171,72 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: telemetry is immutable; create a new AgentTestRun
+                reliability:
+                  type: object
+                  properties:
+                    seed:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                    scenarioRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                    retry:
+                      type: object
+                      default: {}
+                      properties:
+                        maxAttempts:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                          maximum: 10
+                          default: 1
+                        initialBackoffMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                          default: 100
+                        maxBackoffMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                          default: 2000
+                        maxCumulativeBackoffMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                          default: 5000
+                        jitterRatio:
+                          type: number
+                          format: double
+                          minimum: 0
+                          maximum: 1
+                          default: 0.2
+                        allowAmbiguousRetries:
+                          type: boolean
+                          default: false
+                    circuitBreaker:
+                      type: object
+                      required: [failureThreshold, openDurationMs]
+                      properties:
+                        failureThreshold:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                        openDurationMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: reliability is immutable; create a new AgentTestRun
+                    - rule: "!has(self.scenarioRef) || has(self.seed)"
+                      message: reliability.seed is required when scenarioRef is configured
                 runner:
                   type: object
                   required: [image]

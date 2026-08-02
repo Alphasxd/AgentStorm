@@ -11,6 +11,9 @@ from agentstorm_worker.config import (
     SourceConfig,
     TargetConfig,
     PricingConfig,
+    FaultRuleConfig,
+    FaultScenarioConfig,
+    ReliabilityConfig,
     WorkloadConfig,
 )
 from agentstorm_worker.models import AdapterResponse, AssertionSpec, TestCase
@@ -132,6 +135,56 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].output_cost_usd, "0.000030000000")
         self.assertEqual(results[0].cost_usd, "0.000035000000")
         self.assertEqual(summary.cost_usd, "0.000035000000")
+
+    async def test_injected_failures_have_stable_categories_and_usage(self) -> None:
+        base = test_config()
+        config = RunConfig(
+            run_id=base.run_id,
+            source=base.source,
+            dataset=base.dataset,
+            target=TargetConfig(provider="fake", pricing=PricingConfig("2.5", "10")),
+            workload=base.workload,
+            evaluation=base.evaluation,
+            reliability=ReliabilityConfig(
+                seed=42,
+                scenario=FaultScenarioConfig(
+                    source_name="faults",
+                    source_key="scenario.json",
+                    digest="sha256:" + "a" * 64,
+                    rules=(
+                        FaultRuleConfig("malformed", "malformed_response", 1),
+                    ),
+                ),
+            ),
+        )
+        adapter = AssertionAdapter()
+        results, _ = await WorkloadRunner(config, adapter).execute(
+            [TestCase(case_id="malformed", prompt="hello")]
+        )
+        result = results[0]
+        self.assertEqual(adapter.calls, 1)
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_kind, "provider")
+        self.assertEqual(result.failure_category, "provider")
+        self.assertEqual(result.error_code, "malformed_response")
+        self.assertEqual((result.input_tokens, result.output_tokens), (2, 3))
+        self.assertEqual(result.cost_usd, "0.000035000000")
+
+    async def test_assertion_failure_is_evaluation_not_provider(self) -> None:
+        result = (
+            await WorkloadRunner(test_config(), AssertionAdapter()).execute(
+                [
+                    TestCase(
+                        case_id="quality",
+                        prompt="hello",
+                        assertions=(AssertionSpec(type="exact", value="wrong"),),
+                    )
+                ]
+            )
+        )[0][0]
+        self.assertEqual(result.failure_kind, "assertion")
+        self.assertEqual(result.failure_category, "evaluation")
+        self.assertEqual(result.error_code, "assertion_failed")
 
 
 def test_config() -> RunConfig:

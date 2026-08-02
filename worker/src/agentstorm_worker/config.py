@@ -50,6 +50,51 @@ class TelemetryConfig:
 
 
 @dataclass(frozen=True)
+class FaultRuleConfig:
+    name: str
+    fault: str
+    probability: float
+    case_ids: tuple[str, ...] = ()
+    iterations: tuple[int, ...] = ()
+    attempts: tuple[int, ...] = (1,)
+    delay_ms: int | None = None
+    status_code: int | None = None
+    tool_name: str = ""
+
+
+@dataclass(frozen=True)
+class FaultScenarioConfig:
+    source_name: str
+    source_key: str
+    digest: str
+    rules: tuple[FaultRuleConfig, ...]
+
+
+@dataclass(frozen=True)
+class RetryConfig:
+    max_attempts: int = 1
+    initial_backoff_ms: int = 100
+    max_backoff_ms: int = 2000
+    max_cumulative_backoff_ms: int = 5000
+    jitter_ratio: float = 0.2
+    allow_ambiguous_retries: bool = False
+
+
+@dataclass(frozen=True)
+class CircuitBreakerConfig:
+    failure_threshold: int
+    open_duration_ms: int
+
+
+@dataclass(frozen=True)
+class ReliabilityConfig:
+    seed: int | None = None
+    retry: RetryConfig = field(default_factory=RetryConfig)
+    circuit_breaker: CircuitBreakerConfig | None = None
+    scenario: FaultScenarioConfig | None = None
+
+
+@dataclass(frozen=True)
 class SourceConfig:
     namespace: str
     name: str
@@ -70,6 +115,7 @@ class RunConfig:
     workload: WorkloadConfig
     evaluation: EvaluationConfig
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
+    reliability: ReliabilityConfig | None = None
 
 
 def load_run_config(path: str | Path) -> RunConfig:
@@ -110,12 +156,241 @@ def load_run_config(path: str | Path) -> RunConfig:
             ),
         ),
         telemetry=_telemetry(telemetry),
+        reliability=_reliability(raw.get("reliability")),
     )
     if config.workload.concurrency < 1 or config.workload.iterations < 1:
         raise ValueError("workload concurrency and iterations must be positive")
     if config.workload.timeout_seconds < 1:
         raise ValueError("workload timeout_seconds must be positive")
     return config
+
+
+_FAULTS = {
+    "latency",
+    "timeout",
+    "http_error",
+    "malformed_response",
+    "rate_limit",
+    "tool_error",
+}
+
+
+def _reliability(value: Any) -> ReliabilityConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("reliability must be an object")
+    _only_keys(value, {"seed", "retry", "circuitBreaker", "scenario"}, "reliability")
+    seed = value.get("seed")
+    if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool) or seed < 0):
+        raise ValueError("reliability.seed must be a non-negative integer")
+    retry = _retry(value.get("retry", {}))
+    breaker = _circuit_breaker(value.get("circuitBreaker"))
+    scenario = _scenario_snapshot(value.get("scenario"))
+    if scenario is not None and seed is None:
+        raise ValueError("reliability.seed is required when a scenario is configured")
+    return ReliabilityConfig(
+        seed=seed,
+        retry=retry,
+        circuit_breaker=breaker,
+        scenario=scenario,
+    )
+
+
+def _retry(value: Any) -> RetryConfig:
+    if not isinstance(value, dict):
+        raise ValueError("reliability.retry must be an object")
+    _only_keys(
+        value,
+        {
+            "maxAttempts",
+            "initialBackoffMs",
+            "maxBackoffMs",
+            "maxCumulativeBackoffMs",
+            "jitterRatio",
+            "allowAmbiguousRetries",
+        },
+        "reliability.retry",
+    )
+    retry = RetryConfig(
+        max_attempts=_strict_int(value.get("maxAttempts", 1), "maxAttempts"),
+        initial_backoff_ms=_strict_int(value.get("initialBackoffMs", 100), "initialBackoffMs"),
+        max_backoff_ms=_strict_int(value.get("maxBackoffMs", 2000), "maxBackoffMs"),
+        max_cumulative_backoff_ms=_strict_int(
+            value.get("maxCumulativeBackoffMs", 5000), "maxCumulativeBackoffMs"
+        ),
+        jitter_ratio=_strict_number(value.get("jitterRatio", 0.2), "jitterRatio"),
+        allow_ambiguous_retries=value.get("allowAmbiguousRetries", False),
+    )
+    if not isinstance(retry.allow_ambiguous_retries, bool):
+        raise ValueError("reliability.retry.allowAmbiguousRetries must be a boolean")
+    if not 1 <= retry.max_attempts <= 10:
+        raise ValueError("reliability.retry.maxAttempts must be between 1 and 10")
+    if min(
+        retry.initial_backoff_ms,
+        retry.max_backoff_ms,
+        retry.max_cumulative_backoff_ms,
+    ) < 1:
+        raise ValueError("reliability retry backoff values must be positive")
+    if retry.initial_backoff_ms > retry.max_backoff_ms:
+        raise ValueError("reliability.retry.initialBackoffMs cannot exceed maxBackoffMs")
+    if not 0 <= retry.jitter_ratio <= 1:
+        raise ValueError("reliability.retry.jitterRatio must be between 0 and 1")
+    return retry
+
+
+def _circuit_breaker(value: Any) -> CircuitBreakerConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("reliability.circuitBreaker must be an object")
+    _only_keys(value, {"failureThreshold", "openDurationMs"}, "reliability.circuitBreaker")
+    if set(value) != {"failureThreshold", "openDurationMs"}:
+        raise ValueError("reliability.circuitBreaker requires failureThreshold and openDurationMs")
+    config = CircuitBreakerConfig(
+        failure_threshold=_strict_int(value["failureThreshold"], "failureThreshold"),
+        open_duration_ms=_strict_int(value["openDurationMs"], "openDurationMs"),
+    )
+    if config.failure_threshold < 1 or config.open_duration_ms < 1:
+        raise ValueError("reliability.circuitBreaker values must be positive")
+    return config
+
+
+def _scenario_snapshot(value: Any) -> FaultScenarioConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("reliability.scenario must be an object")
+    _only_keys(value, {"sourceName", "sourceKey", "digest", "scenario"}, "reliability.scenario")
+    if set(value) != {"sourceName", "sourceKey", "digest", "scenario"}:
+        raise ValueError("reliability.scenario snapshot is incomplete")
+    source_name = _nonempty_string(value["sourceName"], "sourceName", 253)
+    source_key = _nonempty_string(value["sourceKey"], "sourceKey", 253)
+    digest = _nonempty_string(value["digest"], "digest", 71)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("reliability.scenario.digest must be a sha256 digest")
+    scenario = value["scenario"]
+    if not isinstance(scenario, dict):
+        raise ValueError("reliability.scenario.scenario must be an object")
+    _only_keys(scenario, {"apiVersion", "kind", "rules"}, "FaultScenario")
+    if scenario.get("apiVersion") != "agentstorm.io/v1alpha1" or scenario.get("kind") != "FaultScenario":
+        raise ValueError("FaultScenario apiVersion or kind is invalid")
+    raw_rules = scenario.get("rules")
+    if not isinstance(raw_rules, list) or len(raw_rules) > 100:
+        raise ValueError("FaultScenario.rules must be an array of at most 100 entries")
+    rules = tuple(_fault_rule(rule, index) for index, rule in enumerate(raw_rules))
+    names = [rule.name for rule in rules]
+    if len(names) != len(set(names)):
+        raise ValueError("FaultScenario rule names must be unique")
+    return FaultScenarioConfig(source_name, source_key, digest, rules)
+
+
+def _fault_rule(value: Any, index: int) -> FaultRuleConfig:
+    path = f"FaultScenario.rules[{index}]"
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    _only_keys(
+        value,
+        {
+            "name",
+            "fault",
+            "probability",
+            "caseIDs",
+            "iterations",
+            "attempts",
+            "delayMs",
+            "statusCode",
+            "toolName",
+        },
+        path,
+    )
+    name = _nonempty_string(value.get("name"), f"{path}.name", 128)
+    fault = value.get("fault")
+    if fault not in _FAULTS:
+        raise ValueError(f"{path}.fault is unsupported")
+    probability = _strict_number(value.get("probability"), f"{path}.probability")
+    if not 0 <= probability <= 1:
+        raise ValueError(f"{path}.probability must be between 0 and 1")
+    case_ids = _string_selector(value.get("caseIDs", []), f"{path}.caseIDs")
+    iterations = _integer_selector(value.get("iterations", []), f"{path}.iterations", 0)
+    attempts = _integer_selector(value.get("attempts", [1]), f"{path}.attempts", 1)
+    if any(attempt > 10 for attempt in attempts):
+        raise ValueError(f"{path}.attempts must be between 1 and 10")
+    delay_ms = value.get("delayMs")
+    status_code = value.get("statusCode")
+    tool_name = value.get("toolName", "")
+    if fault in {"latency", "timeout"}:
+        delay_ms = _strict_int(delay_ms, f"{path}.delayMs")
+        if delay_ms < 0:
+            raise ValueError(f"{path}.delayMs must be non-negative")
+        if status_code is not None or tool_name:
+            raise ValueError(f"{path} has fields that do not apply to {fault}")
+    elif fault == "http_error":
+        status_code = _strict_int(status_code, f"{path}.statusCode")
+        if not 400 <= status_code <= 599 or delay_ms is not None or tool_name:
+            raise ValueError(f"{path}.statusCode must be between 400 and 599")
+    elif fault == "tool_error":
+        if not isinstance(tool_name, str) or len(tool_name.encode("utf-8")) > 512:
+            raise ValueError(f"{path}.toolName must be a string of at most 512 bytes")
+        if delay_ms is not None or status_code is not None:
+            raise ValueError(f"{path} has fields that do not apply to tool_error")
+    elif delay_ms is not None or status_code is not None or tool_name:
+        raise ValueError(f"{path} has fields that do not apply to {fault}")
+    return FaultRuleConfig(
+        name=name,
+        fault=fault,
+        probability=probability,
+        case_ids=case_ids,
+        iterations=iterations,
+        attempts=attempts,
+        delay_ms=delay_ms,
+        status_code=status_code,
+        tool_name=tool_name,
+    )
+
+
+def _only_keys(value: dict[str, Any], allowed: set[str], path: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"{path} contains unknown field {unknown[0]!r}")
+
+
+def _strict_int(value: Any, path: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{path} must be an integer")
+    return value
+
+
+def _strict_number(value: Any, path: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{path} must be a number")
+    return float(value)
+
+
+def _nonempty_string(value: Any, path: str, max_bytes: int) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > max_bytes:
+        raise ValueError(f"{path} must be a non-empty string of at most {max_bytes} bytes")
+    return value
+
+
+def _string_selector(value: Any, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be an array")
+    parsed = tuple(_nonempty_string(item, path, 512) for item in value)
+    if len(parsed) != len(set(parsed)):
+        raise ValueError(f"{path} must not contain duplicates")
+    return parsed
+
+
+def _integer_selector(value: Any, path: str, minimum: int) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be an array")
+    parsed = tuple(_strict_int(item, path) for item in value)
+    if any(item < minimum for item in parsed):
+        raise ValueError(f"{path} values must be at least {minimum}")
+    if len(parsed) != len(set(parsed)):
+        raise ValueError(f"{path} must not contain duplicates")
+    return parsed
 
 
 def load_dataset(path: str | Path) -> list[TestCase]:
