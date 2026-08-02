@@ -66,19 +66,52 @@ labels. Unknown worker failure kinds collapse to `other`. This keeps cardinality
 sensitive values from entering the Prometheus index. Detailed per-run and failed-case data remains in
 the authenticated Result API.
 
-## Local verification
+## Local persistent stack
 
-`config/dev/telemetry` composes the source-built result stack with a digest-pinned OpenTelemetry
-Collector whose debug exporter is used only as an E2E assertion sink. It is not a production trace
-backend. A normal source-built result E2E enables this path automatically:
+`config/dev/telemetry` composes the source-built result stack with four digest-pinned workloads:
+
+| Component | Local role | Persistence |
+| --- | --- | --- |
+| OpenTelemetry Collector 0.157.0 | Receive worker OTLP/HTTP; forward to Tempo and retain the debug exporter for redaction assertions | none |
+| Tempo 2.10.5 | Search traces with TraceQL using the Run ID and trace attributes | 1 GiB PVC, 24-hour retention |
+| Prometheus 3.11.0 | Scrape Result API metrics and evaluate three RED recording rules | 1 GiB PVC, 24-hour retention |
+| Grafana 13.1.0 | Provision Prometheus/Tempo data sources and the `AgentStorm Observability` dashboard | 1 GiB PVC |
+
+Grafana's provisioned dashboard combines low-cardinality operational metrics with high-cardinality
+trace search. Enter the `AgentTestRun` UID in its `Run ID` variable to list failed case traces and
+provider-error traces. Selecting a trace ID opens the complete span tree in the dashboard without
+copying run or case identifiers into Prometheus labels.
+
+Run the complete source-built path and retain its resources:
 
 ```bash
 CLUSTER_PROVIDER=kind make e2e-results-local
+kubectl -n agentstorm-system port-forward service/agentstorm-grafana 13000:3000
 ```
 
-The test verifies the complete OTLP export, required span hierarchy, Prometheus metrics, and default
-content redaction. Published-image smoke tests for releases that predate this interface automatically
-leave telemetry disabled; `ENABLE_TELEMETRY_E2E=true|false` can override that selection.
+Retrieve a run ID and open the dashboard:
 
-A persistent trace backend, Prometheus deployment, and Grafana drill-down dashboard are the next M3
-delivery after these signal contracts stabilize.
+```bash
+RUN_ID=$(kubectl -n agentstorm-system get agenttestrun agentstorm-results-failure \
+  -o jsonpath='{.metadata.uid}')
+echo "http://127.0.0.1:13000/d/agentstorm-observability/agentstorm-observability?var-run_id=$RUN_ID"
+```
+
+The E2E creates a deterministic failed case, queries its trace from Tempo, verifies Prometheus
+metrics and recording-rule health, loads the provisioned dashboard through the Grafana API, and then
+restarts Tempo and Prometheus to prove both signals remain queryable from their PVCs. It also checks
+the required span hierarchy and confirms that prompts, expected values, case IDs, run IDs, and bearer
+tokens do not enter the wrong telemetry surface: correlation IDs remain trace-only, while content and
+credentials are excluded from both traces and metric labels.
+
+Published-image smoke tests for releases that predate this interface automatically leave telemetry
+disabled; `ENABLE_TELEMETRY_E2E=true|false` can override that selection.
+
+## Deployment boundary
+
+This overlay is a single-replica development stack, not a production observability topology. Tempo
+uses its monolithic local-filesystem backend; Prometheus has local TSDB retention; Grafana enables
+anonymous Viewer access and exposes only a ClusterIP service intended for `kubectl port-forward`.
+Do not expose these services outside a trusted local cluster. Production deployments need external
+object storage, authentication/TLS, backup and retention policies, resource sizing, and HA chosen by
+the operator. Use `KEEP_E2E_RESOURCES=false` to remove the test stack and its PVCs after verification.
