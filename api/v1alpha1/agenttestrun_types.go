@@ -26,6 +26,15 @@ type AgentTargetSpec struct {
 	BaseURL string `json:"baseURL,omitempty"`
 	// APIKeySecretRef injects the selected secret value as OPENAI_API_KEY.
 	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
+	// Pricing snapshots the USD price used to calculate reproducible run cost.
+	Pricing *AgentPricingSpec `json:"pricing,omitempty"`
+}
+
+type AgentPricingSpec struct {
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`
+	InputUSDPerMillionTokens string `json:"inputUSDPerMillionTokens"`
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`
+	OutputUSDPerMillionTokens string `json:"outputUSDPerMillionTokens"`
 }
 
 type AgentWorkloadSpec struct {

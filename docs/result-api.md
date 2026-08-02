@@ -15,7 +15,7 @@ result-read access. The public Kubernetes stack restricts metrics access with Ne
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | none | Process liveness |
 | `GET` | `/readyz` | none | PostgreSQL and object-store readiness |
-| `GET` | `/metrics` | none | Prometheus RED, result, case, and token counters |
+| `GET` | `/metrics` | none | Prometheus RED, result, case, token, and cost counters |
 | `PUT` | `/v1/runs/{runID}` | writer | Register immutable run metadata and expected shards |
 | `PUT` | `/v1/runs/{runID}/shards/{index}` | writer | Persist one complete shard document |
 | `GET` | `/v1/runs/{runID}` | reader | Read status, received shards, and aggregates |
@@ -28,7 +28,9 @@ canonical body again returns success without changing counters. Reusing an ident
 content returns HTTP `409`.
 
 Run comparison reports candidate-minus-baseline deltas for success and failure rates, P50/P95/P99
-latency, and token counts. Latency percentage deltas are `null` when the baseline value is zero.
+latency, token counts, and derived USD cost. Latency percentage deltas are `null` when the baseline
+value is zero. Cost fields are fixed-precision decimal strings and remain `null` when a run did not
+register an explicit `spec.target.pricing` snapshot; AgentStorm never guesses current provider prices.
 Case pages also return ordered tool paths and structured assertion outcomes. Assertion values and
 custom messages remain omitted unless sensitive result upload was explicitly enabled.
 

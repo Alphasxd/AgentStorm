@@ -357,6 +357,8 @@ create_auth_secret
 
 create_run() {
   run_name="$1"
+  input_price="$2"
+  output_price="$3"
   "${kubectl_cmd[@]}" apply -f - <<YAML
 apiVersion: agentstorm.io/v1alpha1
 kind: AgentTestRun
@@ -366,6 +368,9 @@ metadata:
 spec:
   target:
     provider: fake
+    pricing:
+      inputUSDPerMillionTokens: "$input_price"
+      outputUSDPerMillionTokens: "$output_price"
   workload:
     datasetRef:
       name: agentstorm-results-dataset
@@ -412,8 +417,8 @@ spec:
 YAML
 }
 
-create_run agentstorm-results-baseline
-create_run agentstorm-results-candidate
+create_run agentstorm-results-baseline 2.5 10
+create_run agentstorm-results-candidate 5 20
 create_failure_run
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-baseline -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-candidate -n "$e2e_namespace" --timeout="$wait_timeout"
@@ -486,6 +491,10 @@ for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["summary"]["total"] == 2, run
     assert run["summary"]["succeeded"] == 2, run
     assert run["summary"]["failed"] == 0, run
+    assert run["summary"]["cost_usd"] is not None, run
+
+assert baseline["summary"]["cost_usd"] == "0.000195000000", baseline
+assert candidate["summary"]["cost_usd"] == "0.000390000000", candidate
 
 assert failure["id"] == failure_id, failure
 assert failure["status"] == "complete", failure
@@ -497,6 +506,7 @@ assert len(cases["cases"]) == 2, cases
 for case in cases["cases"]:
     assert "output" not in case, case
     assert "error" not in case, case
+    assert case["cost_usd"] is not None, case
 
 assert len(failure_cases["cases"]) == 1, failure_cases
 assert failure_cases["cases"][0]["failure_kind"] == "assertion", failure_cases
@@ -508,8 +518,11 @@ assert comparison["candidate_id"] == candidate_id, comparison
 expected_deltas = {
     "success_rate", "failure_rate", "p50_ms", "p50_percent", "p95_ms",
     "p95_percent", "p99_ms", "p99_percent", "input_tokens", "output_tokens",
+    "cost_usd", "cost_percent",
 }
 assert expected_deltas <= comparison["delta"].keys(), comparison
+assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
+assert comparison["delta"]["cost_percent"] == 100, comparison
 PY
 
 if [[ "$telemetry_e2e" == "true" ]]; then
@@ -525,6 +538,7 @@ for name in (
     "agentstorm_result_api_shard_uploads_total",
     "agentstorm_result_api_cases_total",
     "agentstorm_result_api_tokens_total",
+    "agentstorm_result_api_cost_usd_total",
 ):
     assert name in metrics, name
 for forbidden in sys.argv[2:]:
@@ -664,6 +678,7 @@ expected_rules = {
     "agentstorm:result_api_http_requests:rate5m",
     "agentstorm:result_api_http_errors:ratio5m",
     "agentstorm:result_api_http_request_duration:p95_5m",
+    "agentstorm:result_api_cost_usd:rate5m",
 }
 assert expected_rules <= recording_rules.keys(), recording_rules
 assert all(recording_rules[name] == "ok" for name in expected_rules), recording_rules
@@ -681,6 +696,7 @@ for title in (
     "Provider errors for Run ID",
     "Selected trace",
     "Result API P95 latency",
+    "Estimated USD cost",
 ):
     assert title in panels, title
 assert "agentstorm.case.success = false" in panels["Failed cases for Run ID"]["targets"][0]["query"]

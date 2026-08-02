@@ -30,7 +30,13 @@ func (in *AgentTargetSpec) DeepCopyInto(out *AgentTargetSpec) {
 	if in.APIKeySecretRef != nil {
 		out.APIKeySecretRef = in.APIKeySecretRef.DeepCopy()
 	}
+	if in.Pricing != nil {
+		out.Pricing = new(AgentPricingSpec)
+		*out.Pricing = *in.Pricing
+	}
 }
+
+func (in *AgentPricingSpec) DeepCopyInto(out *AgentPricingSpec) { *out = *in }
 
 func (in *AgentTestRun) DeepCopyInto(out *AgentTestRun) {
 	*out = *in

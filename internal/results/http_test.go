@@ -120,9 +120,12 @@ func TestServiceErrorsHaveStableHTTPMappings(t *testing.T) {
 func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) {
 	handler := newTestHandler(t, repositoryStub{
 		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
-			return ShardReservation{}, nil
+			return ShardReservation{Pricing: &RunPricing{
+				InputUSDPerMillionTokens:  "2",
+				OutputUSDPerMillionTokens: "4",
+			}}, nil
 		},
-		finalizeShard: func(context.Context, string, int, string, []CaseResult) (bool, error) {
+		finalizeShard: func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error) {
 			return true, nil
 		},
 	}, objectStoreStub{
@@ -132,6 +135,8 @@ func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) 
 	upload.Cases[0].FailureKind = "provider-secret-material"
 	upload.Summary.InputTokens = 7
 	upload.Summary.OutputTokens = 11
+	upload.Cases[0].InputTokens = 7
+	upload.Cases[0].OutputTokens = 11
 	payload, err := json.Marshal(upload)
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +163,8 @@ func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) 
 		`agentstorm_result_api_cases_total{failure_kind="other",result="failure"} 1`,
 		`agentstorm_result_api_tokens_total{direction="input"} 7`,
 		`agentstorm_result_api_tokens_total{direction="output"} 11`,
+		`agentstorm_result_api_cost_usd_total{direction="input"} 1.4e-05`,
+		`agentstorm_result_api_cost_usd_total{direction="output"} 4.4e-05`,
 		`agentstorm_result_api_http_requests_total{method="PUT",route="PUT /v1/runs/{runID}/shards/{index}",status_class="2xx"} 1`,
 		`agentstorm_result_api_http_requests_total{method="other",route="unmatched",status_class="4xx"} 1`,
 	} {

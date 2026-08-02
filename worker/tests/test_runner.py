@@ -10,6 +10,7 @@ from agentstorm_worker.config import (
     RunConfig,
     SourceConfig,
     TargetConfig,
+    PricingConfig,
     WorkloadConfig,
 )
 from agentstorm_worker.models import AdapterResponse, AssertionSpec, TestCase
@@ -108,6 +109,29 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(results[0].success)
         self.assertEqual(results[0].assertions[0].reason_code, "exception")
+
+    async def test_price_snapshot_populates_case_and_summary_cost(self) -> None:
+        config = test_config()
+        config = RunConfig(
+            run_id=config.run_id,
+            source=config.source,
+            dataset=config.dataset,
+            target=TargetConfig(
+                provider="fake",
+                pricing=PricingConfig("2.5", "10"),
+            ),
+            workload=config.workload,
+            evaluation=config.evaluation,
+        )
+
+        results, summary = await WorkloadRunner(config, AssertionAdapter()).execute(
+            [TestCase(case_id="priced", prompt="hello")]
+        )
+
+        self.assertEqual(results[0].input_cost_usd, "0.000005000000")
+        self.assertEqual(results[0].output_cost_usd, "0.000030000000")
+        self.assertEqual(results[0].cost_usd, "0.000035000000")
+        self.assertEqual(summary.cost_usd, "0.000035000000")
 
 
 def test_config() -> RunConfig:

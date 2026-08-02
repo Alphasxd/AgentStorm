@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,8 @@ const (
 	conditionResultSink  = "ResultSinkReady"
 	workerConfigKey      = "run.json"
 )
+
+var pricePattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
 
 type ResultSinkConfig struct {
 	URL                  string
@@ -275,6 +278,11 @@ func validateAndDefault(run *agentstormv1alpha1.AgentTestRun) error {
 	}
 	if run.Spec.Target.Provider == "openai-agents" && strings.TrimSpace(run.Spec.Target.Model) == "" {
 		return fmt.Errorf("target.model is required for provider openai-agents")
+	}
+	if run.Spec.Target.Pricing != nil &&
+		(!pricePattern.MatchString(run.Spec.Target.Pricing.InputUSDPerMillionTokens) ||
+			!pricePattern.MatchString(run.Spec.Target.Pricing.OutputUSDPerMillionTokens)) {
+		return fmt.Errorf("target.pricing requires non-negative decimal USD prices")
 	}
 	if strings.TrimSpace(run.Spec.Runner.Image) == "" {
 		return fmt.Errorf("runner.image is required")

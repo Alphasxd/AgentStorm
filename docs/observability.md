@@ -71,6 +71,7 @@ The Result API exposes a dedicated Prometheus registry with:
 | `agentstorm_result_api_shard_uploads_total` | bounded outcome | Idempotent shard ingestion outcomes |
 | `agentstorm_result_api_cases_total` | result, bounded failure kind | Uniquely persisted success/failure cases |
 | `agentstorm_result_api_tokens_total` | direction | Input and output Tokens from unique shards |
+| `agentstorm_result_api_cost_usd_total` | direction | Input and output USD cost derived from registered price snapshots |
 
 Run IDs, case IDs, model names, source names, bearer tokens, outputs, and error bodies are not metric
 labels. Unknown worker failure kinds collapse to `other`. This keeps cardinality bounded and prevents
@@ -85,10 +86,11 @@ the authenticated Result API.
 | --- | --- | --- |
 | OpenTelemetry Collector 0.157.0 | Receive worker OTLP/HTTP; forward to Tempo and retain the debug exporter for redaction assertions | none |
 | Tempo 2.10.5 | Search traces with TraceQL using the Run ID and trace attributes | 1 GiB PVC, 24-hour retention |
-| Prometheus 3.11.0 | Scrape Result API metrics and evaluate three RED recording rules | 1 GiB PVC, 24-hour retention |
+| Prometheus 3.11.0 | Scrape Result API metrics and evaluate RED plus cost recording rules | 1 GiB PVC, 24-hour retention |
 | Grafana 13.1.0 | Provision Prometheus/Tempo data sources and the `AgentStorm Observability` dashboard | 1 GiB PVC |
 
-Grafana's provisioned dashboard combines low-cardinality operational metrics with high-cardinality
+Grafana's provisioned dashboard combines low-cardinality operational metrics and cumulative input/
+output cost with high-cardinality
 trace search. Enter the `AgentTestRun` UID in its `Run ID` variable to list failed case traces and
 provider-error traces. Selecting a trace ID opens the complete span tree in the dashboard without
 copying run or case identifiers into Prometheus labels.

@@ -117,11 +117,16 @@ func (r *PostgresRepository) ReserveShard(
 	defer func() { _ = transaction.Rollback(ctx) }()
 
 	var expectedShards int
-	if err := transaction.QueryRow(ctx, `SELECT expected_shards FROM agentstorm_runs WHERE id = $1 FOR UPDATE`, runID).Scan(&expectedShards); err != nil {
+	var registrationPayload []byte
+	if err := transaction.QueryRow(ctx, `SELECT expected_shards, registration FROM agentstorm_runs WHERE id = $1 FOR UPDATE`, runID).Scan(&expectedShards, &registrationPayload); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ShardReservation{}, ErrNotFound
 		}
 		return ShardReservation{}, fmt.Errorf("read run for shard: %w", err)
+	}
+	var registration Registration
+	if err := json.Unmarshal(registrationPayload, &registration); err != nil {
+		return ShardReservation{}, fmt.Errorf("decode run pricing: %w", err)
 	}
 	if shardIndex >= expectedShards {
 		return ShardReservation{}, validationErrorf("shard index %d is outside expected range [0,%d)", shardIndex, expectedShards)
@@ -142,7 +147,7 @@ func (r *PostgresRepository) ReserveShard(
 		if err := transaction.Commit(ctx); err != nil {
 			return ShardReservation{}, fmt.Errorf("commit shard reservation: %w", err)
 		}
-		return ShardReservation{}, nil
+		return ShardReservation{Pricing: registration.Target.Pricing}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ShardReservation{}, fmt.Errorf("reserve shard: %w", err)
@@ -165,10 +170,20 @@ func (r *PostgresRepository) ReserveShard(
 	if err := transaction.Commit(ctx); err != nil {
 		return ShardReservation{}, fmt.Errorf("commit existing shard reservation: %w", err)
 	}
-	return ShardReservation{AlreadyComplete: existingStatus == "complete"}, nil
+	return ShardReservation{
+		AlreadyComplete: existingStatus == "complete",
+		Pricing:         registration.Target.Pricing,
+	}, nil
 }
 
-func (r *PostgresRepository) FinalizeShard(ctx context.Context, runID string, shardIndex int, hash string, cases []CaseResult) (bool, error) {
+func (r *PostgresRepository) FinalizeShard(
+	ctx context.Context,
+	runID string,
+	shardIndex int,
+	hash string,
+	cases []CaseResult,
+	pricing *RunPricing,
+) (bool, error) {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin shard finalization: %w", err)
@@ -209,6 +224,15 @@ func (r *PostgresRepository) FinalizeShard(ctx context.Context, runID string, sh
 	}
 
 	for _, item := range cases {
+		inputCost, outputCost, totalCost, err := costsForTokens(
+			pricing, item.InputTokens, item.OutputTokens,
+		)
+		if err != nil {
+			return false, fmt.Errorf("calculate case cost: %w", err)
+		}
+		item.InputCostUSD = inputCost
+		item.OutputCostUSD = outputCost
+		item.CostUSD = totalCost
 		assertionsPayload, err := json.Marshal(item.Assertions)
 		if err != nil {
 			return false, fmt.Errorf("marshal case assertions: %w", err)
@@ -222,12 +246,14 @@ func (r *PostgresRepository) FinalizeShard(ctx context.Context, runID string, sh
 			INSERT INTO agentstorm_case_results
 				(run_id, case_id, iteration, shard_index, idempotency_key, payload_hash,
 				 success, latency_ms, input_tokens, output_tokens, failure_kind, output, error,
-				 tool_path, assertions)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+				 tool_path, assertions, input_cost_usd, output_cost_usd, cost_usd)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+			        $16, $17, $18)
 			ON CONFLICT DO NOTHING
 			RETURNING case_id`, runID, item.CaseID, item.Iteration, shardIndex, item.IdempotencyKey,
 			itemHash, item.Success, item.LatencyMS, item.InputTokens, item.OutputTokens,
-			item.FailureKind, item.Output, item.Error, item.ToolPath, assertionsPayload).Scan(&inserted)
+			item.FailureKind, item.Output, item.Error, item.ToolPath, assertionsPayload,
+			item.InputCostUSD, item.OutputCostUSD, item.CostUSD).Scan(&inserted)
 		if err == nil {
 			continue
 		}
@@ -277,7 +303,10 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0),
 			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms), 0),
 			COALESCE(sum(input_tokens), 0),
-			COALESCE(sum(output_tokens), 0)
+			COALESCE(sum(output_tokens), 0),
+			CASE WHEN count(*) > 0 AND count(input_cost_usd) = count(*) THEN sum(input_cost_usd)::text END,
+			CASE WHEN count(*) > 0 AND count(output_cost_usd) = count(*) THEN sum(output_cost_usd)::text END,
+			CASE WHEN count(*) > 0 AND count(cost_usd) = count(*) THEN sum(cost_usd)::text END
 		FROM agentstorm_case_results
 		WHERE run_id = $1`, runID).Scan(
 		&aggregate.Total,
@@ -288,6 +317,9 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 		&aggregate.P99MS,
 		&aggregate.InputTokens,
 		&aggregate.OutputTokens,
+		&aggregate.InputCostUSD,
+		&aggregate.OutputCostUSD,
+		&aggregate.CostUSD,
 	); err != nil {
 		return fmt.Errorf("aggregate run: %w", err)
 	}
@@ -316,8 +348,9 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 	if _, err := transaction.Exec(ctx, `
 		INSERT INTO agentstorm_run_summaries
 			(run_id, total, succeeded, failed, success_rate, failure_rate, p50_ms, p95_ms,
-			 p99_ms, input_tokens, output_tokens, thresholds_passed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			 p99_ms, input_tokens, output_tokens, thresholds_passed,
+			 input_cost_usd, output_cost_usd, cost_usd)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (run_id) DO UPDATE SET
 			total = EXCLUDED.total,
 			succeeded = EXCLUDED.succeeded,
@@ -330,9 +363,13 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			input_tokens = EXCLUDED.input_tokens,
 			output_tokens = EXCLUDED.output_tokens,
 			thresholds_passed = EXCLUDED.thresholds_passed,
+			input_cost_usd = EXCLUDED.input_cost_usd,
+			output_cost_usd = EXCLUDED.output_cost_usd,
+			cost_usd = EXCLUDED.cost_usd,
 			updated_at = now()`, runID, aggregate.Total, aggregate.Succeeded, aggregate.Failed,
 		aggregate.SuccessRate, aggregate.FailureRate, aggregate.P50MS, aggregate.P95MS,
-		aggregate.P99MS, aggregate.InputTokens, aggregate.OutputTokens, aggregate.ThresholdsPassed); err != nil {
+		aggregate.P99MS, aggregate.InputTokens, aggregate.OutputTokens, aggregate.ThresholdsPassed,
+		aggregate.InputCostUSD, aggregate.OutputCostUSD, aggregate.CostUSD); err != nil {
 		return fmt.Errorf("persist run aggregate: %w", err)
 	}
 
@@ -379,7 +416,8 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		       COALESCE(rs.success_rate, 0), COALESCE(rs.failure_rate, 0),
 		       COALESCE(rs.p50_ms, 0), COALESCE(rs.p95_ms, 0), COALESCE(rs.p99_ms, 0),
 		       COALESCE(rs.input_tokens, 0), COALESCE(rs.output_tokens, 0),
-		       COALESCE(rs.thresholds_passed, false)
+		       COALESCE(rs.thresholds_passed, false),
+		       rs.input_cost_usd::text, rs.output_cost_usd::text, rs.cost_usd::text
 		FROM agentstorm_runs r
 		LEFT JOIN agentstorm_shard_receipts sr ON sr.run_id = r.id
 		LEFT JOIN agentstorm_run_summaries rs ON rs.run_id = r.id
@@ -404,6 +442,9 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		&summary.InputTokens,
 		&summary.OutputTokens,
 		&summary.ThresholdsPassed,
+		&summary.InputCostUSD,
+		&summary.OutputCostUSD,
+		&summary.CostUSD,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -443,7 +484,8 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT idempotency_key, case_id, iteration, success, latency_ms,
-		       input_tokens, output_tokens, failure_kind, output, error, tool_path, assertions
+		       input_tokens, output_tokens, failure_kind, output, error, tool_path, assertions,
+		       input_cost_usd::text, output_cost_usd::text, cost_usd::text
 		FROM agentstorm_case_results
 		WHERE run_id = $1
 		  AND ($2::boolean = false OR success = false)
@@ -472,6 +514,9 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 			&item.Error,
 			&item.ToolPath,
 			&assertionsPayload,
+			&item.InputCostUSD,
+			&item.OutputCostUSD,
+			&item.CostUSD,
 		); err != nil {
 			return CasePage{}, fmt.Errorf("scan case: %w", err)
 		}
@@ -517,6 +562,17 @@ func (r *PostgresRepository) Compare(ctx context.Context, baselineID, candidateI
 	delta.P50Percent = percentDelta(baseline.Summary.P50MS, candidate.Summary.P50MS)
 	delta.P95Percent = percentDelta(baseline.Summary.P95MS, candidate.Summary.P95MS)
 	delta.P99Percent = percentDelta(baseline.Summary.P99MS, candidate.Summary.P99MS)
+	if baseline.Summary.CostUSD != nil && candidate.Summary.CostUSD != nil {
+		costDelta, err := subtractDecimalStrings(*candidate.Summary.CostUSD, *baseline.Summary.CostUSD)
+		if err != nil {
+			return Comparison{}, fmt.Errorf("calculate cost delta: %w", err)
+		}
+		delta.CostUSD = &costDelta
+		delta.CostPercent, err = decimalPercentDelta(*baseline.Summary.CostUSD, *candidate.Summary.CostUSD)
+		if err != nil {
+			return Comparison{}, fmt.Errorf("calculate cost percentage: %w", err)
+		}
+	}
 
 	return Comparison{
 		BaselineID:  baselineID,

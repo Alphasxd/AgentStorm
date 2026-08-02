@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,10 +10,17 @@ from .models import AssertionSpec, TestCase
 
 
 @dataclass(frozen=True)
+class PricingConfig:
+    input_usd_per_million_tokens: str
+    output_usd_per_million_tokens: str
+
+
+@dataclass(frozen=True)
 class TargetConfig:
     provider: str
     model: str = ""
     base_url: str = ""
+    pricing: PricingConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +81,7 @@ def load_run_config(path: str | Path) -> RunConfig:
             provider=str(target.get("provider") or "fake"),
             model=str(target.get("model") or ""),
             base_url=str(target.get("baseURL") or target.get("base_url") or ""),
+            pricing=_pricing(target.get("pricing")),
         ),
         workload=WorkloadConfig(
             concurrency=int(workload.get("concurrency") or 1),
@@ -146,6 +155,23 @@ def _optional_string(value: Any) -> str | None:
 def _metadata(raw: dict[str, Any]) -> dict[str, Any]:
     metadata = raw.get("metadata")
     return metadata if isinstance(metadata, dict) else {}
+
+
+_PRICE_PATTERN = re.compile(r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$")
+
+
+def _pricing(value: Any) -> PricingConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("target.pricing must be an object")
+    input_price = value.get("inputUSDPerMillionTokens")
+    output_price = value.get("outputUSDPerMillionTokens")
+    if not isinstance(input_price, str) or not _PRICE_PATTERN.fullmatch(input_price):
+        raise ValueError("target.pricing.inputUSDPerMillionTokens must be a non-negative decimal")
+    if not isinstance(output_price, str) or not _PRICE_PATTERN.fullmatch(output_price):
+        raise ValueError("target.pricing.outputUSDPerMillionTokens must be a non-negative decimal")
+    return PricingConfig(input_price, output_price)
 
 
 def _assertions(value: Any, line_number: int) -> tuple[AssertionSpec, ...]:

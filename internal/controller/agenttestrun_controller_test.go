@@ -110,6 +110,10 @@ func TestReconcileWaitsForRequiredSecret(t *testing.T) {
 func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	scheme := testScheme(t)
 	run := testRun()
+	run.Spec.Target.Pricing = &agentstormv1alpha1.AgentPricingSpec{
+		InputUSDPerMillionTokens:  "2.5",
+		OutputUSDPerMillionTokens: "10",
+	}
 	dataset := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
 		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
@@ -154,8 +158,12 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	}
 	source := workerConfig["source"].(map[string]any)
 	datasetConfig := workerConfig["dataset"].(map[string]any)
+	targetConfig := workerConfig["target"].(map[string]any)
+	pricingConfig := targetConfig["pricing"].(map[string]any)
 	if source["namespace"] != "default" || source["name"] != "demo" ||
-		datasetConfig["name"] != "demo-dataset" || datasetConfig["key"] != "cases.jsonl" {
+		datasetConfig["name"] != "demo-dataset" || datasetConfig["key"] != "cases.jsonl" ||
+		pricingConfig["inputUSDPerMillionTokens"] != "2.5" ||
+		pricingConfig["outputUSDPerMillionTokens"] != "10" {
 		t.Fatalf("unexpected source/dataset config: %#v", workerConfig)
 	}
 	for _, forbidden := range []string{"result-test-only-value", "agentstorm-result-auth", "write-token"} {
@@ -473,6 +481,15 @@ func TestValidateAndDefault(t *testing.T) {
 	run.Spec.Target.Provider = "openai-agents"
 	if err := validateAndDefault(run); err == nil {
 		t.Fatal("expected openai-agents without a model to fail validation")
+	}
+
+	run = testRun()
+	run.Spec.Target.Pricing = &agentstormv1alpha1.AgentPricingSpec{
+		InputUSDPerMillionTokens:  "automatic",
+		OutputUSDPerMillionTokens: "10",
+	}
+	if err := validateAndDefault(run); err == nil {
+		t.Fatal("expected invalid pricing to fail validation")
 	}
 }
 

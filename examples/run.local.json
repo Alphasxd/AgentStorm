@@ -2,7 +2,11 @@
   "run_id": "local-demo",
   "target": {
     "provider": "fake",
-    "model": ""
+    "model": "",
+    "pricing": {
+      "inputUSDPerMillionTokens": "2.5",
+      "outputUSDPerMillionTokens": "10"
+    }
   },
   "workload": {
     "concurrency": 4,

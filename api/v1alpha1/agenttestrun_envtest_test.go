@@ -73,6 +73,10 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	}
 
 	run := validEnvtestRun(namespace.Name, "contract")
+	run.Spec.Target.Pricing = &agentstormv1alpha1.AgentPricingSpec{
+		InputUSDPerMillionTokens:  "2.5",
+		OutputUSDPerMillionTokens: "10",
+	}
 	if err := kubernetesClient.Create(ctx, run); err != nil {
 		t.Fatalf("create AgentTestRun: %v", err)
 	}
@@ -124,6 +128,16 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	err = kubernetesClient.Create(ctx, invalid)
 	if !apierrors.IsInvalid(err) {
 		t.Fatalf("out-of-range success rate error = %v, want Invalid", err)
+	}
+
+	invalidPricing := validEnvtestRun(namespace.Name, "invalid-pricing")
+	invalidPricing.Spec.Target.Pricing = &agentstormv1alpha1.AgentPricingSpec{
+		InputUSDPerMillionTokens:  "automatic",
+		OutputUSDPerMillionTokens: "10",
+	}
+	err = kubernetesClient.Create(ctx, invalidPricing)
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("invalid pricing error = %v, want Invalid", err)
 	}
 }
 

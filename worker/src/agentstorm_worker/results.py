@@ -78,6 +78,20 @@ class ResultClient:
             "target": {
                 "provider": config.target.provider,
                 "model": config.target.model,
+                **(
+                    {
+                        "pricing": {
+                            "input_usd_per_million_tokens": (
+                                config.target.pricing.input_usd_per_million_tokens
+                            ),
+                            "output_usd_per_million_tokens": (
+                                config.target.pricing.output_usd_per_million_tokens
+                            ),
+                        }
+                    }
+                    if config.target.pricing is not None
+                    else {}
+                ),
             },
             "dataset": {
                 "name": config.dataset.name,

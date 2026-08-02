@@ -31,4 +31,6 @@ class FakeAdapter:
                     target_agent="fake-responder",
                 )
             )
-        return AdapterResponse(output=f"fake response: {case.prompt}")
+        return AdapterResponse(
+            output=f"fake response: {case.prompt}", input_tokens=11, output_tokens=7
+        )

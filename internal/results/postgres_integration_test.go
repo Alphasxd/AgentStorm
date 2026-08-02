@@ -37,6 +37,10 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	store := &captureObjectStore{}
 	service := NewService(NewPostgresRepository(pool), store)
 	registration := testRegistration(2)
+	registration.Target.Pricing = &RunPricing{
+		InputUSDPerMillionTokens:  "2",
+		OutputUSDPerMillionTokens: "4",
+	}
 	minSuccess := 0.6
 	registration.Evaluation.MinSuccessRate = &minSuccess
 
@@ -57,13 +61,14 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	first := testShard(runID, 0, "case-a", true)
 	first.Cases[0].LatencyMS = 10
 	first.Cases[0].InputTokens = 3
-	created, err = service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", first)
-	if err != nil || !created {
-		t.Fatalf("upload first shard: created=%v err=%v", created, err)
+	first.Summary.InputTokens = 3
+	shardResult, err := service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", first)
+	if err != nil || !shardResult.Created {
+		t.Fatalf("upload first shard: created=%v err=%v", shardResult.Created, err)
 	}
-	created, err = service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", first)
-	if err != nil || created {
-		t.Fatalf("repeat first shard: created=%v err=%v", created, err)
+	shardResult, err = service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", first)
+	if err != nil || shardResult.Created {
+		t.Fatalf("repeat first shard: created=%v err=%v", shardResult.Created, err)
 	}
 	detail, err := service.GetRun(ctx, runID)
 	if err != nil || detail.Status != RunCollecting || detail.ReceivedShards != 1 {
@@ -73,10 +78,11 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	second := testShard(runID, 1, "case-b", false)
 	second.Cases[0].LatencyMS = 30
 	second.Cases[0].OutputTokens = 5
+	second.Summary.OutputTokens = 5
 	second.Cases[0].Assertions[0].Message = stringPointer("sensitive detail")
-	created, err = service.UploadShard(ctx, runID, 1, "run/"+runID+"/shard/1", second)
-	if err != nil || !created {
-		t.Fatalf("upload second shard: created=%v err=%v", created, err)
+	shardResult, err = service.UploadShard(ctx, runID, 1, "run/"+runID+"/shard/1", second)
+	if err != nil || !shardResult.Created {
+		t.Fatalf("upload second shard: created=%v err=%v", shardResult.Created, err)
 	}
 	detail, err = service.GetRun(ctx, runID)
 	if err != nil || detail.Status != RunComplete || detail.Summary == nil {
@@ -90,6 +96,9 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	}
 	if detail.Summary.ThresholdsPassed {
 		t.Fatal("50% success rate should fail 60% threshold")
+	}
+	if detail.Summary.CostUSD == nil || *detail.Summary.CostUSD != "0.000026000000" {
+		t.Fatalf("unexpected priced aggregate: %#v", detail.Summary)
 	}
 	failed, err := service.ListCases(ctx, runID, "", 1, true)
 	if err != nil || len(failed.Cases) != 1 || failed.Cases[0].CaseID != "case-b" {
@@ -112,7 +121,12 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM agentstorm_runs WHERE id = $1`, candidateID)
 	})
-	if _, err := service.RegisterRun(ctx, candidateID, "run/"+candidateID, testRegistration(1)); err != nil {
+	candidateRegistration := testRegistration(1)
+	candidateRegistration.Target.Pricing = &RunPricing{
+		InputUSDPerMillionTokens:  "3",
+		OutputUSDPerMillionTokens: "6",
+	}
+	if _, err := service.RegisterRun(ctx, candidateID, "run/"+candidateID, candidateRegistration); err != nil {
 		t.Fatalf("register candidate: %v", err)
 	}
 	if _, err := service.Compare(ctx, runID, candidateID); err != ErrNotReady {
@@ -121,6 +135,7 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	candidateShard := testShard(candidateID, 0, "case-c", true)
 	candidateShard.Cases[0].LatencyMS = 40
 	candidateShard.Cases[0].InputTokens = 10
+	candidateShard.Summary.InputTokens = 10
 	if _, err := service.UploadShard(ctx, candidateID, 0, "run/"+candidateID+"/shard/0", candidateShard); err != nil {
 		t.Fatalf("upload candidate: %v", err)
 	}
@@ -131,7 +146,9 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	if math.Abs(comparison.Delta.SuccessRate-0.5) > 0.001 ||
 		math.Abs(comparison.Delta.P50MS-20) > 0.001 ||
 		comparison.Delta.P50Percent == nil || math.Abs(*comparison.Delta.P50Percent-100) > 0.001 ||
-		comparison.Delta.InputTokens != 7 {
+		comparison.Delta.InputTokens != 7 || comparison.Delta.CostUSD == nil ||
+		*comparison.Delta.CostUSD != "0.000004000000" || comparison.Delta.CostPercent == nil ||
+		math.Abs(*comparison.Delta.CostPercent-15.3846153846) > 0.0001 {
 		t.Fatalf("unexpected comparison: %#v", comparison)
 	}
 

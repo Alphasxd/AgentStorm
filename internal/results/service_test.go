@@ -14,7 +14,7 @@ type repositoryStub struct {
 	ready         func(context.Context) error
 	registerRun   func(context.Context, string, string, string, Registration) (bool, error)
 	reserveShard  func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error)
-	finalizeShard func(context.Context, string, int, string, []CaseResult) (bool, error)
+	finalizeShard func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error)
 	getRun        func(context.Context, string) (RunDetail, error)
 	listCases     func(context.Context, string, string, int, bool) (CasePage, error)
 	compare       func(context.Context, string, string) (Comparison, error)
@@ -35,8 +35,8 @@ func (s repositoryStub) ReserveShard(ctx context.Context, runID string, index in
 	return s.reserveShard(ctx, runID, index, key, hash, objectKey, summary)
 }
 
-func (s repositoryStub) FinalizeShard(ctx context.Context, runID string, index int, hash string, cases []CaseResult) (bool, error) {
-	return s.finalizeShard(ctx, runID, index, hash, cases)
+func (s repositoryStub) FinalizeShard(ctx context.Context, runID string, index int, hash string, cases []CaseResult, pricing *RunPricing) (bool, error) {
+	return s.finalizeShard(ctx, runID, index, hash, cases, pricing)
 }
 
 func (s repositoryStub) GetRun(ctx context.Context, runID string) (RunDetail, error) {
@@ -134,6 +134,21 @@ func TestRegisterRunValidatesIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestRegisterRunValidatesPriceSnapshot(t *testing.T) {
+	registration := testRegistration(1)
+	registration.Target.Pricing = &RunPricing{
+		InputUSDPerMillionTokens:  "automatic",
+		OutputUSDPerMillionTokens: "10",
+	}
+	if err := validateRegistration("run-1", "run/run-1", registration); err == nil {
+		t.Fatal("expected invalid price snapshot to fail")
+	}
+	registration.Target.Pricing.InputUSDPerMillionTokens = "2.5"
+	if err := validateRegistration("run-1", "run/run-1", registration); err != nil {
+		t.Fatalf("valid price snapshot failed: %v", err)
+	}
+}
+
 func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 	runID := "run-1"
 	upload := testShard(runID, 0, "case-1", true)
@@ -151,7 +166,10 @@ func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 			reservedHash = hash
 			return ShardReservation{}, nil
 		},
-		finalizeShard: func(_ context.Context, gotRunID string, index int, hash string, cases []CaseResult) (bool, error) {
+		finalizeShard: func(_ context.Context, gotRunID string, index int, hash string, cases []CaseResult, pricing *RunPricing) (bool, error) {
+			if pricing != nil {
+				t.Fatal("unpriced test unexpectedly received pricing")
+			}
 			if !putCalled {
 				t.Fatal("shard finalized before raw object was stored")
 			}
@@ -186,11 +204,11 @@ func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 		},
 	})
 
-	created, err := service.UploadShard(context.Background(), runID, 0, "run/run-1/shard/0", upload)
+	result, err := service.UploadShard(context.Background(), runID, 0, "run/run-1/shard/0", upload)
 	if err != nil {
 		t.Fatalf("upload shard: %v", err)
 	}
-	if !created || !putCalled || !finalizeCalled {
+	if !result.Created || !putCalled || !finalizeCalled {
 		t.Fatal("shard upload did not complete all persistence steps")
 	}
 }
@@ -200,7 +218,7 @@ func TestUploadShardDoesNotFinalizeWhenObjectWriteFails(t *testing.T) {
 		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
 			return ShardReservation{}, nil
 		},
-		finalizeShard: func(context.Context, string, int, string, []CaseResult) (bool, error) {
+		finalizeShard: func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error) {
 			t.Fatal("finalize should not run after object failure")
 			return false, nil
 		},
@@ -213,6 +231,42 @@ func TestUploadShardDoesNotFinalizeWhenObjectWriteFails(t *testing.T) {
 	_, err := service.UploadShard(context.Background(), "run-1", 0, "run/run-1/shard/0", testShard("run-1", 0, "case-1", true))
 	if err == nil {
 		t.Fatal("expected object write failure")
+	}
+}
+
+func TestUploadShardDerivesPricedCostFromRegisteredSnapshot(t *testing.T) {
+	pricing := &RunPricing{
+		InputUSDPerMillionTokens:  "2.5",
+		OutputUSDPerMillionTokens: "10",
+	}
+	upload := testShard("run-1", 0, "case-1", true)
+	upload.Cases[0].InputTokens = 1000
+	upload.Cases[0].OutputTokens = 500
+	upload.Summary.InputTokens = 1000
+	upload.Summary.OutputTokens = 500
+	service := NewService(repositoryStub{
+		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+			return ShardReservation{Pricing: pricing}, nil
+		},
+		finalizeShard: func(_ context.Context, _ string, _ int, _ string, _ []CaseResult, got *RunPricing) (bool, error) {
+			if got != pricing {
+				t.Fatal("repository did not receive the registered pricing snapshot")
+			}
+			return true, nil
+		},
+	}, objectStoreStub{
+		put: func(context.Context, string, []byte, string, string) error { return nil },
+	})
+
+	result, err := service.UploadShard(
+		context.Background(), "run-1", 0, "run/run-1/shard/0", upload,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || result.InputCostUSD == nil || *result.InputCostUSD != "0.002500000000" ||
+		result.OutputCostUSD == nil || *result.OutputCostUSD != "0.005000000000" {
+		t.Fatalf("unexpected shard cost: %#v", result)
 	}
 }
 
