@@ -926,10 +926,13 @@ assert comparison["candidate_id"] == candidate_id, comparison
 expected_deltas = {
     "success_rate", "failure_rate", "p50_ms", "p50_percent", "p95_ms",
     "p95_percent", "p99_ms", "p99_percent", "input_tokens", "output_tokens",
-    "quality_failures", "quality_failure_rate", "infrastructure_failures",
-    "infrastructure_failure_rate", "attempt_count", "retry_count", "retried_cases",
-    "retry_successes", "retry_success_rate", "injected_faults", "circuit_rejections",
 }
+if reliability_e2e:
+    expected_deltas |= {
+        "quality_failures", "quality_failure_rate", "infrastructure_failures",
+        "infrastructure_failure_rate", "attempt_count", "retry_count", "retried_cases",
+        "retry_successes", "retry_success_rate", "injected_faults", "circuit_rejections",
+    }
 assert expected_deltas <= comparison["delta"].keys(), comparison
 if expect_cost_accounting:
     assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
