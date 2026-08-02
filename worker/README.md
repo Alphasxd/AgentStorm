@@ -3,6 +3,20 @@
 The worker reads one run configuration and a JSONL dataset, executes its assigned shard,
 evaluates deterministic assertions, and writes `results.jsonl` plus `summary.json`.
 
+Each JSONL case may declare an ordered `assertions` array. Built-in assertion types are `exact`,
+`contains`, `regex`, `json_schema`, `tool_path`, and `latency`. The legacy `expected_contains`
+field remains supported and is evaluated before entries in `assertions`; every assertion must pass.
+For example:
+
+```json
+{"id":"tool-case","input":"hello","assertions":[{"type":"contains","value":"hello"},{"type":"tool_path","path":["fake.echo"]},{"type":"latency","max_ms":1000}]}
+```
+
+Trusted custom assertions use `{"type":"python","entrypoint":"package.module:function","config":{}}`.
+The module must already be installed in the Worker image. The function receives JSON-compatible
+`context` and `config` dictionaries and returns either a boolean or a `passed`/`message` object.
+Dataset-provided inline Python is never executed.
+
 The default `fake` provider has no third-party dependency. Install the optional OpenAI adapter with
 `pip install -e '.[openai]'`. Install OTLP tracing support with `pip install -e '.[telemetry]'`, or
 both integrations with `pip install -e '.[openai,telemetry]'`.
@@ -26,7 +40,8 @@ failure exits non-zero. Duplicate case IDs are rejected before any provider call
 | `OTEL_SERVICE_NAME` | `agentstorm-worker` | Worker trace service name |
 
 Local `results.jsonl` files retain their existing detail. Durable uploads omit output and full error
-text unless the sensitive-result switch is explicitly enabled.
+text unless the sensitive-result switch is explicitly enabled. Tool paths and content-safe assertion
+outcomes are always uploaded; custom assertion messages use the same sensitive-result gate.
 
 Tracing emits run, case, provider-call, local-tool, handoff, and deterministic-evaluator spans. The
 adapter contract exposes content-free lifecycle callbacks; the OpenAI Agents SDK adapter maps its

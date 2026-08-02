@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import TestCase
+from .models import AssertionSpec, TestCase
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,7 @@ def load_dataset(path: str | Path) -> list[TestCase]:
                 case_id=case_id,
                 prompt=prompt,
                 expected_contains=_optional_string(raw.get("expected_contains")),
+                assertions=_assertions(raw.get("assertions"), line_number),
                 metadata=_metadata(raw),
             )
         )
@@ -145,3 +146,86 @@ def _optional_string(value: Any) -> str | None:
 def _metadata(raw: dict[str, Any]) -> dict[str, Any]:
     metadata = raw.get("metadata")
     return metadata if isinstance(metadata, dict) else {}
+
+
+def _assertions(value: Any, line_number: int) -> tuple[AssertionSpec, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"dataset line {line_number} assertions must be an array")
+    assertions: list[AssertionSpec] = []
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"dataset line {line_number} assertions[{index}] must be an object"
+            )
+        assertion_type = raw.get("type")
+        if assertion_type not in {
+            "exact",
+            "contains",
+            "regex",
+            "json_schema",
+            "tool_path",
+            "latency",
+            "python",
+        }:
+            raise ValueError(
+                f"dataset line {line_number} assertions[{index}] has unsupported type"
+            )
+        allowed = {
+            "exact": {"type", "value"},
+            "contains": {"type", "value"},
+            "regex": {"type", "pattern"},
+            "json_schema": {"type", "schema"},
+            "tool_path": {"type", "path"},
+            "latency": {"type", "max_ms"},
+            "python": {"type", "entrypoint", "config"},
+        }[assertion_type]
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"dataset line {line_number} assertions[{index}] has unknown fields"
+            )
+        assertions.append(_assertion_spec(raw, assertion_type, line_number, index))
+    return tuple(assertions)
+
+
+def _assertion_spec(
+    raw: dict[str, Any], assertion_type: str, line_number: int, index: int
+) -> AssertionSpec:
+    location = f"dataset line {line_number} assertions[{index}]"
+    if assertion_type in {"exact", "contains"}:
+        if not isinstance(raw.get("value"), str):
+            raise ValueError(f"{location} value must be a string")
+        return AssertionSpec(type=assertion_type, value=raw["value"])
+    if assertion_type == "regex":
+        if not isinstance(raw.get("pattern"), str):
+            raise ValueError(f"{location} pattern must be a string")
+        return AssertionSpec(type=assertion_type, pattern=raw["pattern"])
+    if assertion_type == "json_schema":
+        if not isinstance(raw.get("schema"), (dict, bool)):
+            raise ValueError(f"{location} schema must be an object or boolean")
+        return AssertionSpec(type=assertion_type, schema=raw["schema"])
+    if assertion_type == "tool_path":
+        path = raw.get("path")
+        if not isinstance(path, list) or not all(
+            isinstance(item, str) and item for item in path
+        ):
+            raise ValueError(f"{location} path must be an array of non-empty strings")
+        return AssertionSpec(type=assertion_type, path=tuple(path))
+    if assertion_type == "latency":
+        max_ms = raw.get("max_ms")
+        if isinstance(max_ms, bool) or not isinstance(max_ms, (int, float)) or max_ms <= 0:
+            raise ValueError(f"{location} max_ms must be positive")
+        return AssertionSpec(type=assertion_type, max_ms=float(max_ms))
+    entrypoint = raw.get("entrypoint")
+    if (
+        not isinstance(entrypoint, str)
+        or entrypoint.count(":") != 1
+        or not all(entrypoint.split(":"))
+    ):
+        raise ValueError(f"{location} entrypoint must use module:function")
+    config = raw.get("config", {})
+    if not isinstance(config, dict):
+        raise ValueError(f"{location} config must be an object")
+    return AssertionSpec(type=assertion_type, entrypoint=entrypoint, config=config)

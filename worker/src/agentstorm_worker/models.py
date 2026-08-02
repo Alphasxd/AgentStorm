@@ -5,11 +5,41 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class AssertionSpec:
+    type: str
+    value: str | None = None
+    pattern: str | None = None
+    schema: dict[str, Any] | bool | None = None
+    path: tuple[str, ...] = ()
+    max_ms: float | None = None
+    entrypoint: str | None = None
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AssertionOutcome:
+    index: int
+    type: str
+    passed: bool
+    reason_code: str
+    message: str | None = None
+
+
+@dataclass(frozen=True)
 class TestCase:
     case_id: str
     prompt: str
     expected_contains: str | None = None
+    assertions: tuple[AssertionSpec, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def effective_assertions(self) -> tuple[AssertionSpec, ...]:
+        legacy = (
+            (AssertionSpec(type="contains", value=self.expected_contains),)
+            if self.expected_contains is not None
+            else ()
+        )
+        return legacy + self.assertions
 
 
 @dataclass(frozen=True)
@@ -31,6 +61,8 @@ class CaseResult:
     error: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    tool_path: list[str] = field(default_factory=list)
+    assertions: list[AssertionOutcome] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

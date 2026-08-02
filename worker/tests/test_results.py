@@ -12,7 +12,7 @@ from agentstorm_worker.config import (
     TargetConfig,
     WorkloadConfig,
 )
-from agentstorm_worker.models import CaseResult, RunSummary
+from agentstorm_worker.models import AssertionOutcome, CaseResult, RunSummary
 from agentstorm_worker.results import ResultClient, ResultSinkConfig
 
 
@@ -83,6 +83,16 @@ class ResultClientTest(unittest.TestCase):
             error="private error",
             input_tokens=3,
             output_tokens=5,
+            tool_path=["safe.lookup"],
+            assertions=[
+                AssertionOutcome(
+                    index=0,
+                    type="contains",
+                    passed=False,
+                    reason_code="mismatch",
+                    message="private expected value",
+                )
+            ],
         )
 
         client.register_run(run_config(), expected_shards=2)
@@ -103,6 +113,18 @@ class ResultClientTest(unittest.TestCase):
             case["idempotency_key"], "run/run-1/case/case+with+space/iteration/0"
         )
         self.assertEqual(case["failure_kind"], "assertion")
+        self.assertEqual(case["tool_path"], ["safe.lookup"])
+        self.assertEqual(
+            case["assertions"],
+            [
+                {
+                    "index": 0,
+                    "type": "contains",
+                    "passed": False,
+                    "reason_code": "mismatch",
+                }
+            ],
+        )
         self.assertNotIn("output", case)
         self.assertNotIn("error", case)
 
@@ -124,6 +146,15 @@ class ResultClientTest(unittest.TestCase):
             failure_kind="provider",
             output="sensitive output",
             error="sensitive error",
+            assertions=[
+                AssertionOutcome(
+                    index=0,
+                    type="python",
+                    passed=False,
+                    reason_code="exception",
+                    message="sensitive assertion message",
+                )
+            ],
         )
 
         client.upload_shard("run-1", 0, [result], run_summary())
@@ -131,6 +162,7 @@ class ResultClientTest(unittest.TestCase):
         case = json.loads(opener.requests[0][0].data)["cases"][0]
         self.assertEqual(case["output"], "sensitive output")
         self.assertEqual(case["error"], "sensitive error")
+        self.assertEqual(case["assertions"][0]["message"], "sensitive assertion message")
 
     def test_rejects_credentials_in_result_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not contain credentials"):

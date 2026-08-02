@@ -5,7 +5,7 @@ metadata:
 data:
   cases.jsonl: |
     {"id":"greeting-1","input":"hello","expected_contains":"hello"}
-    {"id":"greeting-2","input":"agent reliability","expected_contains":"agent reliability"}
+    {"id":"greeting-2","input":"agent reliability","assertions":[{"type":"contains","value":"agent reliability"},{"type":"tool_path","path":["fake.echo"]},{"type":"latency","max_ms":1000}]}
 ---
 apiVersion: agentstorm.io/v1alpha1
 kind: AgentTestRun

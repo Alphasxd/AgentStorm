@@ -77,16 +77,26 @@ type ShardSummary struct {
 }
 
 type CaseResult struct {
-	IdempotencyKey string  `json:"idempotency_key"`
-	CaseID         string  `json:"case_id"`
-	Iteration      int     `json:"iteration"`
-	Success        bool    `json:"success"`
-	LatencyMS      float64 `json:"latency_ms"`
-	InputTokens    int64   `json:"input_tokens"`
-	OutputTokens   int64   `json:"output_tokens"`
-	FailureKind    string  `json:"failure_kind,omitempty"`
-	Output         *string `json:"output,omitempty"`
-	Error          *string `json:"error,omitempty"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	CaseID         string            `json:"case_id"`
+	Iteration      int               `json:"iteration"`
+	Success        bool              `json:"success"`
+	LatencyMS      float64           `json:"latency_ms"`
+	InputTokens    int64             `json:"input_tokens"`
+	OutputTokens   int64             `json:"output_tokens"`
+	FailureKind    string            `json:"failure_kind,omitempty"`
+	Output         *string           `json:"output,omitempty"`
+	Error          *string           `json:"error,omitempty"`
+	ToolPath       []string          `json:"tool_path,omitempty"`
+	Assertions     []AssertionResult `json:"assertions,omitempty"`
+}
+
+type AssertionResult struct {
+	Index      int     `json:"index"`
+	Type       string  `json:"type"`
+	Passed     bool    `json:"passed"`
+	ReasonCode string  `json:"reason_code"`
+	Message    *string `json:"message,omitempty"`
 }
 
 type RunStatus string

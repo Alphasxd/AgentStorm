@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,12 +42,25 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		_, _ = connection.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", migrationLockID)
 	}()
 
-	schema, err := migrations.ReadFile("migrations/001_init.sql")
+	entries, err := fs.ReadDir(migrations, "migrations")
 	if err != nil {
-		return fmt.Errorf("read migrations: %w", err)
+		return fmt.Errorf("list migrations: %w", err)
 	}
-	if _, err := connection.Exec(ctx, string(schema)); err != nil {
-		return fmt.Errorf("apply migration 001_init: %w", err)
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && len(entry.Name()) > 4 && entry.Name()[len(entry.Name())-4:] == ".sql" {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		schema, err := migrations.ReadFile("migrations/" + name)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+		if _, err := connection.Exec(ctx, string(schema)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -194,6 +209,10 @@ func (r *PostgresRepository) FinalizeShard(ctx context.Context, runID string, sh
 	}
 
 	for _, item := range cases {
+		assertionsPayload, err := json.Marshal(item.Assertions)
+		if err != nil {
+			return false, fmt.Errorf("marshal case assertions: %w", err)
+		}
 		itemHash, err := contentHash(item)
 		if err != nil {
 			return false, fmt.Errorf("hash case result: %w", err)
@@ -202,12 +221,13 @@ func (r *PostgresRepository) FinalizeShard(ctx context.Context, runID string, sh
 		err = transaction.QueryRow(ctx, `
 			INSERT INTO agentstorm_case_results
 				(run_id, case_id, iteration, shard_index, idempotency_key, payload_hash,
-				 success, latency_ms, input_tokens, output_tokens, failure_kind, output, error)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				 success, latency_ms, input_tokens, output_tokens, failure_kind, output, error,
+				 tool_path, assertions)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT DO NOTHING
 			RETURNING case_id`, runID, item.CaseID, item.Iteration, shardIndex, item.IdempotencyKey,
 			itemHash, item.Success, item.LatencyMS, item.InputTokens, item.OutputTokens,
-			item.FailureKind, item.Output, item.Error).Scan(&inserted)
+			item.FailureKind, item.Output, item.Error, item.ToolPath, assertionsPayload).Scan(&inserted)
 		if err == nil {
 			continue
 		}
@@ -423,7 +443,7 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT idempotency_key, case_id, iteration, success, latency_ms,
-		       input_tokens, output_tokens, failure_kind, output, error
+		       input_tokens, output_tokens, failure_kind, output, error, tool_path, assertions
 		FROM agentstorm_case_results
 		WHERE run_id = $1
 		  AND ($2::boolean = false OR success = false)
@@ -438,6 +458,7 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 	page := CasePage{Cases: make([]CaseResult, 0, limit)}
 	for rows.Next() {
 		var item CaseResult
+		var assertionsPayload []byte
 		if err := rows.Scan(
 			&item.IdempotencyKey,
 			&item.CaseID,
@@ -449,8 +470,13 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 			&item.FailureKind,
 			&item.Output,
 			&item.Error,
+			&item.ToolPath,
+			&assertionsPayload,
 		); err != nil {
 			return CasePage{}, fmt.Errorf("scan case: %w", err)
+		}
+		if err := json.Unmarshal(assertionsPayload, &item.Assertions); err != nil {
+			return CasePage{}, fmt.Errorf("decode case assertions: %w", err)
 		}
 		page.Cases = append(page.Cases, item)
 	}

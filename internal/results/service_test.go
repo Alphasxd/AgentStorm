@@ -79,8 +79,12 @@ func testRegistration(shards int) Registration {
 
 func testShard(runID string, index int, caseID string, success bool) ShardUpload {
 	failureKind := ""
+	var assertions []AssertionResult
 	if !success {
 		failureKind = "assertion"
+		assertions = []AssertionResult{{
+			Index: 0, Type: "contains", Passed: false, ReasonCode: "mismatch",
+		}}
 	}
 	return ShardUpload{
 		SchemaVersion: SchemaVersion,
@@ -96,6 +100,8 @@ func testShard(runID string, index int, caseID string, success bool) ShardUpload
 			Success:        success,
 			LatencyMS:      12.5,
 			FailureKind:    failureKind,
+			ToolPath:       []string{"safe.lookup"},
+			Assertions:     assertions,
 		}},
 	}
 }
@@ -218,6 +224,22 @@ func TestValidateShardRejectsDuplicateIdentity(t *testing.T) {
 
 	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
 		t.Fatal("expected duplicate case identity to fail")
+	}
+}
+
+func TestValidateShardChecksStructuredAssertions(t *testing.T) {
+	upload := testShard("run-1", 0, "case-1", false)
+	upload.Cases[0].Assertions[0].Index = 1
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
+		t.Fatal("expected non-canonical assertion index to fail")
+	}
+
+	upload = testShard("run-1", 0, "case-1", true)
+	upload.Cases[0].Assertions = []AssertionResult{{
+		Index: 0, Type: "exact", Passed: false, ReasonCode: "mismatch",
+	}}
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
+		t.Fatal("expected successful case with failed assertion to fail")
 	}
 }
 
