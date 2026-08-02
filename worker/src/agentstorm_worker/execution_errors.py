@@ -19,6 +19,8 @@ class ExecutionError(RuntimeError):
         response: AdapterResponse | None = None,
         injected_rule: str = "",
         injected_fault: str = "",
+        usage_complete: bool = False,
+        circuit_events: tuple[str, ...] = (),
     ) -> None:
         super().__init__(f"{category}/{code}")
         self.category = category
@@ -29,6 +31,8 @@ class ExecutionError(RuntimeError):
         self.response = response
         self.injected_rule = injected_rule
         self.injected_fault = injected_fault
+        self.usage_complete = usage_complete
+        self.circuit_events = circuit_events
 
 
 def classify_adapter_exception(exc: Exception) -> ExecutionError:

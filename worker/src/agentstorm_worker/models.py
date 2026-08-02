@@ -50,6 +50,24 @@ class AdapterResponse:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class AttemptResult:
+    number: int
+    latency_ms: float
+    outcome: str
+    failure_category: str = ""
+    error_code: str = ""
+    injected_rule: str = ""
+    injected_fault: str = ""
+    ambiguous: bool = False
+    retry_decision: str = "not_needed"
+    backoff_ms: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    usage_complete: bool = True
+    circuit_events: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class CaseResult:
     case_id: str
@@ -59,6 +77,8 @@ class CaseResult:
     failure_kind: str = ""
     failure_category: str = ""
     error_code: str = ""
+    attempts: list[AttemptResult] = field(default_factory=list)
+    usage_complete: bool = True
     output: str = ""
     error: str | None = None
     input_tokens: int | None = None
@@ -92,6 +112,7 @@ class RunSummary:
     input_cost_usd: str | None = None
     output_cost_usd: str | None = None
     cost_usd: str | None = None
+    usage_complete: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

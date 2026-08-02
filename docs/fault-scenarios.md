@@ -26,4 +26,18 @@ Selection is deterministic. AgentStorm hashes the NUL-delimited UTF-8 values `sc
 
 The document is limited to 64 KiB and 100 uniquely named rules. Unknown fields, invalid selectors, unsupported fault parameters, and missing referenced ConfigMaps keep the run Pending with `ScenarioReady=False`; no Provider call is made. Scenario documents cannot contain scripts, templates, credentials, inline Python, or arbitrary HTTP bodies.
 
-Retry and circuit-breaker behavior is being completed as part of M4. Until the `v0.4.0-alpha.1` images are published, use Controller and Worker images built from the same source revision when exercising this contract.
+## Retry safety
+
+`maxAttempts` includes the initial full Agent execution and defaults to `1`; existing Runs never gain a hidden retry. A retry repeats the entire Agent and can therefore repeat model charges and tool side effects. By default, AgentStorm retries only rate limits, explicitly safe pre-submit failures, and safe injected failures. Timeout, HTTP 5xx, malformed responses, and unknown connection failures require `allowAmbiguousRetries: true`. Evaluation, harness, tool, circuit-open, and cancellation outcomes are never retried.
+
+Backoff is exponential, capped by `maxBackoffMs` and `maxCumulativeBackoffMs`, and bounded by the case timeout. Jitter is deterministically derived from the configured seed, case ID, iteration, and attempt. If no seed is configured because no scenario is referenced, the deterministic retry seed is zero.
+
+Every attempt records its outcome, stable failure category/code, retry decision, actual backoff, known Token usage, injected fault, and circuit events. Token totals include every attempt. If any Provider attempt may have incurred unknown usage, `usage_complete` is false and priced cost remains `null`.
+
+## Circuit breaker
+
+The optional breaker is scoped to one Worker process and Provider adapter. Consecutive terminal Provider failures open it; evaluation, tool, harness, and cancellation outcomes do not increment the counter. While open, calls fail locally with `provider/circuit_open`. After `openDurationMs`, exactly one concurrent half-open probe is admitted. A Provider success closes and resets the breaker; a Provider failure opens it again.
+
+Because breaker state observes concurrent completion order, the exact rejected cases are only reproducible with `concurrencyPerWorker: 1`. Deterministic fault selection itself remains independent of concurrency and sharding.
+
+Until the `v0.4.0-alpha.1` images are published, use Controller and Worker images built from the same source revision when exercising this contract.

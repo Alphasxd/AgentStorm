@@ -59,10 +59,22 @@ class FaultInjectionMiddleware:
             return _with_injection(response, rule)
         if rule.fault == "timeout":
             await asyncio.sleep((rule.delay_ms or 0) / 1000)
-            raise _injected_error(rule, "provider", "timeout", "timeout", ambiguous=True)
+            raise _injected_error(
+                rule,
+                "provider",
+                "timeout",
+                "timeout",
+                ambiguous=True,
+                usage_complete=True,
+            )
         if rule.fault == "rate_limit":
             raise _injected_error(
-                rule, "provider", "rate_limited", "provider", safe_to_retry=True
+                rule,
+                "provider",
+                "rate_limited",
+                "provider",
+                safe_to_retry=True,
+                usage_complete=True,
             )
         if rule.fault == "http_error":
             status = rule.status_code or 500
@@ -74,6 +86,7 @@ class FaultInjectionMiddleware:
                 "provider",
                 ambiguous=status >= 500,
                 safe_to_retry=status == 429,
+                usage_complete=True,
             )
         wrapped_lifecycle = (
             _ToolFaultLifecycle(lifecycle, rule) if rule.fault == "tool_error" else lifecycle
@@ -87,6 +100,9 @@ class FaultInjectionMiddleware:
                 "provider",
                 ambiguous=True,
                 response=response,
+                usage_complete=(
+                    response.input_tokens is not None and response.output_tokens is not None
+                ),
             )
         return response
 
@@ -107,6 +123,7 @@ def _injected_error(
     ambiguous: bool = False,
     safe_to_retry: bool = False,
     response: AdapterResponse | None = None,
+    usage_complete: bool = False,
 ) -> ExecutionError:
     return ExecutionError(
         category,
@@ -117,6 +134,7 @@ def _injected_error(
         response=response,
         injected_rule=rule.name,
         injected_fault=rule.fault,
+        usage_complete=usage_complete,
     )
 
 

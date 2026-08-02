@@ -202,7 +202,12 @@ class TelemetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(results[0].success)
         self.assertEqual(
             [span.name for span in telemetry.spans],
-            ["agentstorm.case", "gen_ai.invoke_agent", "agentstorm.evaluate"],
+            [
+                "agentstorm.case",
+                "agentstorm.attempt",
+                "gen_ai.invoke_agent",
+                "agentstorm.evaluate",
+            ],
         )
         rendered = repr([(span.attributes, span.errors) for span in telemetry.spans])
         for forbidden in (
@@ -211,7 +216,7 @@ class TelemetryTest(unittest.IsolatedAsyncioTestCase):
             "private expected value",
         ):
             self.assertNotIn(forbidden, rendered)
-        provider_span = telemetry.spans[1]
+        provider_span = telemetry.spans[2]
         self.assertEqual(provider_span.attributes["gen_ai.usage.input_tokens"], 7)
         self.assertEqual(provider_span.attributes["gen_ai.usage.output_tokens"], 11)
         self.assertEqual(telemetry.spans[0].errors, ["assertion"])
@@ -241,18 +246,19 @@ class TelemetryTest(unittest.IsolatedAsyncioTestCase):
             [span.name for span in telemetry.spans],
             [
                 "agentstorm.case",
+                "agentstorm.attempt",
                 "gen_ai.invoke_agent",
                 "gen_ai.execute_tool",
                 "agentstorm.handoff",
                 "agentstorm.evaluate",
             ],
         )
-        tool_span = telemetry.spans[2]
+        tool_span = telemetry.spans[3]
         self.assertEqual(tool_span.attributes["gen_ai.operation.name"], "execute_tool")
         self.assertEqual(tool_span.attributes["gen_ai.tool.name"], "safe_lookup")
         self.assertEqual(tool_span.attributes["gen_ai.tool.call.id"], "call-1")
         self.assertTrue(tool_span.ended)
-        handoff_span = telemetry.spans[3]
+        handoff_span = telemetry.spans[4]
         self.assertEqual(
             handoff_span.attributes["agentstorm.handoff.target_agent"], "answer-agent"
         )
