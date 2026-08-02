@@ -60,7 +60,11 @@ single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation,
 ## M3: Agent observability and evaluation
 
 - Add OpenTelemetry spans for run, case, model generation, tool call, handoff, and evaluator.
+  - [x] Add opt-in run, case, provider invocation, and deterministic evaluator spans.
+  - [ ] Add provider-independent tool and handoff lifecycle events and spans.
 - Export RED metrics and token/cost counters to Prometheus.
+  - [x] Export bounded Result API RED, ingestion, case-result, and Token metrics.
+  - [ ] Add provider cost configuration, recording rules, and persistent dashboards.
 - Add assertion plugins: JSON schema, exact/contains/regex, tool path, latency, and custom Python.
 - Integrate Promptfoo as an optional external evaluator rather than coupling its internals.
 - Add redaction controls for prompts, outputs, tool arguments, and trace attributes.
@@ -70,6 +74,10 @@ Acceptance criteria:
 - A Grafana dashboard can drill from a run into failed cases and provider errors.
 - Deterministic assertions work without an LLM judge.
 - Sensitive content is absent from default traces and logs.
+
+The first M3 foundation is implemented but M3 remains open. `config/dev/telemetry` verifies OTLP
+export and Prometheus exposition without retaining trace content. A persistent backend and Grafana
+drill-down remain necessary before the milestone acceptance criteria can be checked.
 
 ## M4: Fault injection and reliability testing
 

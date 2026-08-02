@@ -224,6 +224,68 @@ func TestResultSinkConfigValidation(t *testing.T) {
 	}
 }
 
+func TestReconcileConfiguresOptionalWorkerTelemetry(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"private prompt"}`},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset).Build()
+	telemetry := TelemetryConfig{OTLPEndpoint: "http://otel-collector:4318/"}
+	if err := telemetry.ValidateAndDefault(); err != nil {
+		t.Fatalf("validate telemetry: %v", err)
+	}
+	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme, Telemetry: telemetry}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	job := &batchv1.Job{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, job); err != nil {
+		t.Fatalf("get Job: %v", err)
+	}
+	env := job.Spec.Template.Spec.Containers[0].Env
+	assertEnv(t, env, "AGENTSTORM_OTEL_ENABLED", "true")
+	assertEnv(t, env, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318")
+	assertEnv(t, env, "OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+	assertEnv(t, env, "OTEL_SERVICE_NAME", "agentstorm-worker")
+
+	configMap := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-config"}, configMap); err != nil {
+		t.Fatalf("get worker config: %v", err)
+	}
+	for _, forbidden := range []string{"private prompt", "otel-collector", "OTEL_EXPORTER_OTLP"} {
+		if strings.Contains(configMap.Data[workerConfigKey], forbidden) {
+			t.Fatalf("generated worker ConfigMap contains telemetry or dataset content %q", forbidden)
+		}
+	}
+}
+
+func TestTelemetryConfigValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  TelemetryConfig
+		wantErr bool
+	}{
+		{name: "disabled", config: TelemetryConfig{}},
+		{name: "valid HTTP", config: TelemetryConfig{OTLPEndpoint: "http://collector:4318/"}},
+		{name: "valid HTTPS path", config: TelemetryConfig{OTLPEndpoint: "https://telemetry.example/otlp"}},
+		{name: "credentials", config: TelemetryConfig{OTLPEndpoint: "https://user:password@telemetry.example"}, wantErr: true},
+		{name: "query", config: TelemetryConfig{OTLPEndpoint: "https://telemetry.example?token=value"}, wantErr: true},
+		{name: "unsupported scheme", config: TelemetryConfig{OTLPEndpoint: "grpc://collector:4317"}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.config.ValidateAndDefault()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ValidateAndDefault() error = %v, wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestReconcileAllowsMissingOptionalSecret(t *testing.T) {
 	scheme := testScheme(t)
 	run := testRun()

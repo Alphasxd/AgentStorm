@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const maxRequestBytes int64 = 32 << 20
@@ -20,6 +22,8 @@ type HTTPHandler struct {
 	writeToken [sha256.Size]byte
 	readToken  [sha256.Size]byte
 	mux        *http.ServeMux
+	metrics    *resultMetrics
+	metricsAPI http.Handler
 }
 
 type HTTPConfig struct {
@@ -36,23 +40,30 @@ func NewHTTPHandler(service *Service, config HTTPConfig) (*HTTPHandler, error) {
 	if config.WriteToken == "" || config.ReadToken == "" {
 		return nil, errors.New("read and write bearer tokens are required")
 	}
+	metrics, registry := newResultMetrics()
 	handler := &HTTPHandler{
 		service:    service,
 		writeToken: sha256.Sum256([]byte(config.WriteToken)),
 		readToken:  sha256.Sum256([]byte(config.ReadToken)),
 		mux:        http.NewServeMux(),
+		metrics:    metrics,
+		metricsAPI: promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 	handler.routes()
 	return handler, nil
 }
 
 func (h *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	h.mux.ServeHTTP(writer, request)
+	started := time.Now()
+	recorder := &statusWriter{ResponseWriter: writer}
+	h.mux.ServeHTTP(recorder, request)
+	h.metrics.observeHTTP(request.Method, request.Pattern, recorder.statusCode(), time.Since(started))
 }
 
 func (h *HTTPHandler) routes() {
 	h.mux.HandleFunc("GET /healthz", h.health)
 	h.mux.HandleFunc("GET /readyz", h.ready)
+	h.mux.Handle("GET /metrics", h.metricsAPI)
 	h.mux.HandleFunc("PUT /v1/runs/{runID}", h.requireWrite(h.registerRun))
 	h.mux.HandleFunc("PUT /v1/runs/{runID}/shards/{index}", h.requireWrite(h.uploadShard))
 	h.mux.HandleFunc("GET /v1/runs/{runID}", h.requireRead(h.getRun))
@@ -97,10 +108,12 @@ func (h *HTTPHandler) ready(writer http.ResponseWriter, request *http.Request) {
 func (h *HTTPHandler) registerRun(writer http.ResponseWriter, request *http.Request) {
 	var registration Registration
 	if err := decodeJSON(writer, request, &registration); err != nil {
+		h.metrics.observeRegistration(false, validationError(err.Error()))
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	created, err := h.service.RegisterRun(request.Context(), request.PathValue("runID"), request.Header.Get("Idempotency-Key"), registration)
+	h.metrics.observeRegistration(created, err)
 	if err != nil {
 		writeServiceError(writer, err)
 		return
@@ -115,15 +128,18 @@ func (h *HTTPHandler) registerRun(writer http.ResponseWriter, request *http.Requ
 func (h *HTTPHandler) uploadShard(writer http.ResponseWriter, request *http.Request) {
 	index, err := strconv.Atoi(request.PathValue("index"))
 	if err != nil {
+		h.metrics.observeShard(false, ShardUpload{}, validationError("shard index must be an integer"))
 		writeError(writer, http.StatusBadRequest, "invalid_request", "shard index must be an integer")
 		return
 	}
 	var upload ShardUpload
 	if err := decodeJSON(writer, request, &upload); err != nil {
+		h.metrics.observeShard(false, ShardUpload{}, validationError(err.Error()))
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	created, err := h.service.UploadShard(request.Context(), request.PathValue("runID"), index, request.Header.Get("Idempotency-Key"), upload)
+	h.metrics.observeShard(created, upload, err)
 	if err != nil {
 		writeServiceError(writer, err)
 		return

@@ -7,7 +7,8 @@ latency thresholds.
 
 > Status: early alpha. Public multi-architecture controller, worker, and Result API images are
 > available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
-> comparison. OpenTelemetry export, fault injection, and autoscaling remain planned milestones.
+> comparison. The first M3 observability foundation provides optional OTLP worker traces and
+> Prometheus metrics; persistent dashboards, fault injection, and autoscaling remain planned.
 
 ## Why this project
 
@@ -34,6 +35,7 @@ engineering questions that appear after a workflow becomes a service:
 - Hardened worker Pods without ServiceAccount tokens or writable root filesystems.
 - Authenticated, idempotent result ingestion with PostgreSQL metadata, compressed S3 raw shards,
   paginated case queries, and baseline comparisons.
+- Opt-in content-safe worker OpenTelemetry spans and bounded Result API Prometheus RED/Token metrics.
 
 ## Architecture
 
@@ -52,7 +54,9 @@ flowchart LR
     Result --> ResultAPI["Authenticated Result API"]
     ResultAPI --> PostgreSQL["PostgreSQL metadata"]
     ResultAPI --> ObjectStore["Compressed S3 shards"]
-    ResultAPI -. planned .-> Telemetry["OTel / Prometheus"]
+    W1 -. optional OTLP .-> Telemetry["OpenTelemetry Collector"]
+    W2 -. optional OTLP .-> Telemetry
+    ResultAPI --> Metrics["Prometheus metrics"]
 ```
 
 The controller never serializes API keys into generated ConfigMaps. Provider credentials are
@@ -192,9 +196,10 @@ gating, two durable runs, case reads, and a baseline comparison:
 CLUSTER_PROVIDER=kind make e2e-results-local
 ```
 
-The local overlay lives under `config/dev/results`, inherits the released `config/results` stack,
-uses test-only Secrets created by the E2E script, and replaces only the Result API image with the
-source-built `:dev` image. See [Result API](docs/result-api.md) for its HTTP and storage contract.
+The local result overlay lives under `config/dev/results`; `config/dev/telemetry` adds a
+digest-pinned OpenTelemetry Collector assertion sink. The E2E uses test-only Secrets and replaces
+the released component images with source-built `:dev` images. See [Result API](docs/result-api.md)
+and [observability](docs/observability.md) for the storage and signal contracts.
 
 Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
 when switching modes. The CRD definition is installed cluster-wide, while `AgentTestRun` resources
@@ -247,7 +252,7 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Export Agent, model, and tool-call telemetry with OpenTelemetry conventions.
+1. Add tool/handoff telemetry, provider cost rules, and persistent Grafana drill-down.
 2. Add reusable assertions, provider adapters, and controlled fault injection.
 3. Add KEDA-based queue scaling and resource-aware scheduling.
 4. Publish Helm charts, reproducible benchmarks, and a public demo.

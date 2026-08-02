@@ -43,6 +43,29 @@ type ResultSinkConfig struct {
 	TimeoutSeconds       int
 }
 
+type TelemetryConfig struct {
+	OTLPEndpoint string
+}
+
+func (c *TelemetryConfig) ValidateAndDefault() error {
+	c.OTLPEndpoint = strings.TrimRight(strings.TrimSpace(c.OTLPEndpoint), "/")
+	if c.OTLPEndpoint == "" {
+		return nil
+	}
+	parsed, err := url.Parse(c.OTLPEndpoint)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("otel-exporter-otlp-endpoint must be an HTTP(S) URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("otel-exporter-otlp-endpoint must not contain credentials, query, or fragment")
+	}
+	return nil
+}
+
+func (c TelemetryConfig) Enabled() bool {
+	return c.OTLPEndpoint != ""
+}
+
 func (c *ResultSinkConfig) ValidateAndDefault() error {
 	c.URL = strings.TrimRight(strings.TrimSpace(c.URL), "/")
 	if c.URL == "" {
@@ -83,6 +106,7 @@ type AgentTestRunReconciler struct {
 	APIReader  client.Reader
 	Scheme     *runtime.Scheme
 	ResultSink ResultSinkConfig
+	Telemetry  TelemetryConfig
 }
 
 // +kubebuilder:rbac:groups=agentstorm.io,resources=agenttestruns,verbs=get;list;watch;create;update;patch;delete
@@ -415,7 +439,7 @@ func (r *AgentTestRunReconciler) ensureJob(ctx context.Context, run *agentstormv
 		return nil, false, err
 	}
 
-	job = buildJob(run, r.ResultSink)
+	job = buildJob(run, r.ResultSink, r.Telemetry)
 	if err := controllerutil.SetControllerReference(run, job, r.Scheme); err != nil {
 		return nil, false, err
 	}
@@ -425,7 +449,7 @@ func (r *AgentTestRunReconciler) ensureJob(ctx context.Context, run *agentstormv
 	return job, true, nil
 }
 
-func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig) *batchv1.Job {
+func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig, telemetry TelemetryConfig) *batchv1.Job {
 	parallelism := run.Spec.Workload.Parallelism
 	backoffLimit := int32(0)
 	completionMode := batchv1.IndexedCompletion
@@ -468,6 +492,14 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig)
 			},
 			corev1.EnvVar{Name: "AGENTSTORM_INCLUDE_SENSITIVE_RESULTS", Value: strconv.FormatBool(resultSink.IncludeSensitive)},
 			corev1.EnvVar{Name: "AGENTSTORM_RESULT_TIMEOUT_SECONDS", Value: strconv.Itoa(resultSink.TimeoutSeconds)},
+		)
+	}
+	if telemetry.Enabled() {
+		env = append(env,
+			corev1.EnvVar{Name: "AGENTSTORM_OTEL_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: telemetry.OTLPEndpoint},
+			corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_PROTOCOL", Value: "http/protobuf"},
+			corev1.EnvVar{Name: "OTEL_SERVICE_NAME", Value: "agentstorm-worker"},
 		)
 	}
 

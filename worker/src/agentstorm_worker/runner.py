@@ -9,6 +9,7 @@ from pathlib import Path
 from .adapters import AgentAdapter
 from .config import EvaluationConfig, RunConfig
 from .models import CaseResult, RunSummary, TestCase
+from .telemetry import NoopTelemetry, TelemetryClient
 
 
 class WorkloadRunner:
@@ -18,6 +19,7 @@ class WorkloadRunner:
         adapter: AgentAdapter,
         shard_index: int = 0,
         shard_count: int = 1,
+        telemetry: TelemetryClient | None = None,
     ) -> None:
         if shard_count < 1 or not 0 <= shard_index < shard_count:
             raise ValueError("shard index must be within shard count")
@@ -25,6 +27,7 @@ class WorkloadRunner:
         self._adapter = adapter
         self._shard_index = shard_index
         self._shard_count = shard_count
+        self._telemetry = telemetry or NoopTelemetry()
 
     async def execute(self, cases: list[TestCase]) -> tuple[list[CaseResult], RunSummary]:
         started = time.perf_counter()
@@ -56,32 +59,93 @@ class WorkloadRunner:
 
     async def _execute_case(self, case: TestCase, iteration: int) -> CaseResult:
         started = time.perf_counter()
-        try:
-            response = await asyncio.wait_for(
-                self._adapter.run(case), timeout=self._config.workload.timeout_seconds
+        case_attributes: dict[str, str | int | bool | float] = {
+            "agentstorm.run.id": self._config.run_id,
+            "agentstorm.case.id": case.case_id,
+            "agentstorm.case.iteration": iteration,
+        }
+        with self._telemetry.start_span("agentstorm.case", case_attributes) as case_span:
+            try:
+                provider_attributes: dict[str, str | int | bool | float] = {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.provider.name": self._config.target.provider,
+                }
+                if self._config.target.model:
+                    provider_attributes["gen_ai.request.model"] = self._config.target.model
+                with self._telemetry.start_span(
+                    "gen_ai.invoke_agent", provider_attributes
+                ) as provider_span:
+                    try:
+                        response = await asyncio.wait_for(
+                            self._adapter.run(case),
+                            timeout=self._config.workload.timeout_seconds,
+                        )
+                    except Exception as exc:
+                        provider_span.set_error(type(exc).__name__)
+                        raise
+                    if response.input_tokens is not None:
+                        provider_span.set_attribute(
+                            "gen_ai.usage.input_tokens", response.input_tokens
+                        )
+                    if response.output_tokens is not None:
+                        provider_span.set_attribute(
+                            "gen_ai.usage.output_tokens", response.output_tokens
+                        )
+
+                evaluator_name = "contains" if case.expected_contains is not None else "none"
+                with self._telemetry.start_span(
+                    "agentstorm.evaluate",
+                    {
+                        "gen_ai.evaluation.name": evaluator_name,
+                        "agentstorm.evaluation.deterministic": True,
+                    },
+                ) as evaluator_span:
+                    success = (
+                        case.expected_contains is None
+                        or case.expected_contains in response.output
+                    )
+                    evaluator_span.set_attribute(
+                        "gen_ai.evaluation.score.label", "pass" if success else "fail"
+                    )
+                    if not success:
+                        evaluator_span.set_error("assertion")
+                error = (
+                    None
+                    if success
+                    else f"output does not contain {case.expected_contains!r}"
+                )
+                result = CaseResult(
+                    case_id=case.case_id,
+                    iteration=iteration,
+                    success=success,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    failure_kind="" if success else "assertion",
+                    output=response.output,
+                    error=error,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                )
+            except Exception as exc:  # noqa: BLE001 - provider errors are test results
+                case_span.set_error(type(exc).__name__)
+                result = CaseResult(
+                    case_id=case.case_id,
+                    iteration=iteration,
+                    success=False,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    failure_kind="provider",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            case_span.set_attribute("agentstorm.case.success", result.success)
+            case_span.set_attribute(
+                "agentstorm.case.failure_kind", result.failure_kind or "none"
             )
-            success = case.expected_contains is None or case.expected_contains in response.output
-            error = None if success else f"output does not contain {case.expected_contains!r}"
-            return CaseResult(
-                case_id=case.case_id,
-                iteration=iteration,
-                success=success,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                failure_kind="" if success else "assertion",
-                output=response.output,
-                error=error,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-            )
-        except Exception as exc:  # noqa: BLE001 - provider errors are test results
-            return CaseResult(
-                case_id=case.case_id,
-                iteration=iteration,
-                success=False,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                failure_kind="provider",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            if not result.success:
+                case_span.set_error(result.failure_kind or "failure")
+            if result.input_tokens is not None:
+                case_span.set_attribute("gen_ai.usage.input_tokens", result.input_tokens)
+            if result.output_tokens is not None:
+                case_span.set_attribute("gen_ai.usage.output_tokens", result.output_tokens)
+            return result
 
 
 def summarize(
