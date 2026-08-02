@@ -10,6 +10,7 @@ keep_resources="${KEEP_E2E_RESOURCES:-true}"
 skip_image_build="${SKIP_IMAGE_BUILD:-false}"
 load_local_images="${LOAD_LOCAL_IMAGES:-true}"
 telemetry_e2e="${ENABLE_TELEMETRY_E2E:-}"
+expect_cost_accounting="${EXPECT_COST_ACCOUNTING:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 result_api_image="${RESULT_API_IMAGE:-agentstorm-result-api:dev}"
@@ -55,7 +56,15 @@ if [[ -z "$telemetry_e2e" ]]; then
     telemetry_e2e="false"
   fi
 fi
+if [[ -z "$expect_cost_accounting" ]]; then
+  if [[ "$skip_image_build" == "false" ]]; then
+    expect_cost_accounting="true"
+  else
+    expect_cost_accounting="false"
+  fi
+fi
 require_boolean ENABLE_TELEMETRY_E2E "$telemetry_e2e"
+require_boolean EXPECT_COST_ACCOUNTING "$expect_cost_accounting"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 require_command curl
@@ -469,7 +478,7 @@ if [[ "$telemetry_e2e" == "true" ]]; then
   curl --fail --silent "$base_url/metrics" >"$test_dir/metrics.txt"
 fi
 
-python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" <<'PY'
+python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" "$expect_cost_accounting" <<'PY'
 import json
 import sys
 
@@ -482,6 +491,7 @@ comparison = json.load(open(sys.argv[6], encoding="utf-8"))
 baseline_id = sys.argv[7]
 candidate_id = sys.argv[8]
 failure_id = sys.argv[9]
+expect_cost_accounting = sys.argv[10] == "true"
 
 for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["id"] == run_id, run
@@ -491,10 +501,9 @@ for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["summary"]["total"] == 2, run
     assert run["summary"]["succeeded"] == 2, run
     assert run["summary"]["failed"] == 0, run
-    assert run["summary"]["cost_usd"] is not None, run
-
-assert baseline["summary"]["cost_usd"] == "0.000195000000", baseline
-assert candidate["summary"]["cost_usd"] == "0.000390000000", candidate
+if expect_cost_accounting:
+    assert baseline["summary"]["cost_usd"] == "0.000195000000", baseline
+    assert candidate["summary"]["cost_usd"] == "0.000390000000", candidate
 
 assert failure["id"] == failure_id, failure
 assert failure["status"] == "complete", failure
@@ -506,7 +515,8 @@ assert len(cases["cases"]) == 2, cases
 for case in cases["cases"]:
     assert "output" not in case, case
     assert "error" not in case, case
-    assert case["cost_usd"] is not None, case
+    if expect_cost_accounting:
+        assert case["cost_usd"] is not None, case
 
 assert len(failure_cases["cases"]) == 1, failure_cases
 assert failure_cases["cases"][0]["failure_kind"] == "assertion", failure_cases
@@ -518,11 +528,11 @@ assert comparison["candidate_id"] == candidate_id, comparison
 expected_deltas = {
     "success_rate", "failure_rate", "p50_ms", "p50_percent", "p95_ms",
     "p95_percent", "p99_ms", "p99_percent", "input_tokens", "output_tokens",
-    "cost_usd", "cost_percent",
 }
 assert expected_deltas <= comparison["delta"].keys(), comparison
-assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
-assert comparison["delta"]["cost_percent"] == 100, comparison
+if expect_cost_accounting:
+    assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
+    assert comparison["delta"]["cost_percent"] == 100, comparison
 PY
 
 if [[ "$telemetry_e2e" == "true" ]]; then
