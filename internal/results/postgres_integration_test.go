@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 )
@@ -61,6 +62,9 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	first := testShard(runID, 0, "case-a", true)
 	first.Cases[0].LatencyMS = 10
 	first.Cases[0].InputTokens = 3
+	first.Cases[0].Attempts = []AttemptResult{{
+		Number: 1, LatencyMS: 10, Outcome: "succeeded", RetryDecision: "not_needed", InputTokens: 3,
+	}}
 	first.Summary.InputTokens = 3
 	shardResult, err := service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", first)
 	if err != nil || !shardResult.Created {
@@ -78,6 +82,9 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	second := testShard(runID, 1, "case-b", false)
 	second.Cases[0].LatencyMS = 30
 	second.Cases[0].OutputTokens = 5
+	second.Cases[0].Attempts = []AttemptResult{{
+		Number: 1, LatencyMS: 30, Outcome: "succeeded", RetryDecision: "not_needed", OutputTokens: 5,
+	}}
 	second.Summary.OutputTokens = 5
 	second.Cases[0].Assertions[0].Message = stringPointer("sensitive detail")
 	shardResult, err = service.UploadShard(ctx, runID, 1, "run/"+runID+"/shard/1", second)
@@ -90,6 +97,11 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	}
 	if detail.Summary.Total != 2 || detail.Summary.Succeeded != 1 || detail.Summary.Failed != 1 {
 		t.Fatalf("unexpected counts: %#v", detail.Summary)
+	}
+	if detail.Summary.QualityFailures != 1 || detail.Summary.QualityFailureRate != 0.5 ||
+		detail.Summary.InfrastructureFailures != 0 || detail.Summary.AttemptCount != 2 ||
+		detail.Summary.RetryCount != 0 || detail.Summary.InjectedFaults != 0 {
+		t.Fatalf("unexpected reliability aggregate: %#v", detail.Summary)
 	}
 	if math.Abs(detail.Summary.P50MS-20) > 0.001 || math.Abs(detail.Summary.P95MS-29) > 0.001 {
 		t.Fatalf("unexpected percentiles: %#v", detail.Summary)
@@ -135,6 +147,33 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	candidateShard := testShard(candidateID, 0, "case-c", true)
 	candidateShard.Cases[0].LatencyMS = 40
 	candidateShard.Cases[0].InputTokens = 10
+	candidateShard.Cases[0].Attempts = []AttemptResult{
+		{
+			Number: 1, LatencyMS: 1, Outcome: "failed", FailureCategory: "provider",
+			ErrorCode: "rate_limited", InjectedRule: "first-attempt", InjectedFault: "rate_limit",
+			RetryDecision: "retry_safe",
+		},
+		{
+			Number: 2, LatencyMS: 39, Outcome: "succeeded", RetryDecision: "not_needed", InputTokens: 10,
+		},
+	}
+	candidateShard.Cases = append(candidateShard.Cases, CaseResult{
+		IdempotencyKey:  "run/" + candidateID + "/case/case-d/iteration/0",
+		CaseID:          "case-d",
+		Iteration:       0,
+		Success:         false,
+		LatencyMS:       40,
+		FailureKind:     "provider",
+		FailureCategory: "provider",
+		ErrorCode:       "circuit_open",
+		Attempts: []AttemptResult{{
+			Number: 1, Outcome: "rejected", FailureCategory: "provider", ErrorCode: "circuit_open",
+			RetryDecision: "not_retryable", CircuitEvents: []string{"reject"},
+		}},
+	})
+	candidateShard.Summary.Total = 2
+	candidateShard.Summary.Succeeded = 1
+	candidateShard.Summary.Failed = 1
 	candidateShard.Summary.InputTokens = 10
 	if _, err := service.UploadShard(ctx, candidateID, 0, "run/"+candidateID+"/shard/0", candidateShard); err != nil {
 		t.Fatalf("upload candidate: %v", err)
@@ -143,12 +182,18 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compare runs: %v", err)
 	}
-	if math.Abs(comparison.Delta.SuccessRate-0.5) > 0.001 ||
+	if math.Abs(comparison.Delta.SuccessRate) > 0.001 ||
 		math.Abs(comparison.Delta.P50MS-20) > 0.001 ||
 		comparison.Delta.P50Percent == nil || math.Abs(*comparison.Delta.P50Percent-100) > 0.001 ||
 		comparison.Delta.InputTokens != 7 || comparison.Delta.CostUSD == nil ||
 		*comparison.Delta.CostUSD != "0.000004000000" || comparison.Delta.CostPercent == nil ||
-		math.Abs(*comparison.Delta.CostPercent-15.3846153846) > 0.0001 {
+		math.Abs(*comparison.Delta.CostPercent-15.3846153846) > 0.0001 ||
+		comparison.Delta.QualityFailures != -1 || comparison.Delta.QualityFailureRate != -0.5 ||
+		comparison.Delta.InfrastructureFailures != 1 || comparison.Delta.InfrastructureFailureRate != 0.5 ||
+		comparison.Delta.AttemptCount != 1 || comparison.Delta.RetryCount != 1 ||
+		comparison.Delta.RetriedCases != 1 || comparison.Delta.RetrySuccesses != 1 ||
+		comparison.Delta.RetrySuccessRate != 1 || comparison.Delta.InjectedFaults != 1 ||
+		comparison.Delta.CircuitRejections != 1 {
 		t.Fatalf("unexpected comparison: %#v", comparison)
 	}
 
@@ -158,6 +203,79 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func TestMigrationUpgradeFromM3BackfillsM4Reporting(t *testing.T) {
+	databaseURL := os.Getenv("AGENTSTORM_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENTSTORM_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	adminPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminPool.Close()
+	schemaName := fmt.Sprintf("migration_%d", time.Now().UnixNano())
+	schemaSQL := pgx.Identifier{schemaName}.Sanitize()
+	if _, err := adminPool.Exec(ctx, "CREATE SCHEMA "+schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schemaSQL+" CASCADE") })
+
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schemaName
+	legacyPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyPool.Close()
+	for _, name := range []string{"001_init.sql", "002_m3_evaluation.sql"} {
+		schema, err := migrations.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := legacyPool.Exec(ctx, string(schema)); err != nil {
+			t.Fatalf("apply legacy migration %s: %v", name, err)
+		}
+	}
+	if _, err := legacyPool.Exec(ctx, `
+		INSERT INTO agentstorm_runs
+			(id, registration_key, registration_hash, registration, expected_shards, status)
+		VALUES ('legacy-run', 'run/legacy-run', 'hash', '{}', 1, 'complete');
+		INSERT INTO agentstorm_case_results
+			(run_id, case_id, iteration, shard_index, idempotency_key, payload_hash,
+			 success, latency_ms, input_tokens, output_tokens, failure_kind)
+		VALUES ('legacy-run', 'legacy-case', 0, 0,
+		        'run/legacy-run/case/legacy-case/iteration/0', 'case-hash',
+		        false, 1, 0, 0, 'assertion');
+		INSERT INTO agentstorm_run_summaries
+			(run_id, total, succeeded, failed, success_rate, failure_rate, p50_ms, p95_ms,
+			 p99_ms, input_tokens, output_tokens, thresholds_passed)
+		VALUES ('legacy-run', 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, false);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyMigrations(ctx, legacyPool); err != nil {
+		t.Fatalf("upgrade legacy schema: %v", err)
+	}
+	var category string
+	var qualityFailures, infrastructureFailures, attempts int64
+	if err := legacyPool.QueryRow(ctx, `
+		SELECT c.failure_category, s.quality_failures, s.infrastructure_failures, s.attempt_count
+		FROM agentstorm_case_results c
+		JOIN agentstorm_run_summaries s ON s.run_id = c.run_id
+		WHERE c.run_id = 'legacy-run'`).Scan(
+		&category, &qualityFailures, &infrastructureFailures, &attempts,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if category != "evaluation" || qualityFailures != 1 || infrastructureFailures != 0 || attempts != 0 {
+		t.Fatalf("legacy M3 data was not backfilled: category=%q quality=%d infrastructure=%d attempts=%d",
+			category, qualityFailures, infrastructureFailures, attempts)
+	}
+}
 
 func TestTerminalRunRemainsPartialAfterLateShard(t *testing.T) {
 	databaseURL := os.Getenv("AGENTSTORM_TEST_DATABASE_URL")

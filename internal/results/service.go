@@ -118,6 +118,15 @@ func normalizeShard(upload *ShardUpload) {
 	}
 	for index := range upload.Cases {
 		item := &upload.Cases[index]
+		if item.ToolPath == nil {
+			item.ToolPath = []string{}
+		}
+		if item.Assertions == nil {
+			item.Assertions = []AssertionResult{}
+		}
+		if item.Attempts == nil {
+			item.Attempts = []AttemptResult{}
+		}
 		if item.UsageComplete == nil {
 			item.UsageComplete = boolPointer(true)
 		}

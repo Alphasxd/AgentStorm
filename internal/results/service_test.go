@@ -367,7 +367,8 @@ func TestUploadShardNormalizesLegacyWorkerClassification(t *testing.T) {
 		},
 		finalizeShard: func(_ context.Context, _ string, _ int, _ string, cases []CaseResult, _ *RunPricing) (bool, error) {
 			if len(cases) != 1 || cases[0].FailureCategory != "evaluation" ||
-				cases[0].ErrorCode != "legacy_assertion_failure" || !usageComplete(cases[0].UsageComplete) {
+				cases[0].ErrorCode != "legacy_assertion_failure" || !usageComplete(cases[0].UsageComplete) ||
+				cases[0].Attempts == nil {
 				t.Fatalf("legacy case was not normalized: %#v", cases)
 			}
 			return true, nil

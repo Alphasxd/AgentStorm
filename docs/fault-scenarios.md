@@ -40,4 +40,31 @@ The optional breaker is scoped to one Worker process and Provider adapter. Conse
 
 Because breaker state observes concurrent completion order, the exact rejected cases are only reproducible with `concurrencyPerWorker: 1`. Deterministic fault selection itself remains independent of concurrency and sharding.
 
-Until the `v0.4.0-alpha.1` images are published, use Controller and Worker images built from the same source revision when exercising this contract.
+## Durable reporting and cancellation
+
+The Result API registration stores the normalized scenario, source ConfigMap name/key, digest,
+retry budget, and circuit settings. Case pages expose ordered attempts with stable category/code,
+retry decision, backoff, Token usage completeness, selected rule/fault, and circuit events. Run
+summaries and comparisons separate evaluation failures as quality failures from Provider, tool, and
+harness infrastructure failures. They also report attempts, retries, retry successes, injected
+faults, and circuit rejections.
+
+Setting `spec.cancel: true` makes the Controller best-effort persist a `cancelled` terminal record
+before deleting the Job. A terminating Worker stops scheduling cases and retries, cancels its
+in-flight Adapter task, flushes completed cases within ten seconds, and idempotently records
+cancellation. The Result API keeps those cases readable with `partial: true`; incomplete or terminal
+Runs cannot be used as Promptfoo or comparison baselines. Kubernetes cancellation still wins when
+the result sink is unavailable, and the CR exposes that persistence failure.
+
+Run the entire no-cost source validation with:
+
+```bash
+CLUSTER_PROVIDER=kind ENABLE_RELIABILITY_E2E=true make e2e-results-local
+```
+
+It uses the fake Provider and validates all supported fault types, same-seed selection across
+different shard/concurrency layouts, conservative versus opted-in ambiguous retry, Token/cost
+completeness, every circuit transition, report separation, and partial cancellation.
+
+Until the `v0.4.0-alpha.1` images are published, use Controller and Worker images built from the
+same source revision when exercising this contract.

@@ -101,11 +101,18 @@ The Result API exposes a dedicated Prometheus registry with:
 | `agentstorm_result_api_cases_total` | result, bounded failure kind | Uniquely persisted success/failure cases |
 | `agentstorm_result_api_tokens_total` | direction | Input and output Tokens from unique shards |
 | `agentstorm_result_api_cost_usd_total` | direction | Input and output USD cost derived from registered price snapshots |
+| `agentstorm_result_api_case_failures_total` | category | Evaluation, Provider, tool, or harness failures |
+| `agentstorm_result_api_attempts_total` | outcome | Succeeded, failed, or circuit-rejected attempts |
+| `agentstorm_result_api_retry_decisions_total` | decision | Bounded terminal retry decisions recorded by attempts |
+| `agentstorm_result_api_retries_total` | decision, outcome | Actual follow-up attempts by triggering decision and outcome |
+| `agentstorm_result_api_injected_faults_total` | fault | Selected injected faults by supported fault type |
+| `agentstorm_result_api_circuit_events_total` | event | Open, reject, half-open, and close transitions |
 
 Run IDs, case IDs, model names, source names, bearer tokens, outputs, and error bodies are not metric
-labels. Unknown worker failure kinds collapse to `other`. This keeps cardinality bounded and prevents
-sensitive values from entering the Prometheus index. Detailed per-run and failed-case data remains in
-the authenticated Result API.
+labels. Unknown Worker categories, outcomes, decisions, faults, and circuit events collapse to
+`other`. Metrics never use Run, Provider, model, case, or rule labels. This keeps cardinality bounded
+and prevents sensitive values from entering the Prometheus index. Detailed per-run and failed-case
+data remains in the authenticated Result API.
 
 ## Local persistent stack
 
@@ -118,11 +125,11 @@ the authenticated Result API.
 | Prometheus 3.11.0 | Scrape Result API metrics and evaluate RED plus cost recording rules | 1 GiB PVC, 24-hour retention |
 | Grafana 13.1.0 | Provision Prometheus/Tempo data sources and the `AgentStorm Observability` dashboard | 1 GiB PVC |
 
-Grafana's provisioned dashboard combines low-cardinality operational metrics and cumulative input/
-output cost with high-cardinality
-trace search. Enter the `AgentTestRun` UID in its `Run ID` variable to list failed case traces and
-provider-error traces. Selecting a trace ID opens the complete span tree in the dashboard without
-copying run or case identifiers into Prometheus labels.
+Grafana's provisioned dashboard combines low-cardinality operational metrics, cumulative input/
+output cost, failure categories, retry effectiveness, injected-versus-observed faults, and circuit
+events with high-cardinality trace search. Enter the `AgentTestRun` UID in its `Run ID` variable to
+list failed case traces and Provider-error traces. Selecting a trace ID opens the complete span tree
+without copying Run or case identifiers into Prometheus labels.
 
 Run the complete source-built path and retain its resources:
 
@@ -139,7 +146,7 @@ RUN_ID=$(kubectl -n agentstorm-system get agenttestrun agentstorm-results-failur
 echo "http://127.0.0.1:13000/d/agentstorm-observability/agentstorm-observability?var-run_id=$RUN_ID"
 ```
 
-The E2E creates a deterministic failed case and an explicitly redacted content case, queries their
+The E2E creates deterministic reliability failures and an explicitly redacted content case, queries their
 traces from Tempo, verifies Prometheus metrics and recording-rule health, loads the provisioned
 dashboard through the Grafana API, and then
 restarts Tempo and Prometheus to prove both signals remain queryable from their PVCs. It also checks
@@ -150,7 +157,8 @@ traces and metric labels. The redacted trace must contain `[REDACTED]` and allow
 its prompt/output/tool canaries and built-in credential-key canary remain absent.
 
 Published-image smoke tests for releases that predate this interface automatically leave telemetry
-disabled; `ENABLE_TELEMETRY_E2E=true|false` can override that selection.
+and reliability validation disabled; `ENABLE_TELEMETRY_E2E=true|false` and
+`ENABLE_RELIABILITY_E2E=true|false` can override those selections.
 
 ## Deployment boundary
 

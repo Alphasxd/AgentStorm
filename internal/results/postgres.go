@@ -352,6 +352,20 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			count(*),
 			count(*) FILTER (WHERE success),
 			count(*) FILTER (WHERE NOT success),
+			count(*) FILTER (WHERE NOT success AND failure_category = 'evaluation'),
+			count(*) FILTER (WHERE NOT success AND failure_category IN ('provider', 'tool', 'harness')),
+			COALESCE(sum(jsonb_array_length(attempts)), 0)::bigint,
+			COALESCE(sum(GREATEST(jsonb_array_length(attempts) - 1, 0)), 0)::bigint,
+			count(*) FILTER (WHERE jsonb_array_length(attempts) > 1),
+			count(*) FILTER (WHERE success AND jsonb_array_length(attempts) > 1),
+			COALESCE(sum((
+				SELECT count(*) FROM jsonb_array_elements(attempts) AS item
+				WHERE COALESCE(item->>'injected_fault', '') <> ''
+			)), 0)::bigint,
+			COALESCE(sum((
+				SELECT count(*) FROM jsonb_array_elements(attempts) AS item
+				WHERE item->>'error_code' = 'circuit_open'
+			)), 0)::bigint,
 			COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms), 0),
 			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0),
 			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms), 0),
@@ -366,6 +380,14 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 		&aggregate.Total,
 		&aggregate.Succeeded,
 		&aggregate.Failed,
+		&aggregate.QualityFailures,
+		&aggregate.InfrastructureFailures,
+		&aggregate.AttemptCount,
+		&aggregate.RetryCount,
+		&aggregate.RetriedCases,
+		&aggregate.RetrySuccesses,
+		&aggregate.InjectedFaults,
+		&aggregate.CircuitRejections,
 		&aggregate.P50MS,
 		&aggregate.P95MS,
 		&aggregate.P99MS,
@@ -381,6 +403,11 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 	if aggregate.Total > 0 {
 		aggregate.SuccessRate = float64(aggregate.Succeeded) / float64(aggregate.Total)
 		aggregate.FailureRate = float64(aggregate.Failed) / float64(aggregate.Total)
+		aggregate.QualityFailureRate = float64(aggregate.QualityFailures) / float64(aggregate.Total)
+		aggregate.InfrastructureFailureRate = float64(aggregate.InfrastructureFailures) / float64(aggregate.Total)
+	}
+	if aggregate.RetriedCases > 0 {
+		aggregate.RetrySuccessRate = float64(aggregate.RetrySuccesses) / float64(aggregate.RetriedCases)
 	}
 
 	var registrationPayload []byte
@@ -402,16 +429,31 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 
 	if _, err := transaction.Exec(ctx, `
 		INSERT INTO agentstorm_run_summaries
-			(run_id, total, succeeded, failed, success_rate, failure_rate, p50_ms, p95_ms,
-			 p99_ms, input_tokens, output_tokens, thresholds_passed,
+			(run_id, total, succeeded, failed, success_rate, failure_rate,
+			 quality_failures, quality_failure_rate, infrastructure_failures, infrastructure_failure_rate,
+			 attempt_count, retry_count, retried_cases, retry_successes, retry_success_rate,
+			 injected_faults, circuit_rejections, p50_ms, p95_ms, p99_ms,
+			 input_tokens, output_tokens, thresholds_passed,
 			 input_cost_usd, output_cost_usd, cost_usd, usage_complete)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+		        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 		ON CONFLICT (run_id) DO UPDATE SET
 			total = EXCLUDED.total,
 			succeeded = EXCLUDED.succeeded,
 			failed = EXCLUDED.failed,
 			success_rate = EXCLUDED.success_rate,
 			failure_rate = EXCLUDED.failure_rate,
+			quality_failures = EXCLUDED.quality_failures,
+			quality_failure_rate = EXCLUDED.quality_failure_rate,
+			infrastructure_failures = EXCLUDED.infrastructure_failures,
+			infrastructure_failure_rate = EXCLUDED.infrastructure_failure_rate,
+			attempt_count = EXCLUDED.attempt_count,
+			retry_count = EXCLUDED.retry_count,
+			retried_cases = EXCLUDED.retried_cases,
+			retry_successes = EXCLUDED.retry_successes,
+			retry_success_rate = EXCLUDED.retry_success_rate,
+			injected_faults = EXCLUDED.injected_faults,
+			circuit_rejections = EXCLUDED.circuit_rejections,
 			p50_ms = EXCLUDED.p50_ms,
 			p95_ms = EXCLUDED.p95_ms,
 			p99_ms = EXCLUDED.p99_ms,
@@ -423,7 +465,10 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			cost_usd = EXCLUDED.cost_usd,
 			usage_complete = EXCLUDED.usage_complete,
 			updated_at = now()`, runID, aggregate.Total, aggregate.Succeeded, aggregate.Failed,
-		aggregate.SuccessRate, aggregate.FailureRate, aggregate.P50MS, aggregate.P95MS,
+		aggregate.SuccessRate, aggregate.FailureRate, aggregate.QualityFailures, aggregate.QualityFailureRate,
+		aggregate.InfrastructureFailures, aggregate.InfrastructureFailureRate, aggregate.AttemptCount,
+		aggregate.RetryCount, aggregate.RetriedCases, aggregate.RetrySuccesses, aggregate.RetrySuccessRate,
+		aggregate.InjectedFaults, aggregate.CircuitRejections, aggregate.P50MS, aggregate.P95MS,
 		aggregate.P99MS, aggregate.InputTokens, aggregate.OutputTokens, aggregate.ThresholdsPassed,
 		aggregate.InputCostUSD, aggregate.OutputCostUSD, aggregate.CostUSD, aggregate.UsageComplete); err != nil {
 		return fmt.Errorf("persist run aggregate: %w", err)
@@ -479,6 +524,12 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		       (rs.run_id IS NOT NULL),
 		       COALESCE(rs.total, 0), COALESCE(rs.succeeded, 0), COALESCE(rs.failed, 0),
 		       COALESCE(rs.success_rate, 0), COALESCE(rs.failure_rate, 0),
+		       COALESCE(rs.quality_failures, 0), COALESCE(rs.quality_failure_rate, 0),
+		       COALESCE(rs.infrastructure_failures, 0), COALESCE(rs.infrastructure_failure_rate, 0),
+		       COALESCE(rs.attempt_count, 0), COALESCE(rs.retry_count, 0),
+		       COALESCE(rs.retried_cases, 0), COALESCE(rs.retry_successes, 0),
+		       COALESCE(rs.retry_success_rate, 0), COALESCE(rs.injected_faults, 0),
+		       COALESCE(rs.circuit_rejections, 0),
 		       COALESCE(rs.p50_ms, 0), COALESCE(rs.p95_ms, 0), COALESCE(rs.p99_ms, 0),
 		       COALESCE(rs.input_tokens, 0), COALESCE(rs.output_tokens, 0),
 		       COALESCE(rs.thresholds_passed, false),
@@ -505,6 +556,17 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		&summary.Failed,
 		&summary.SuccessRate,
 		&summary.FailureRate,
+		&summary.QualityFailures,
+		&summary.QualityFailureRate,
+		&summary.InfrastructureFailures,
+		&summary.InfrastructureFailureRate,
+		&summary.AttemptCount,
+		&summary.RetryCount,
+		&summary.RetriedCases,
+		&summary.RetrySuccesses,
+		&summary.RetrySuccessRate,
+		&summary.InjectedFaults,
+		&summary.CircuitRejections,
 		&summary.P50MS,
 		&summary.P95MS,
 		&summary.P99MS,
@@ -639,13 +701,24 @@ func (r *PostgresRepository) Compare(ctx context.Context, baselineID, candidateI
 	}
 
 	delta := ComparisonDelta{
-		SuccessRate:  candidate.Summary.SuccessRate - baseline.Summary.SuccessRate,
-		FailureRate:  candidate.Summary.FailureRate - baseline.Summary.FailureRate,
-		P50MS:        candidate.Summary.P50MS - baseline.Summary.P50MS,
-		P95MS:        candidate.Summary.P95MS - baseline.Summary.P95MS,
-		P99MS:        candidate.Summary.P99MS - baseline.Summary.P99MS,
-		InputTokens:  candidate.Summary.InputTokens - baseline.Summary.InputTokens,
-		OutputTokens: candidate.Summary.OutputTokens - baseline.Summary.OutputTokens,
+		SuccessRate:               candidate.Summary.SuccessRate - baseline.Summary.SuccessRate,
+		FailureRate:               candidate.Summary.FailureRate - baseline.Summary.FailureRate,
+		QualityFailures:           candidate.Summary.QualityFailures - baseline.Summary.QualityFailures,
+		QualityFailureRate:        candidate.Summary.QualityFailureRate - baseline.Summary.QualityFailureRate,
+		InfrastructureFailures:    candidate.Summary.InfrastructureFailures - baseline.Summary.InfrastructureFailures,
+		InfrastructureFailureRate: candidate.Summary.InfrastructureFailureRate - baseline.Summary.InfrastructureFailureRate,
+		AttemptCount:              candidate.Summary.AttemptCount - baseline.Summary.AttemptCount,
+		RetryCount:                candidate.Summary.RetryCount - baseline.Summary.RetryCount,
+		RetriedCases:              candidate.Summary.RetriedCases - baseline.Summary.RetriedCases,
+		RetrySuccesses:            candidate.Summary.RetrySuccesses - baseline.Summary.RetrySuccesses,
+		RetrySuccessRate:          candidate.Summary.RetrySuccessRate - baseline.Summary.RetrySuccessRate,
+		InjectedFaults:            candidate.Summary.InjectedFaults - baseline.Summary.InjectedFaults,
+		CircuitRejections:         candidate.Summary.CircuitRejections - baseline.Summary.CircuitRejections,
+		P50MS:                     candidate.Summary.P50MS - baseline.Summary.P50MS,
+		P95MS:                     candidate.Summary.P95MS - baseline.Summary.P95MS,
+		P99MS:                     candidate.Summary.P99MS - baseline.Summary.P99MS,
+		InputTokens:               candidate.Summary.InputTokens - baseline.Summary.InputTokens,
+		OutputTokens:              candidate.Summary.OutputTokens - baseline.Summary.OutputTokens,
 	}
 	delta.P50Percent = percentDelta(baseline.Summary.P50MS, candidate.Summary.P50MS)
 	delta.P95Percent = percentDelta(baseline.Summary.P95MS, candidate.Summary.P95MS)

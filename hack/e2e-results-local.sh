@@ -210,11 +210,18 @@ cleanup_stack() {
     agentstorm-results-candidate \
     agentstorm-results-failure \
     agentstorm-results-cancel \
+    agentstorm-results-reliability-faults \
+    agentstorm-results-retry-default \
+    agentstorm-results-retry-ambiguous \
+    agentstorm-results-deterministic-a \
+    agentstorm-results-deterministic-b \
+    agentstorm-results-circuit \
     agentstorm-results-redacted \
     agentstorm-results-reference; do
     delete_run "$run_name" || true
   done
-  "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset agentstorm-results-cancel-scenario -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset agentstorm-results-cancel-scenario \
+    agentstorm-results-reliability-scenarios -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete deployment agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
     -n "$e2e_namespace" --ignore-not-found >/dev/null || true
@@ -264,11 +271,19 @@ for run_name in \
   agentstorm-results-baseline \
   agentstorm-results-candidate \
   agentstorm-results-failure \
+  agentstorm-results-cancel \
+  agentstorm-results-reliability-faults \
+  agentstorm-results-retry-default \
+  agentstorm-results-retry-ambiguous \
+  agentstorm-results-deterministic-a \
+  agentstorm-results-deterministic-b \
+  agentstorm-results-circuit \
   agentstorm-results-redacted \
   agentstorm-results-reference; do
   delete_run "$run_name"
 done
-"${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset -n "$e2e_namespace" --ignore-not-found >/dev/null
+"${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset agentstorm-results-cancel-scenario \
+  agentstorm-results-reliability-scenarios -n "$e2e_namespace" --ignore-not-found >/dev/null
 
 # Persistent database credentials are initialized only once. Reset the complete test-owned stack so
 # a retained PVC can never be paired with a newly generated password on a later E2E invocation.
@@ -337,6 +352,35 @@ data:
     {"id":"case-failure","input":"gamma","expected_contains":"never-redacted-value"}
   redacted.jsonl: |
     {"id":"case-redacted","input":"contact customer-42@example.com","metadata":{"tenant":{"name":"team-blue","api_key":"metadata-sensitive-canary"},"internal":"internal-canary"}}
+  reliability.jsonl: |
+    {"id":"fault-latency","input":"latency","expected_contains":"latency"}
+    {"id":"fault-timeout","input":"timeout","expected_contains":"timeout"}
+    {"id":"fault-http","input":"http","expected_contains":"http"}
+    {"id":"fault-malformed","input":"malformed","expected_contains":"malformed"}
+    {"id":"fault-rate-limit","input":"rate-limit","expected_contains":"rate-limit"}
+    {"id":"fault-tool","input":"tool","expected_contains":"tool"}
+    {"id":"fault-quality","input":"quality","expected_contains":"not-present"}
+  retry.jsonl: |
+    {"id":"retry-rate-limit","input":"rate-limit","expected_contains":"rate-limit"}
+    {"id":"retry-timeout","input":"timeout","expected_contains":"timeout"}
+    {"id":"retry-http","input":"http","expected_contains":"http"}
+    {"id":"retry-malformed","input":"malformed","expected_contains":"malformed"}
+  deterministic.jsonl: |
+    {"id":"deterministic-01","input":"one","expected_contains":"one"}
+    {"id":"deterministic-02","input":"two","expected_contains":"two"}
+    {"id":"deterministic-03","input":"three","expected_contains":"three"}
+    {"id":"deterministic-04","input":"four","expected_contains":"four"}
+    {"id":"deterministic-05","input":"five","expected_contains":"five"}
+    {"id":"deterministic-06","input":"six","expected_contains":"six"}
+    {"id":"deterministic-07","input":"seven","expected_contains":"seven"}
+    {"id":"deterministic-08","input":"eight","expected_contains":"eight"}
+    {"id":"deterministic-09","input":"nine","expected_contains":"nine"}
+    {"id":"deterministic-10","input":"ten","expected_contains":"ten"}
+  circuit.jsonl: |
+    {"id":"circuit-a","input":"a","expected_contains":"a"}
+    {"id":"circuit-b","input":"b","expected_contains":"b"}
+    {"id":"circuit-c","input":"c","expected_contains":"c"}
+    {"id":"circuit-d","input":"d","expected_contains":"d"}
 YAML
 
 if [[ "$reliability_e2e" == "true" ]]; then
@@ -349,6 +393,23 @@ metadata:
 data:
   scenario.json: |
     {"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"hold-first","fault":"latency","probability":1,"caseIDs":["case-a"],"delayMs":30000}]}
+YAML
+
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-results-reliability-scenarios
+  namespace: $e2e_namespace
+data:
+  faults.json: |
+    {"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"latency","fault":"latency","probability":1,"caseIDs":["fault-latency"],"delayMs":1},{"name":"timeout","fault":"timeout","probability":1,"caseIDs":["fault-timeout"],"delayMs":1},{"name":"http-500","fault":"http_error","probability":1,"caseIDs":["fault-http"],"statusCode":500},{"name":"malformed","fault":"malformed_response","probability":1,"caseIDs":["fault-malformed"]},{"name":"rate-limit","fault":"rate_limit","probability":1,"caseIDs":["fault-rate-limit"]},{"name":"tool","fault":"tool_error","probability":1,"caseIDs":["fault-tool"],"toolName":"fake.echo"}]}
+  retry.json: |
+    {"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"retry-rate-limit","fault":"rate_limit","probability":1,"caseIDs":["retry-rate-limit"],"attempts":[1]},{"name":"retry-timeout","fault":"timeout","probability":1,"caseIDs":["retry-timeout"],"attempts":[1],"delayMs":1},{"name":"retry-http","fault":"http_error","probability":1,"caseIDs":["retry-http"],"attempts":[1],"statusCode":500},{"name":"retry-malformed","fault":"malformed_response","probability":1,"caseIDs":["retry-malformed"],"attempts":[1]}]}
+  deterministic.json: |
+    {"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"stable-selection","fault":"latency","probability":0.5,"delayMs":1}]}
+  circuit.json: |
+    {"apiVersion":"agentstorm.io/v1alpha1","kind":"FaultScenario","rules":[{"name":"open-on-first","fault":"rate_limit","probability":1,"caseIDs":["circuit-a"],"iterations":[0],"attempts":[1]}]}
 YAML
 fi
 
@@ -522,6 +583,161 @@ spec:
 YAML
 }
 
+create_reliability_fault_run() {
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-results-reliability-faults
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+    pricing:
+      inputUSDPerMillionTokens: "2"
+      outputUSDPerMillionTokens: "4"
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: reliability.jsonl
+    parallelism: 2
+    concurrencyPerWorker: 2
+    iterations: 1
+    timeoutSeconds: 120
+  reliability:
+    seed: 42
+    scenarioRef:
+      name: agentstorm-results-reliability-scenarios
+      key: faults.json
+    retry:
+      maxAttempts: 1
+  evaluation:
+    minSuccessRate: 0
+    maxErrorRate: 1
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
+create_retry_run() {
+  run_name="$1"
+  allow_ambiguous="$2"
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: $run_name
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+    pricing:
+      inputUSDPerMillionTokens: "2"
+      outputUSDPerMillionTokens: "4"
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: retry.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 120
+  reliability:
+    seed: 42
+    scenarioRef:
+      name: agentstorm-results-reliability-scenarios
+      key: retry.json
+    retry:
+      maxAttempts: 2
+      initialBackoffMs: 1
+      maxBackoffMs: 1
+      maxCumulativeBackoffMs: 10
+      jitterRatio: 0
+      allowAmbiguousRetries: $allow_ambiguous
+  evaluation:
+    minSuccessRate: 0
+    maxErrorRate: 1
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
+create_deterministic_run() {
+  run_name="$1"
+  parallelism="$2"
+  concurrency="$3"
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: $run_name
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: deterministic.jsonl
+    parallelism: $parallelism
+    concurrencyPerWorker: $concurrency
+    iterations: 1
+    timeoutSeconds: 120
+  reliability:
+    seed: 777
+    scenarioRef:
+      name: agentstorm-results-reliability-scenarios
+      key: deterministic.json
+    retry:
+      maxAttempts: 1
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
+create_circuit_run() {
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-results-circuit
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: circuit.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 25
+    timeoutSeconds: 120
+  reliability:
+    seed: 42
+    scenarioRef:
+      name: agentstorm-results-reliability-scenarios
+      key: circuit.json
+    retry:
+      maxAttempts: 1
+    circuitBreaker:
+      failureThreshold: 1
+      openDurationMs: 1
+  evaluation:
+    minSuccessRate: 0
+    maxErrorRate: 1
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
 create_run agentstorm-results-baseline 2.5 10
 create_run agentstorm-results-candidate 5 20
 create_failure_run
@@ -529,6 +745,12 @@ if [[ "$telemetry_e2e" == "true" ]]; then
   create_redacted_run
 fi
 if [[ "$reliability_e2e" == "true" ]]; then
+  create_reliability_fault_run
+  create_retry_run agentstorm-results-retry-default false
+  create_retry_run agentstorm-results-retry-ambiguous true
+  create_deterministic_run agentstorm-results-deterministic-a 1 1
+  create_deterministic_run agentstorm-results-deterministic-b 2 4
+  create_circuit_run
   create_cancel_run
   "${kubectl_cmd[@]}" wait --for=create job/agentstorm-results-cancel-worker -n "$e2e_namespace" --timeout="$wait_timeout"
   "${kubectl_cmd[@]}" patch agenttestrun agentstorm-results-cancel -n "$e2e_namespace" --type=merge -p '{"spec":{"cancel":true}}'
@@ -540,13 +762,37 @@ fi
 if [[ "$telemetry_e2e" == "true" ]]; then
   "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-redacted -n "$e2e_namespace" --timeout="$wait_timeout"
 fi
+if [[ "$reliability_e2e" == "true" ]]; then
+  for run_name in \
+    agentstorm-results-reliability-faults \
+    agentstorm-results-retry-default \
+    agentstorm-results-retry-ambiguous \
+    agentstorm-results-deterministic-a \
+    agentstorm-results-deterministic-b \
+    agentstorm-results-circuit; do
+    "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+      "agenttestrun/$run_name" -n "$e2e_namespace" --timeout="$wait_timeout"
+  done
+fi
 
 baseline_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-baseline -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 candidate_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-candidate -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 failure_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-failure -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 cancel_id=""
+faults_id=""
+retry_default_id=""
+retry_ambiguous_id=""
+deterministic_a_id=""
+deterministic_b_id=""
+circuit_id=""
 if [[ "$reliability_e2e" == "true" ]]; then
   cancel_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-cancel -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+  faults_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-reliability-faults -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+  retry_default_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-retry-default -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+  retry_ambiguous_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-retry-ambiguous -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+  deterministic_a_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-deterministic-a -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+  deterministic_b_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-deterministic-b -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+  circuit_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-circuit -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 fi
 redacted_id=""
 if [[ "$telemetry_e2e" == "true" ]]; then
@@ -556,9 +802,14 @@ if [[ -z "$baseline_id" || -z "$candidate_id" || -z "$failure_id" || "$baseline_
   echo "invalid durable run identifiers" >&2
   exit 1
 fi
-if [[ "$reliability_e2e" == "true" && -z "$cancel_id" ]]; then
-  echo "invalid durable cancellation run identifier" >&2
-  exit 1
+if [[ "$reliability_e2e" == "true" ]]; then
+  for run_id in "$cancel_id" "$faults_id" "$retry_default_id" "$retry_ambiguous_id" \
+    "$deterministic_a_id" "$deterministic_b_id" "$circuit_id"; do
+    if [[ -z "$run_id" ]]; then
+      echo "invalid durable reliability run identifier" >&2
+      exit 1
+    fi
+  done
 fi
 
 worker_config="$("${kubectl_cmd[@]}" get configmap agentstorm-results-baseline-config -n "$e2e_namespace" -o jsonpath='{.data.run\.json}')"
@@ -591,6 +842,20 @@ curl --fail --silent --header "Authorization: Bearer $read_token" \
 if [[ "$reliability_e2e" == "true" ]]; then
   curl --fail --silent --header "Authorization: Bearer $read_token" \
     "$base_url/v1/runs/$cancel_id" >"$test_dir/cancel.json"
+  for item in \
+    "faults:$faults_id" \
+    "retry-default:$retry_default_id" \
+    "retry-ambiguous:$retry_ambiguous_id" \
+    "deterministic-a:$deterministic_a_id" \
+    "deterministic-b:$deterministic_b_id" \
+    "circuit:$circuit_id"; do
+    name="${item%%:*}"
+    run_id="${item#*:}"
+    curl --fail --silent --header "Authorization: Bearer $read_token" \
+      "$base_url/v1/runs/$run_id" >"$test_dir/$name.json"
+    curl --fail --silent --header "Authorization: Bearer $read_token" \
+      "$base_url/v1/runs/$run_id/cases?limit=500" >"$test_dir/$name-cases.json"
+  done
 fi
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$baseline_id/cases?limit=10" >"$test_dir/baseline-cases.json"
@@ -661,12 +926,141 @@ assert comparison["candidate_id"] == candidate_id, comparison
 expected_deltas = {
     "success_rate", "failure_rate", "p50_ms", "p50_percent", "p95_ms",
     "p95_percent", "p99_ms", "p99_percent", "input_tokens", "output_tokens",
+    "quality_failures", "quality_failure_rate", "infrastructure_failures",
+    "infrastructure_failure_rate", "attempt_count", "retry_count", "retried_cases",
+    "retry_successes", "retry_success_rate", "injected_faults", "circuit_rejections",
 }
 assert expected_deltas <= comparison["delta"].keys(), comparison
 if expect_cost_accounting:
     assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
     assert comparison["delta"]["cost_percent"] == 100, comparison
 PY
+
+if [[ "$reliability_e2e" == "true" ]]; then
+  python3 - \
+    "$test_dir/faults.json" "$test_dir/faults-cases.json" \
+    "$test_dir/retry-default.json" "$test_dir/retry-default-cases.json" \
+    "$test_dir/retry-ambiguous.json" "$test_dir/retry-ambiguous-cases.json" \
+    "$test_dir/deterministic-a.json" "$test_dir/deterministic-a-cases.json" \
+    "$test_dir/deterministic-b.json" "$test_dir/deterministic-b-cases.json" \
+    "$test_dir/circuit.json" "$test_dir/circuit-cases.json" <<'PY'
+import json
+import sys
+
+
+def load(index):
+    return json.load(open(sys.argv[index], encoding="utf-8"))
+
+
+def by_case(page):
+    return {item["case_id"]: item for item in page["cases"]}
+
+
+faults, fault_page = load(1), load(2)
+retry_default, retry_default_page = load(3), load(4)
+retry_ambiguous, retry_ambiguous_page = load(5), load(6)
+deterministic_a, deterministic_a_page = load(7), load(8)
+deterministic_b, deterministic_b_page = load(9), load(10)
+circuit, circuit_page = load(11), load(12)
+
+for run in (faults, retry_default, retry_ambiguous, deterministic_a, deterministic_b, circuit):
+    assert run["status"] == "complete", run
+    assert run["partial"] is False, run
+    scenario = run["registration"]["reliability"]["scenario"]
+    assert scenario["digest"].startswith("sha256:") and len(scenario["digest"]) == 71, scenario
+    assert scenario["source"]["name"] == "agentstorm-results-reliability-scenarios", scenario
+
+assert faults["summary"]["total"] == 7, faults
+assert faults["summary"]["succeeded"] == 1, faults
+assert faults["summary"]["quality_failures"] == 1, faults
+assert faults["summary"]["infrastructure_failures"] == 5, faults
+assert faults["summary"]["attempt_count"] == 7, faults
+assert faults["summary"]["retry_count"] == 0, faults
+assert faults["summary"]["injected_faults"] == 6, faults
+assert faults["summary"]["usage_complete"] is False, faults
+assert faults["summary"]["cost_usd"] is None, faults
+fault_cases = by_case(fault_page)
+expected_faults = {
+    "fault-latency": (True, "", "", "latency"),
+    "fault-timeout": (False, "provider", "timeout", "timeout"),
+    "fault-http": (False, "provider", "http_5xx", "http_error"),
+    "fault-malformed": (False, "provider", "malformed_response", "malformed_response"),
+    "fault-rate-limit": (False, "provider", "rate_limited", "rate_limit"),
+    "fault-tool": (False, "tool", "injected_tool_error", "tool_error"),
+    "fault-quality": (False, "evaluation", "assertion_failed", ""),
+}
+assert set(fault_cases) == set(expected_faults), fault_page
+for case_id, expected in expected_faults.items():
+    case = fault_cases[case_id]
+    actual = (
+        case["success"],
+        case.get("failure_category", ""),
+        case.get("error_code", ""),
+        case["attempts"][0].get("injected_fault", ""),
+    )
+    assert actual == expected, case
+malformed = fault_cases["fault-malformed"]
+assert (malformed["input_tokens"], malformed["output_tokens"]) == (11, 7), malformed
+assert malformed["cost_usd"] == "0.000050000000", malformed
+
+default_cases = by_case(retry_default_page)
+assert retry_default["summary"]["total"] == 4, retry_default
+assert retry_default["summary"]["succeeded"] == 1, retry_default
+assert retry_default["summary"]["infrastructure_failures"] == 3, retry_default
+assert retry_default["summary"]["attempt_count"] == 5, retry_default
+assert retry_default["summary"]["retry_count"] == 1, retry_default
+assert retry_default["summary"]["retried_cases"] == 1, retry_default
+assert retry_default["summary"]["retry_successes"] == 1, retry_default
+assert retry_default["summary"]["retry_success_rate"] == 1, retry_default
+assert len(default_cases["retry-rate-limit"]["attempts"]) == 2, default_cases
+assert default_cases["retry-rate-limit"]["attempts"][0]["retry_decision"] == "retry_safe", default_cases
+for case_id in ("retry-timeout", "retry-http", "retry-malformed"):
+    case = default_cases[case_id]
+    assert len(case["attempts"]) == 1, case
+    assert case["attempts"][0]["retry_decision"] == "ambiguous_blocked", case
+
+ambiguous_cases = by_case(retry_ambiguous_page)
+assert retry_ambiguous["summary"]["total"] == 4, retry_ambiguous
+assert retry_ambiguous["summary"]["succeeded"] == 4, retry_ambiguous
+assert retry_ambiguous["summary"]["attempt_count"] == 8, retry_ambiguous
+assert retry_ambiguous["summary"]["retry_count"] == 4, retry_ambiguous
+assert retry_ambiguous["summary"]["retried_cases"] == 4, retry_ambiguous
+assert retry_ambiguous["summary"]["retry_successes"] == 4, retry_ambiguous
+assert retry_ambiguous["summary"]["retry_success_rate"] == 1, retry_ambiguous
+assert (retry_ambiguous["summary"]["input_tokens"], retry_ambiguous["summary"]["output_tokens"]) == (55, 35), retry_ambiguous
+assert retry_ambiguous["summary"]["cost_usd"] == "0.000250000000", retry_ambiguous
+for case in ambiguous_cases.values():
+    assert len(case["attempts"]) == 2, case
+assert ambiguous_cases["retry-malformed"]["cost_usd"] == "0.000100000000", ambiguous_cases
+
+
+def injection_map(page):
+    return {
+        (item["case_id"], item["iteration"]): item["attempts"][0].get("injected_fault", "")
+        for item in page["cases"]
+    }
+
+
+selected_a = injection_map(deterministic_a_page)
+selected_b = injection_map(deterministic_b_page)
+assert selected_a == selected_b, (selected_a, selected_b)
+assert 0 < sum(bool(value) for value in selected_a.values()) < len(selected_a), selected_a
+assert deterministic_a["registration"]["reliability"]["scenario"]["digest"] == deterministic_b["registration"]["reliability"]["scenario"]["digest"], (deterministic_a, deterministic_b)
+
+assert circuit["summary"]["total"] == 100, circuit
+assert circuit["summary"]["attempt_count"] == 100, circuit
+assert circuit["summary"]["injected_faults"] == 1, circuit
+assert circuit["summary"]["circuit_rejections"] > 0, circuit
+assert len(circuit_page["cases"]) == 100, circuit_page
+circuit_events = {
+    event
+    for case in circuit_page["cases"]
+    for attempt in case["attempts"]
+    for event in attempt.get("circuit_events", [])
+}
+assert {"open", "reject", "half_open", "close"} <= circuit_events, circuit_events
+PY
+fi
 
 if [[ "$telemetry_e2e" == "true" ]]; then
   python3 - "$test_dir/metrics.txt" "$baseline_id" "$candidate_id" "$write_token" "$read_token" <<'PY'
@@ -682,6 +1076,12 @@ for name in (
     "agentstorm_result_api_cases_total",
     "agentstorm_result_api_tokens_total",
     "agentstorm_result_api_cost_usd_total",
+    "agentstorm_result_api_case_failures_total",
+    "agentstorm_result_api_attempts_total",
+    "agentstorm_result_api_retry_decisions_total",
+    "agentstorm_result_api_retries_total",
+    "agentstorm_result_api_injected_faults_total",
+    "agentstorm_result_api_circuit_events_total",
 ):
     assert name in metrics, name
 for forbidden in sys.argv[2:]:
@@ -692,7 +1092,7 @@ PY
 
   collector_logs=""
   for attempt in {1..30}; do
-    collector_logs="$("${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-otel-collector --tail=2000)"
+    collector_logs="$("${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-otel-collector)"
     if [[ "$collector_logs" == *agentstorm.run* && "$collector_logs" == *gen_ai.invoke_agent* && "$collector_logs" == *'[REDACTED]'* && "$collector_logs" == *team-blue* ]]; then
       break
     fi
@@ -858,6 +1258,10 @@ expected_rules = {
     "agentstorm:result_api_http_errors:ratio5m",
     "agentstorm:result_api_http_request_duration:p95_5m",
     "agentstorm:result_api_cost_usd:rate5m",
+    "agentstorm:result_api_case_failures:rate5m",
+    "agentstorm:result_api_retry_success:ratio5m",
+    "agentstorm:result_api_injected_faults:rate5m",
+    "agentstorm:result_api_circuit_events:rate5m",
 }
 assert expected_rules <= recording_rules.keys(), recording_rules
 assert all(recording_rules[name] == "ok" for name in expected_rules), recording_rules
@@ -886,6 +1290,10 @@ for title in (
     "Selected trace",
     "Result API P95 latency",
     "Estimated USD cost",
+    "Failure categories",
+    "Retry effectiveness",
+    "Injected vs observed faults",
+    "Circuit events",
 ):
     assert title in panels, title
 assert "agentstorm.case.success = false" in panels["Failed cases for Run ID"]["targets"][0]["query"]
@@ -922,4 +1330,4 @@ assert prometheus.get("data", {}).get("result"), prometheus
 PY
 fi
 
-echo "AgentStorm result-stack E2E passed: context=$kube_context baseline=$baseline_id candidate=$candidate_id failure=$failure_id result_api_image=$result_api_image telemetry=$telemetry_e2e"
+echo "AgentStorm result-stack E2E passed: context=$kube_context baseline=$baseline_id candidate=$candidate_id failure=$failure_id result_api_image=$result_api_image telemetry=$telemetry_e2e reliability=$reliability_e2e"
