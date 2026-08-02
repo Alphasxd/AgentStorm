@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-tempo
+  labels:
+    app.kubernetes.io/name: agentstorm-tempo
+    app.kubernetes.io/part-of: agentstorm-observability
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            http:
+              endpoint: 0.0.0.0:4318
+    ingester:
+      max_block_duration: 1m
+    compactor:
+      compaction:
+        block_retention: 24h
+    storage:
+      trace:
+        backend: local
+        wal:
+          path: /var/tempo/wal
+        local:
+          path: /var/tempo/blocks
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentstorm-tempo
+  labels:
+    app.kubernetes.io/name: agentstorm-tempo
+    app.kubernetes.io/part-of: agentstorm-observability
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentstorm-tempo
+  labels:
+    app.kubernetes.io/name: agentstorm-tempo
+    app.kubernetes.io/part-of: agentstorm-observability
+spec:
+  selector:
+    app.kubernetes.io/name: agentstorm-tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: http
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentstorm-tempo
+  labels:
+    app.kubernetes.io/name: agentstorm-tempo
+    app.kubernetes.io/part-of: agentstorm-observability
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentstorm-tempo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentstorm-tempo
+        app.kubernetes.io/part-of: agentstorm-observability
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tempo
+          image: grafana/tempo@sha256:ee21727732c7a7199cb71c3eee9153bbf23f9b0b87619f0555a0cf21a67f1a33
+          imagePullPolicy: IfNotPresent
+          args: [-config.file=/etc/tempo/tempo.yaml]
+          ports:
+            - name: http
+              containerPort: 3200
+            - name: otlp-http
+              containerPort: 4318
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+              readOnly: true
+            - name: storage
+              mountPath: /var/tempo
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: agentstorm-tempo
+        - name: storage
+          persistentVolumeClaim:
+            claimName: agentstorm-tempo
+        - name: temporary
+          emptyDir: {}

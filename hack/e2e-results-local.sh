@@ -15,11 +15,14 @@ worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 result_api_image="${RESULT_API_IMAGE:-agentstorm-result-api:dev}"
 wait_timeout="${E2E_TIMEOUT:-180s}"
 local_port="${RESULT_API_LOCAL_PORT:-18080}"
+tempo_local_port="${TEMPO_LOCAL_PORT:-13200}"
+prometheus_local_port="${PROMETHEUS_LOCAL_PORT:-19090}"
+grafana_local_port="${GRAFANA_LOCAL_PORT:-13000}"
 kubectl_bin="${KUBECTL:-kubectl}"
 docker_bin="${DOCKER:-docker}"
 kind_bin="${KIND:-kind}"
 test_dir=""
-port_forward_pid=""
+port_forward_pids=()
 write_token=""
 read_token=""
 postgres_password=""
@@ -115,12 +118,22 @@ esac
 kubectl_cmd=("$kubectl_bin" --context "$kube_context")
 test_dir="$(mktemp -d)"
 
-stop_port_forward() {
-  if [[ -n "$port_forward_pid" ]]; then
-    kill "$port_forward_pid" >/dev/null 2>&1 || true
-    wait "$port_forward_pid" >/dev/null 2>&1 || true
-    port_forward_pid=""
-  fi
+stop_port_forwards() {
+  for pid in "${port_forward_pids[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+  port_forward_pids=()
+}
+
+start_port_forward() {
+  service_name="$1"
+  local_service_port="$2"
+  remote_service_port="$3"
+  log_name="$4"
+  "${kubectl_cmd[@]}" port-forward -n "$e2e_namespace" "service/$service_name" \
+    "$local_service_port:$remote_service_port" >"$test_dir/$log_name-port-forward.log" 2>&1 &
+  port_forward_pids+=("$!")
 }
 
 delete_run() {
@@ -165,7 +178,7 @@ create_auth_secret() {
 }
 
 cleanup_stack() {
-  stop_port_forward
+  stop_port_forwards
   rm -rf -- "$test_dir"
   if [[ "$keep_resources" == "true" ]]; then
     return
@@ -175,14 +188,22 @@ cleanup_stack() {
     agentstorm-results-secret-gate \
     agentstorm-results-baseline \
     agentstorm-results-candidate \
+    agentstorm-results-failure \
     agentstorm-results-reference; do
     delete_run "$run_name" || true
   done
   "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset -n "$e2e_namespace" --ignore-not-found >/dev/null || true
-  "${kubectl_cmd[@]}" delete deployment agentstorm-result-api agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete deployment agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
+    -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete service agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
+    -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete configmap agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus \
+    agentstorm-grafana-provisioning agentstorm-grafana-dashboard -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete pvc agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
+    -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete statefulset agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null || true
-  "${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null || true
-  "${kubectl_cmd[@]}" delete configmap agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+  "${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete networkpolicy agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete pvc -n "$e2e_namespace" -l app.kubernetes.io/part-of=agentstorm-results --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete secret -n "$e2e_namespace" -l app.kubernetes.io/managed-by=agentstorm-e2e,app.kubernetes.io/part-of=agentstorm-results --ignore-not-found >/dev/null || true
@@ -201,6 +222,9 @@ diagnostics() {
   "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-controller --tail=200 >&2 || true
   "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-result-api --tail=200 >&2 || true
   "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-otel-collector --tail=200 >&2 || true
+  "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-tempo --tail=200 >&2 || true
+  "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-prometheus --tail=200 >&2 || true
+  "${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-grafana --tail=200 >&2 || true
   exit "$exit_code"
 }
 trap diagnostics ERR
@@ -217,6 +241,7 @@ for run_name in \
   agentstorm-results-secret-gate \
   agentstorm-results-baseline \
   agentstorm-results-candidate \
+  agentstorm-results-failure \
   agentstorm-results-reference; do
   delete_run "$run_name"
 done
@@ -226,10 +251,15 @@ done
 # a retained PVC can never be paired with a newly generated password on a later E2E invocation.
 assert_secret_is_managed agentstorm-result-storage
 assert_secret_is_managed agentstorm-result-auth
-"${kubectl_cmd[@]}" delete deployment agentstorm-result-api agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
+"${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
+"${kubectl_cmd[@]}" delete deployment agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
+  -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
+"${kubectl_cmd[@]}" delete service agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
+  -n "$e2e_namespace" --ignore-not-found >/dev/null
+"${kubectl_cmd[@]}" delete configmap agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus \
+  agentstorm-grafana-provisioning agentstorm-grafana-dashboard -n "$e2e_namespace" --ignore-not-found >/dev/null
 "${kubectl_cmd[@]}" delete statefulset agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found --wait=true >/dev/null
-"${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null
-"${kubectl_cmd[@]}" delete configmap agentstorm-otel-collector -n "$e2e_namespace" --ignore-not-found >/dev/null
+"${kubectl_cmd[@]}" delete service agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null
 "${kubectl_cmd[@]}" delete networkpolicy agentstorm-result-api agentstorm-postgres agentstorm-minio -n "$e2e_namespace" --ignore-not-found >/dev/null
 "${kubectl_cmd[@]}" delete pvc -n "$e2e_namespace" -l app.kubernetes.io/part-of=agentstorm-results --ignore-not-found --wait=true >/dev/null
 delete_managed_secret agentstorm-result-storage
@@ -255,11 +285,17 @@ fi
 "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-result-api -n "$e2e_namespace" >/dev/null
 if [[ "$telemetry_e2e" == "true" ]]; then
   "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-otel-collector -n "$e2e_namespace" >/dev/null
+  "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-tempo -n "$e2e_namespace" >/dev/null
+  "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-prometheus -n "$e2e_namespace" >/dev/null
+  "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-grafana -n "$e2e_namespace" >/dev/null
 fi
 "${kubectl_cmd[@]}" rollout status statefulset/agentstorm-postgres -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" rollout status statefulset/agentstorm-minio -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" rollout status deployment/agentstorm-result-api -n "$e2e_namespace" --timeout="$wait_timeout"
 if [[ "$telemetry_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" rollout status deployment/agentstorm-tempo -n "$e2e_namespace" --timeout="$wait_timeout"
+  "${kubectl_cmd[@]}" rollout status deployment/agentstorm-prometheus -n "$e2e_namespace" --timeout="$wait_timeout"
+  "${kubectl_cmd[@]}" rollout status deployment/agentstorm-grafana -n "$e2e_namespace" --timeout="$wait_timeout"
   "${kubectl_cmd[@]}" rollout status deployment/agentstorm-otel-collector -n "$e2e_namespace" --timeout="$wait_timeout"
 fi
 "${kubectl_cmd[@]}" rollout status deployment/agentstorm-controller -n "$e2e_namespace" --timeout="$wait_timeout"
@@ -274,6 +310,8 @@ data:
   cases.jsonl: |
     {"id":"case-a","input":"alpha","expected_contains":"alpha"}
     {"id":"case-b","input":"beta","expected_contains":"beta"}
+  failed.jsonl: |
+    {"id":"case-failure","input":"gamma","expected_contains":"never-redacted-value"}
 YAML
 
 # The running API keeps its already-resolved credentials, while the controller must gate new Jobs
@@ -346,14 +384,45 @@ spec:
 YAML
 }
 
+create_failure_run() {
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-results-failure
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: failed.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 120
+  evaluation:
+    minSuccessRate: 0
+    maxErrorRate: 1
+    maxP95LatencyMs: 1000
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
 create_run agentstorm-results-baseline
 create_run agentstorm-results-candidate
+create_failure_run
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-baseline -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-candidate -n "$e2e_namespace" --timeout="$wait_timeout"
+"${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-failure -n "$e2e_namespace" --timeout="$wait_timeout"
 
 baseline_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-baseline -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 candidate_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-candidate -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
-if [[ -z "$baseline_id" || -z "$candidate_id" || "$baseline_id" == "$candidate_id" ]]; then
+failure_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-failure -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+if [[ -z "$baseline_id" || -z "$candidate_id" || -z "$failure_id" || "$baseline_id" == "$candidate_id" ]]; then
   echo "invalid durable run identifiers" >&2
   exit 1
 fi
@@ -366,15 +435,14 @@ case "$worker_config" in
     ;;
 esac
 
-"${kubectl_cmd[@]}" port-forward -n "$e2e_namespace" service/agentstorm-result-api "$local_port:8080" >"$test_dir/port-forward.log" 2>&1 &
-port_forward_pid=$!
+start_port_forward agentstorm-result-api "$local_port" 8080 result-api
 base_url="http://127.0.0.1:$local_port"
 for attempt in {1..30}; do
   if curl --fail --silent "$base_url/readyz" >/dev/null; then
     break
   fi
   if [[ "$attempt" == "30" ]]; then
-    sed -n '1,80p' "$test_dir/port-forward.log" >&2
+    sed -n '1,80p' "$test_dir/result-api-port-forward.log" >&2
     exit 1
   fi
   sleep 1
@@ -385,23 +453,30 @@ curl --fail --silent --header "Authorization: Bearer $read_token" \
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$candidate_id" >"$test_dir/candidate.json"
 curl --fail --silent --header "Authorization: Bearer $read_token" \
+  "$base_url/v1/runs/$failure_id" >"$test_dir/failure.json"
+curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$baseline_id/cases?limit=10" >"$test_dir/baseline-cases.json"
+curl --fail --silent --header "Authorization: Bearer $read_token" \
+  "$base_url/v1/runs/$failure_id/cases?failed=true&limit=10" >"$test_dir/failure-cases.json"
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/comparisons?baseline=$baseline_id&candidate=$candidate_id" >"$test_dir/comparison.json"
 if [[ "$telemetry_e2e" == "true" ]]; then
   curl --fail --silent "$base_url/metrics" >"$test_dir/metrics.txt"
 fi
 
-python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/baseline-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" <<'PY'
+python3 - "$test_dir/baseline.json" "$test_dir/candidate.json" "$test_dir/failure.json" "$test_dir/baseline-cases.json" "$test_dir/failure-cases.json" "$test_dir/comparison.json" "$baseline_id" "$candidate_id" "$failure_id" <<'PY'
 import json
 import sys
 
 baseline = json.load(open(sys.argv[1], encoding="utf-8"))
 candidate = json.load(open(sys.argv[2], encoding="utf-8"))
-cases = json.load(open(sys.argv[3], encoding="utf-8"))
-comparison = json.load(open(sys.argv[4], encoding="utf-8"))
-baseline_id = sys.argv[5]
-candidate_id = sys.argv[6]
+failure = json.load(open(sys.argv[3], encoding="utf-8"))
+cases = json.load(open(sys.argv[4], encoding="utf-8"))
+failure_cases = json.load(open(sys.argv[5], encoding="utf-8"))
+comparison = json.load(open(sys.argv[6], encoding="utf-8"))
+baseline_id = sys.argv[7]
+candidate_id = sys.argv[8]
+failure_id = sys.argv[9]
 
 for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["id"] == run_id, run
@@ -412,10 +487,21 @@ for run, run_id in ((baseline, baseline_id), (candidate, candidate_id)):
     assert run["summary"]["succeeded"] == 2, run
     assert run["summary"]["failed"] == 0, run
 
+assert failure["id"] == failure_id, failure
+assert failure["status"] == "complete", failure
+assert failure["summary"]["total"] == 1, failure
+assert failure["summary"]["succeeded"] == 0, failure
+assert failure["summary"]["failed"] == 1, failure
+
 assert len(cases["cases"]) == 2, cases
 for case in cases["cases"]:
     assert "output" not in case, case
     assert "error" not in case, case
+
+assert len(failure_cases["cases"]) == 1, failure_cases
+assert failure_cases["cases"][0]["failure_kind"] == "assertion", failure_cases
+assert "output" not in failure_cases["cases"][0], failure_cases
+assert "error" not in failure_cases["cases"][0], failure_cases
 
 assert comparison["baseline_id"] == baseline_id, comparison
 assert comparison["candidate_id"] == candidate_id, comparison
@@ -465,12 +551,164 @@ PY
       exit 1
     fi
   done
-  for sensitive_value in alpha beta; do
+  for sensitive_value in alpha beta gamma never-redacted-value; do
     if [[ "$collector_logs" == *"$sensitive_value"* ]]; then
       echo "collector logs contain default-redacted dataset content" >&2
       exit 1
     fi
   done
+
+  start_port_forward agentstorm-tempo "$tempo_local_port" 3200 tempo
+  start_port_forward agentstorm-prometheus "$prometheus_local_port" 9090 prometheus
+  start_port_forward agentstorm-grafana "$grafana_local_port" 3000 grafana
+  tempo_base_url="http://127.0.0.1:$tempo_local_port"
+  prometheus_base_url="http://127.0.0.1:$prometheus_local_port"
+  grafana_base_url="http://127.0.0.1:$grafana_local_port"
+  for endpoint in \
+    "$tempo_base_url/ready" \
+    "$prometheus_base_url/-/ready" \
+    "$grafana_base_url/api/health"; do
+    for attempt in {1..30}; do
+      if curl --fail --silent "$endpoint" >/dev/null; then
+        break
+      fi
+      if [[ "$attempt" == "30" ]]; then
+        echo "timed out waiting for observability endpoint $endpoint" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+  done
+
+  for attempt in {1..30}; do
+    curl --fail --silent --get \
+      --data-urlencode 'query=agentstorm_result_api_cases_total' \
+      "$prometheus_base_url/api/v1/query" >"$test_dir/prometheus-query.json"
+    if python3 - "$test_dir/prometheus-query.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if payload.get("status") == "success" and payload.get("data", {}).get("result") else 1)
+PY
+    then
+      break
+    fi
+    if [[ "$attempt" == "30" ]]; then
+      echo "Prometheus did not scrape Result API metrics" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  curl --fail --silent --get --data-urlencode 'type=record' \
+    "$prometheus_base_url/api/v1/rules" >"$test_dir/prometheus-rules.json"
+
+  failed_trace_query="{ span.agentstorm.run.id = \"$failure_id\" && name = \"agentstorm.case\" && span.agentstorm.case.success = false }"
+  for attempt in {1..60}; do
+    curl --fail --silent --get --data-urlencode "q=$failed_trace_query" \
+      --data-urlencode 'limit=20' "$tempo_base_url/api/search" >"$test_dir/tempo-search.json"
+    if python3 - "$test_dir/tempo-search.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if payload.get("traces") else 1)
+PY
+    then
+      break
+    fi
+    if [[ "$attempt" == "60" ]]; then
+      echo "Tempo did not return the failed-case trace" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  failed_trace_id="$(python3 - "$test_dir/tempo-search.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+print(payload["traces"][0]["traceID"])
+PY
+)"
+  curl --fail --silent "$tempo_base_url/api/traces/$failed_trace_id" >"$test_dir/tempo-trace.json"
+  curl --fail --silent "$grafana_base_url/api/dashboards/uid/agentstorm-observability" >"$test_dir/grafana-dashboard.json"
+
+  python3 - \
+    "$test_dir/prometheus-query.json" \
+    "$test_dir/prometheus-rules.json" \
+    "$test_dir/tempo-trace.json" \
+    "$test_dir/grafana-dashboard.json" <<'PY'
+import json
+import pathlib
+import sys
+
+prometheus = json.load(open(sys.argv[1], encoding="utf-8"))
+assert prometheus["status"] == "success", prometheus
+assert prometheus["data"]["result"], prometheus
+
+rules = json.load(open(sys.argv[2], encoding="utf-8"))
+assert rules["status"] == "success", rules
+recording_rules = {
+    rule["name"]: rule["health"]
+    for group in rules["data"]["groups"]
+    for rule in group["rules"]
+}
+expected_rules = {
+    "agentstorm:result_api_http_requests:rate5m",
+    "agentstorm:result_api_http_errors:ratio5m",
+    "agentstorm:result_api_http_request_duration:p95_5m",
+}
+assert expected_rules <= recording_rules.keys(), recording_rules
+assert all(recording_rules[name] == "ok" for name in expected_rules), recording_rules
+
+trace = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+for forbidden in ("alpha", "beta", "gamma", "never-redacted-value"):
+    assert forbidden not in trace, forbidden
+
+grafana = json.load(open(sys.argv[4], encoding="utf-8"))["dashboard"]
+assert grafana["uid"] == "agentstorm-observability", grafana
+assert {item["name"] for item in grafana["templating"]["list"]} == {"run_id", "trace_id"}, grafana
+panels = {panel["title"]: panel for panel in grafana["panels"]}
+for title in (
+    "Failed cases for Run ID",
+    "Provider errors for Run ID",
+    "Selected trace",
+    "Result API P95 latency",
+):
+    assert title in panels, title
+assert "agentstorm.case.success = false" in panels["Failed cases for Run ID"]["targets"][0]["query"]
+assert "status = error" in panels["Provider errors for Run ID"]["targets"][0]["query"]
+PY
+
+  stop_port_forwards
+  "${kubectl_cmd[@]}" rollout restart deployment/agentstorm-tempo deployment/agentstorm-prometheus -n "$e2e_namespace" >/dev/null
+  "${kubectl_cmd[@]}" rollout status deployment/agentstorm-tempo -n "$e2e_namespace" --timeout="$wait_timeout"
+  "${kubectl_cmd[@]}" rollout status deployment/agentstorm-prometheus -n "$e2e_namespace" --timeout="$wait_timeout"
+  start_port_forward agentstorm-tempo "$tempo_local_port" 3200 tempo-restarted
+  start_port_forward agentstorm-prometheus "$prometheus_local_port" 9090 prometheus-restarted
+  for attempt in {1..30}; do
+    if curl --fail --silent "$tempo_base_url/api/traces/$failed_trace_id" >"$test_dir/tempo-trace-restarted.json" && \
+      curl --fail --silent --get --data-urlencode 'query=agentstorm_result_api_cases_total' \
+        "$prometheus_base_url/api/v1/query" >"$test_dir/prometheus-query-restarted.json"; then
+      break
+    fi
+    if [[ "$attempt" == "30" ]]; then
+      echo "persistent telemetry was unavailable after backend restart" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  python3 - "$test_dir/tempo-trace-restarted.json" "$test_dir/prometheus-query-restarted.json" <<'PY'
+import json
+import sys
+
+trace = json.load(open(sys.argv[1], encoding="utf-8"))
+assert trace.get("batches"), trace
+prometheus = json.load(open(sys.argv[2], encoding="utf-8"))
+assert prometheus.get("status") == "success", prometheus
+assert prometheus.get("data", {}).get("result"), prometheus
+PY
 fi
 
-echo "AgentStorm result-stack E2E passed: context=$kube_context baseline=$baseline_id candidate=$candidate_id result_api_image=$result_api_image telemetry=$telemetry_e2e"
+echo "AgentStorm result-stack E2E passed: context=$kube_context baseline=$baseline_id candidate=$candidate_id failure=$failure_id result_api_image=$result_api_image telemetry=$telemetry_e2e"

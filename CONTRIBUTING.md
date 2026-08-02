@@ -37,14 +37,17 @@ This command first runs the ordinary namespace-scoped controller E2E, then build
 current Result API, deploys the development-only PostgreSQL/MinIO overlay, checks Result API Secret
 gating, runs two concurrent two-shard workloads, and verifies durable run, case, and comparison
 queries. Source-image runs also deploy a development-only OpenTelemetry Collector, verify worker
-run/case/provider/evaluator spans, query the Result API Prometheus endpoint, and assert that test
-prompts, case IDs, run IDs, and bearer tokens are absent from the relevant telemetry surface. Its
+run/case/provider/evaluator spans, persist them in Tempo, scrape Result API metrics into Prometheus,
+and load the provisioned Grafana dashboard. The E2E queries a deterministic failed-case trace,
+validates recording rules and dashboard drill-down queries, restarts Tempo and Prometheus to prove
+PVC recovery, and asserts that prompts and expected values are absent from traces while case IDs,
+run IDs, and bearer tokens are absent from Prometheus labels. Its
 `agentstorm-result-storage` and `agentstorm-result-auth` Secrets contain test-only values, are labeled
 `app.kubernetes.io/managed-by=agentstorm-e2e`, and never replace Secrets without that label. The
 result E2E explicitly disables NetworkPolicies only in its local compatibility overlay because some
 nested kind/OrbStack CNI combinations mis-handle standard port-only rules; the normal namespace E2E
 and public `config/results` manifest retain those policies. Set `KEEP_E2E_RESOURCES=false` to delete
-the result stack and its PVCs after the check.
+the result and observability stacks and their PVCs after the check.
 
 Changes to the CRD must update all of the following in one pull request:
 

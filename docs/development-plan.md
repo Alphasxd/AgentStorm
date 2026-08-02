@@ -64,20 +64,22 @@ single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation,
   - [ ] Add provider-independent tool and handoff lifecycle events and spans.
 - Export RED metrics and token/cost counters to Prometheus.
   - [x] Export bounded Result API RED, ingestion, case-result, and Token metrics.
-  - [ ] Add provider cost configuration, recording rules, and persistent dashboards.
+  - [x] Add Result API recording rules and a persistent development dashboard stack.
+  - [ ] Add provider cost configuration and counters.
 - Add assertion plugins: JSON schema, exact/contains/regex, tool path, latency, and custom Python.
 - Integrate Promptfoo as an optional external evaluator rather than coupling its internals.
 - Add redaction controls for prompts, outputs, tool arguments, and trace attributes.
 
 Acceptance criteria:
 
-- A Grafana dashboard can drill from a run into failed cases and provider errors.
-- Deterministic assertions work without an LLM judge.
-- Sensitive content is absent from default traces and logs.
+- [x] A Grafana dashboard can drill from a run into failed cases and provider errors.
+- [x] Deterministic assertions work without an LLM judge.
+- [x] Sensitive content is absent from default traces and logs.
 
-The first M3 foundation is implemented but M3 remains open. `config/dev/telemetry` verifies OTLP
-export and Prometheus exposition without retaining trace content. A persistent backend and Grafana
-drill-down remain necessary before the milestone acceptance criteria can be checked.
+The M3 observability acceptance path is implemented, but M3 remains open while tool/handoff spans,
+provider cost accounting, assertion plugins, optional Promptfoo integration, and configurable
+redaction controls remain unfinished. `config/dev/telemetry` runs single-replica Tempo, Prometheus,
+and Grafana workloads for local evaluation; they are not a production HA topology.
 
 ## M4: Fault injection and reliability testing
 

@@ -1,0 +1,24 @@
+apiVersion: 1
+prune: true
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://agentstorm-prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 2s
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://agentstorm-tempo:3200
+    editable: false
+    jsonData:
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false

@@ -4,6 +4,21 @@ namespace: agentstorm-system
 resources:
   - ../results
   - collector.yaml
+  - tempo.yaml
+  - prometheus.yaml
+  - grafana.yaml
+configMapGenerator:
+  - name: agentstorm-grafana-provisioning
+    files:
+      - datasources.yaml=grafana/datasources.yaml
+      - dashboards.yaml=grafana/dashboards.yaml
+  - name: agentstorm-grafana-dashboard
+    files:
+      - agentstorm-observability.json=grafana/agentstorm-observability.json
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/part-of: agentstorm-observability
 patches:
   - target:
       group: apps
