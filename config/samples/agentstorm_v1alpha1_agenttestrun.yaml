@@ -29,6 +29,8 @@ spec:
     minSuccessRate: 1
     maxErrorRate: 0
     maxP95LatencyMs: 1000
+  telemetry:
+    contentMode: omit
   runner:
     image: ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74
     imagePullPolicy: IfNotPresent

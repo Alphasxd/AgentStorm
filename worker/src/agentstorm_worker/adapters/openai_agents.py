@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 from typing import Any
 
 from ..models import AdapterResponse, TestCase
@@ -38,7 +39,6 @@ def _lifecycle_hooks(base: type[Any], lifecycle: AgentLifecycle) -> object:
         async def on_tool_end(
             self, context: object, agent: object, tool: object, result: object
         ) -> None:
-            del result
             key = (id(context), id(tool))
             event = self._tools.pop(key, None)
             if event is None:
@@ -50,7 +50,7 @@ def _lifecycle_hooks(base: type[Any], lifecycle: AgentLifecycle) -> object:
                     agent_name=_named(agent, type(agent).__name__),
                 )
                 lifecycle.tool_started(event)
-            lifecycle.tool_finished(event)
+            lifecycle.tool_finished(replace(event, result=result))
 
         async def on_handoff(
             self, context: object, from_agent: object, to_agent: object

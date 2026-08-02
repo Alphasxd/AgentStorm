@@ -52,12 +52,41 @@ adapter boundary. Its SDK-native tracing is also forced to omit sensitive LLM an
 no-cost fake adapter emits a deterministic synthetic tool and handoff so the cluster E2E can verify
 this trace shape without an API key.
 
-Prompt text, model output, expected values, tool arguments/results, handoff input, and exception
-messages are never added to default spans or lifecycle events. Exceptions record only their type.
-OpenTelemetry automatic exception recording is explicitly disabled so an exporter cannot recover an
-error body through the standard exception event. Arbitrary shell, browser, hosted, and MCP tool
-execution remains outside the alpha worker's sandbox boundary; their trace mapping should be added
-with the execution policy that enables those tools.
+`spec.telemetry.contentMode` defaults to `omit`. In that mode prompt text, model output, expected
+values, tool arguments/results, dataset metadata, handoff input, and exception messages never enter
+spans. Exceptions record only their type. OpenTelemetry automatic exception recording is explicitly
+disabled so an exporter cannot recover an error body through the standard exception event.
+
+Trusted deployments may opt into sanitized content:
+
+```yaml
+spec:
+  telemetry:
+    contentMode: redacted
+    redaction:
+      patterns:
+        - 'customer-[0-9]+@example[.]com'
+      metadataKeys:
+        - tenant
+```
+
+This mode requires both an OTLP endpoint and the controller flag
+`--allow-redacted-telemetry`. Without either gate the run remains `Pending` with
+`TelemetryReady=False`; AgentStorm never silently falls back to a different content policy. The
+development telemetry overlay enables the controller flag explicitly. Production manifests do not.
+
+Before export, AgentStorm recursively removes built-in credential-like keys, replaces every user
+regular-expression match with `[REDACTED]`, applies the same sanitizer to all string attributes, and
+truncates each content attribute on a valid UTF-8 boundary at 2048 bytes. Only explicitly allowlisted
+top-level dataset metadata keys are considered. Exception bodies remain omitted. Tool arguments or
+results are included only when an adapter exposes them through its public lifecycle callback; the
+OpenAI adapter does not inspect SDK-private objects to recover missing arguments. Invalid regular
+expressions fail validation before the Worker Job or Provider call is created. There is no raw mode.
+
+Redaction reduces exposure but cannot prove that an arbitrary pattern set catches every sensitive
+value. Keep the flag disabled unless the trace backend and its operators are trusted. Arbitrary
+shell, browser, hosted, and MCP tool execution remains outside the alpha worker's sandbox boundary;
+their trace mapping should be added with the execution policy that enables those tools.
 
 ## Result API metrics
 
@@ -110,13 +139,15 @@ RUN_ID=$(kubectl -n agentstorm-system get agenttestrun agentstorm-results-failur
 echo "http://127.0.0.1:13000/d/agentstorm-observability/agentstorm-observability?var-run_id=$RUN_ID"
 ```
 
-The E2E creates a deterministic failed case, queries its trace from Tempo, verifies Prometheus
-metrics and recording-rule health, loads the provisioned dashboard through the Grafana API, and then
+The E2E creates a deterministic failed case and an explicitly redacted content case, queries their
+traces from Tempo, verifies Prometheus metrics and recording-rule health, loads the provisioned
+dashboard through the Grafana API, and then
 restarts Tempo and Prometheus to prove both signals remain queryable from their PVCs. It also checks
 the required run/case/provider/tool/handoff/evaluator span hierarchy and confirms that prompts,
 expected values, case IDs, run IDs, and bearer tokens do not enter the wrong telemetry surface:
-correlation IDs remain trace-only, while content and credentials are excluded from both traces and
-metric labels.
+correlation IDs remain trace-only, while default content and credentials are excluded from both
+traces and metric labels. The redacted trace must contain `[REDACTED]` and allowlisted metadata while
+its prompt/output/tool canaries and built-in credential-key canary remain absent.
 
 Published-image smoke tests for releases that predate this interface automatically leave telemetry
 disabled; `ENABLE_TELEMETRY_E2E=true|false` can override that selection.

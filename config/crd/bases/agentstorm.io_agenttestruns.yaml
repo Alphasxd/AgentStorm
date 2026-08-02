@@ -147,6 +147,30 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: evaluation is immutable; create a new AgentTestRun
+                telemetry:
+                  type: object
+                  default: {}
+                  properties:
+                    contentMode:
+                      type: string
+                      enum: [omit, redacted]
+                      default: omit
+                    redaction:
+                      type: object
+                      properties:
+                        patterns:
+                          type: array
+                          maxItems: 20
+                          items:
+                            type: string
+                            maxLength: 256
+                        metadataKeys:
+                          type: array
+                          items:
+                            type: string
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: telemetry is immutable; create a new AgentTestRun
                 runner:
                   type: object
                   required: [image]

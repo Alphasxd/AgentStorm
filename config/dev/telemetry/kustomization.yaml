@@ -29,3 +29,6 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/args/-
         value: --otel-exporter-otlp-endpoint=http://agentstorm-otel-collector:4318
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --allow-redacted-telemetry

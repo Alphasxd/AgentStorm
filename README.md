@@ -8,8 +8,8 @@ latency thresholds.
 > Status: early alpha. Public multi-architecture controller, worker, and Result API images are
 > available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
-> price-snapshot cost accounting, and bounded Prometheus metrics. The development stack persists
-> traces and metrics and provisions Grafana; configurable content redaction, the optional Promptfoo
+> price-snapshot cost accounting, configurable trace redaction, and bounded Prometheus metrics. The
+> development stack persists traces and metrics and provisions Grafana; the optional Promptfoo
 > bridge, fault injection, and autoscaling remain planned.
 
 ## Why this project
@@ -38,7 +38,8 @@ engineering questions that appear after a workflow becomes a service:
 - Hardened worker Pods without ServiceAccount tokens or writable root filesystems.
 - Authenticated, idempotent result ingestion with PostgreSQL metadata, compressed S3 raw shards,
   paginated case queries, and baseline comparisons.
-- Opt-in content-safe worker OpenTelemetry spans and bounded Result API RED/Token/cost metrics.
+- Default-omit worker OpenTelemetry spans with explicitly gated configurable redaction.
+- Bounded Result API RED/Token/cost Prometheus metrics.
 - A development-only persistent Tempo/Prometheus stack with a provisioned Grafana run drill-down.
 
 ## Architecture
@@ -206,8 +207,8 @@ CLUSTER_PROVIDER=kind make e2e-results-local
 The local result overlay lives under `config/dev/results`; `config/dev/telemetry` adds a
 digest-pinned Collector, Tempo, Prometheus, and provisioned Grafana dashboard. Source-image E2E
 persists telemetry to PVCs, proves it remains queryable after backend restarts, and verifies default
-redaction. The E2E uses test-only Secrets and replaces the released AgentStorm component images with
-source-built `:dev` images. See [Result API](docs/result-api.md) and
+omit plus explicitly redacted content. The E2E uses test-only Secrets and replaces the released
+AgentStorm component images with source-built `:dev` images. See [Result API](docs/result-api.md) and
 [observability](docs/observability.md) for the storage and signal contracts.
 
 Deploying either profile removes the other profile's runtime RBAC so permissions cannot accumulate
@@ -239,6 +240,8 @@ spec:
     minSuccessRate: 1
     maxErrorRate: 0
     maxP95LatencyMs: 1000
+  telemetry:
+    contentMode: omit
   runner:
     image: ghcr.io/alphasxd/agentstorm-worker@sha256:01232ba223ff3f2102ce274f126eac0633755888428b263772804dcd72c5be74
     imagePullPolicy: IfNotPresent
@@ -247,8 +250,8 @@ spec:
 Set `spec.cancel: true` to request cancellation. Worker Jobs use `backoffLimit: 0` by default so
 an expensive Agent case is not silently replayed after a pod failure.
 
-An `AgentTestRun` is a one-shot execution record. Its target, workload, evaluation, and runner
-fields are immutable after creation; create another resource to run a changed configuration.
+An `AgentTestRun` is a one-shot execution record. Its target, workload, evaluation, telemetry, and
+runner fields are immutable after creation; create another resource to run a changed configuration.
 
 ## Repository layout
 
@@ -264,7 +267,7 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Finish configurable trace redaction and the optional Promptfoo replay bridge.
+1. Finish the optional Promptfoo replay bridge.
 2. Add controlled fault injection and reliability experiments.
 3. Add KEDA-based queue scaling and resource-aware scheduling.
 4. Publish Helm charts, reproducible benchmarks, and a public demo.

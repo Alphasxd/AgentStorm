@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,18 @@ class EvaluationConfig:
 
 
 @dataclass(frozen=True)
+class TelemetryRedactionConfig:
+    patterns: tuple[str, ...] = ()
+    metadata_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TelemetryConfig:
+    content_mode: str = "omit"
+    redaction: TelemetryRedactionConfig = field(default_factory=TelemetryRedactionConfig)
+
+
+@dataclass(frozen=True)
 class SourceConfig:
     namespace: str
     name: str
@@ -57,6 +69,7 @@ class RunConfig:
     target: TargetConfig
     workload: WorkloadConfig
     evaluation: EvaluationConfig
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
 
 def load_run_config(path: str | Path) -> RunConfig:
@@ -67,6 +80,7 @@ def load_run_config(path: str | Path) -> RunConfig:
     target = raw.get("target", {})
     workload = raw.get("workload", {})
     evaluation = raw.get("evaluation", {})
+    telemetry = raw.get("telemetry", {})
     config = RunConfig(
         run_id=run_id,
         source=SourceConfig(
@@ -95,6 +109,7 @@ def load_run_config(path: str | Path) -> RunConfig:
                 evaluation, "maxP95LatencyMs", "max_p95_latency_ms"
             ),
         ),
+        telemetry=_telemetry(telemetry),
     )
     if config.workload.concurrency < 1 or config.workload.iterations < 1:
         raise ValueError("workload concurrency and iterations must be positive")
@@ -172,6 +187,49 @@ def _pricing(value: Any) -> PricingConfig | None:
     if not isinstance(output_price, str) or not _PRICE_PATTERN.fullmatch(output_price):
         raise ValueError("target.pricing.outputUSDPerMillionTokens must be a non-negative decimal")
     return PricingConfig(input_price, output_price)
+
+
+def _telemetry(value: Any) -> TelemetryConfig:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("telemetry must be an object")
+    content_mode = value.get("contentMode", value.get("content_mode", "omit"))
+    if content_mode not in {"omit", "redacted"}:
+        raise ValueError("telemetry.contentMode must be omit or redacted")
+    redaction = value.get("redaction", {})
+    if redaction is None:
+        redaction = {}
+    if not isinstance(redaction, dict):
+        raise ValueError("telemetry.redaction must be an object")
+    patterns = redaction.get("patterns", [])
+    metadata_keys = redaction.get("metadataKeys", redaction.get("metadata_keys", []))
+    if not isinstance(patterns, list) or len(patterns) > 20:
+        raise ValueError("telemetry.redaction.patterns must be an array of at most 20 entries")
+    parsed_patterns: list[str] = []
+    for index, pattern in enumerate(patterns):
+        if not isinstance(pattern, str) or len(pattern.encode("utf-8")) > 256:
+            raise ValueError(
+                f"telemetry.redaction.patterns[{index}] must be a string of at most 256 bytes"
+            )
+        try:
+            re.compile(pattern)
+        except re.error:
+            raise ValueError(
+                f"telemetry.redaction.patterns[{index}] is invalid"
+            ) from None
+        parsed_patterns.append(pattern)
+    if not isinstance(metadata_keys, list) or not all(
+        isinstance(key, str) and key for key in metadata_keys
+    ):
+        raise ValueError("telemetry.redaction.metadataKeys must be an array of non-empty strings")
+    return TelemetryConfig(
+        content_mode=str(content_mode),
+        redaction=TelemetryRedactionConfig(
+            patterns=tuple(parsed_patterns),
+            metadata_keys=tuple(metadata_keys),
+        ),
+    )
 
 
 def _assertions(value: Any, line_number: int) -> tuple[AssertionSpec, ...]:

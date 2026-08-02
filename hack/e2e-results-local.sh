@@ -198,6 +198,7 @@ cleanup_stack() {
     agentstorm-results-baseline \
     agentstorm-results-candidate \
     agentstorm-results-failure \
+    agentstorm-results-redacted \
     agentstorm-results-reference; do
     delete_run "$run_name" || true
   done
@@ -251,6 +252,7 @@ for run_name in \
   agentstorm-results-baseline \
   agentstorm-results-candidate \
   agentstorm-results-failure \
+  agentstorm-results-redacted \
   agentstorm-results-reference; do
   delete_run "$run_name"
 done
@@ -321,6 +323,8 @@ data:
     {"id":"case-b","input":"beta","expected_contains":"beta"}
   failed.jsonl: |
     {"id":"case-failure","input":"gamma","expected_contains":"never-redacted-value"}
+  redacted.jsonl: |
+    {"id":"case-redacted","input":"contact customer-42@example.com","metadata":{"tenant":{"name":"team-blue","api_key":"metadata-sensitive-canary"},"internal":"internal-canary"}}
 YAML
 
 # The running API keeps its already-resolved credentials, while the controller must gate new Jobs
@@ -426,16 +430,59 @@ spec:
 YAML
 }
 
+create_redacted_run() {
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-results-redacted
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-results-dataset
+      key: redacted.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 120
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+    maxP95LatencyMs: 1000
+  telemetry:
+    contentMode: redacted
+    redaction:
+      patterns: ['customer-[0-9]+@example[.]com']
+      metadataKeys: [tenant]
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
 create_run agentstorm-results-baseline 2.5 10
 create_run agentstorm-results-candidate 5 20
 create_failure_run
+if [[ "$telemetry_e2e" == "true" ]]; then
+  create_redacted_run
+fi
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-baseline -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-candidate -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-failure -n "$e2e_namespace" --timeout="$wait_timeout"
+if [[ "$telemetry_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-redacted -n "$e2e_namespace" --timeout="$wait_timeout"
+fi
 
 baseline_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-baseline -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 candidate_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-candidate -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 failure_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-failure -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+redacted_id=""
+if [[ "$telemetry_e2e" == "true" ]]; then
+  redacted_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-redacted -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+fi
 if [[ -z "$baseline_id" || -z "$candidate_id" || -z "$failure_id" || "$baseline_id" == "$candidate_id" ]]; then
   echo "invalid durable run identifiers" >&2
   exit 1
@@ -560,7 +607,7 @@ PY
   collector_logs=""
   for attempt in {1..30}; do
     collector_logs="$("${kubectl_cmd[@]}" logs -n "$e2e_namespace" deployment/agentstorm-otel-collector --tail=2000)"
-    if [[ "$collector_logs" == *agentstorm.run* && "$collector_logs" == *gen_ai.invoke_agent* ]]; then
+    if [[ "$collector_logs" == *agentstorm.run* && "$collector_logs" == *gen_ai.invoke_agent* && "$collector_logs" == *'[REDACTED]'* && "$collector_logs" == *team-blue* ]]; then
       break
     fi
     if [[ "$attempt" == "30" ]]; then
@@ -584,6 +631,12 @@ PY
   for sensitive_value in alpha beta gamma never-redacted-value; do
     if [[ "$collector_logs" == *"$sensitive_value"* ]]; then
       echo "collector logs contain default-redacted dataset content" >&2
+      exit 1
+    fi
+  done
+  for sensitive_value in customer-42@example.com internal-canary metadata-sensitive-canary; do
+    if [[ "$collector_logs" == *"$sensitive_value"* ]]; then
+      echo "collector logs contain unsanitized redacted-mode content" >&2
       exit 1
     fi
   done
@@ -662,12 +715,42 @@ print(payload["traces"][0]["traceID"])
 PY
 )"
   curl --fail --silent "$tempo_base_url/api/traces/$failed_trace_id" >"$test_dir/tempo-trace.json"
+  redacted_trace_query="{ span.agentstorm.run.id = \"$redacted_id\" && name = \"agentstorm.case\" }"
+  for attempt in {1..60}; do
+    curl --fail --silent --get --data-urlencode "q=$redacted_trace_query" \
+      --data-urlencode 'limit=20' "$tempo_base_url/api/search" >"$test_dir/tempo-redacted-search.json"
+    if python3 - "$test_dir/tempo-redacted-search.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if payload.get("traces") else 1)
+PY
+    then
+      break
+    fi
+    if [[ "$attempt" == "60" ]]; then
+      echo "Tempo did not return the redacted-content trace" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  redacted_trace_id="$(python3 - "$test_dir/tempo-redacted-search.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+print(payload["traces"][0]["traceID"])
+PY
+)"
+  curl --fail --silent "$tempo_base_url/api/traces/$redacted_trace_id" >"$test_dir/tempo-redacted-trace.json"
   curl --fail --silent "$grafana_base_url/api/dashboards/uid/agentstorm-observability" >"$test_dir/grafana-dashboard.json"
 
   python3 - \
     "$test_dir/prometheus-query.json" \
     "$test_dir/prometheus-rules.json" \
     "$test_dir/tempo-trace.json" \
+    "$test_dir/tempo-redacted-trace.json" \
     "$test_dir/grafana-dashboard.json" <<'PY'
 import json
 import pathlib
@@ -697,7 +780,17 @@ trace = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 for forbidden in ("alpha", "beta", "gamma", "never-redacted-value"):
     assert forbidden not in trace, forbidden
 
-grafana = json.load(open(sys.argv[4], encoding="utf-8"))["dashboard"]
+redacted_trace = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+assert "[REDACTED]" in redacted_trace, redacted_trace
+assert "team-blue" in redacted_trace, redacted_trace
+for forbidden in (
+    "customer-42@example.com",
+    "internal-canary",
+    "metadata-sensitive-canary",
+):
+    assert forbidden not in redacted_trace, forbidden
+
+grafana = json.load(open(sys.argv[5], encoding="utf-8"))["dashboard"]
 assert grafana["uid"] == "agentstorm-observability", grafana
 assert {item["name"] for item in grafana["templating"]["list"]} == {"run_id", "trace_id"}, grafana
 panels = {panel["title"]: panel for panel in grafana["panels"]}

@@ -68,7 +68,7 @@ single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation,
   - [x] Add provider cost configuration and counters.
 - [x] Add assertion plugins: JSON schema, exact/contains/regex, tool path, latency, and custom Python.
 - Integrate Promptfoo as an optional external evaluator rather than coupling its internals.
-- Add redaction controls for prompts, outputs, tool arguments, and trace attributes.
+- [x] Add redaction controls for prompts, outputs, tool arguments, and trace attributes.
 
 Acceptance criteria:
 
@@ -78,7 +78,7 @@ Acceptance criteria:
 
 The M3 observability acceptance path, provider-independent local-tool/handoff tracing,
 deterministic assertions, and explicit price-snapshot cost accounting are implemented. M3 remains
-open while optional Promptfoo integration and configurable redaction controls remain unfinished.
+open while the optional Promptfoo integration remains unfinished.
 `config/dev/telemetry` runs single-replica Tempo, Prometheus, and Grafana workloads for local
 evaluation; they are not a production HA topology.
 

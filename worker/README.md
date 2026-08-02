@@ -54,10 +54,13 @@ Local `results.jsonl` files retain their existing detail. Durable uploads omit o
 text unless the sensitive-result switch is explicitly enabled. Tool paths and content-safe assertion
 outcomes are always uploaded; custom assertion messages use the same sensitive-result gate.
 
-Tracing emits run, case, provider-call, local-tool, handoff, and deterministic-evaluator spans. The
-adapter contract exposes content-free lifecycle callbacks; the OpenAI Agents SDK adapter maps its
-run hooks to those callbacks and disables sensitive content in SDK-native tracing. Traces record
-bounded identifiers, provider/model/tool/agent names, timings, outcomes, and token counts, but never
-record prompts, model or tool output, tool arguments, handoff input, expected values, exception
-messages, API keys, or bearer tokens. See
+Tracing emits run, case, provider-call, local-tool, handoff, and deterministic-evaluator spans.
+`telemetry.contentMode` defaults to `omit`, which excludes prompts, model/tool content, dataset
+metadata, expected values, and exception bodies. `redacted` mode adds sanitized prompt, output,
+available tool arguments/results, and explicitly allowlisted metadata. It removes credential-like
+keys, replaces up to 20 configured regular expressions with `[REDACTED]`, and UTF-8-safely truncates
+content attributes to 2048 bytes. The controller requires both an OTLP endpoint and
+`--allow-redacted-telemetry` before it creates a Worker Job in this mode; raw tracing is unsupported.
+The OpenAI Agents SDK adapter disables sensitive SDK-native tracing and does not inspect private SDK
+objects to recover missing tool arguments. See
 [`docs/observability.md`](../docs/observability.md) for the complete contract.

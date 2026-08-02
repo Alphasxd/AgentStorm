@@ -80,6 +80,49 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-negative decimal"):
                 load_run_config(config_path)
 
+    def test_loads_and_validates_telemetry_redaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "run.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {"provider": "fake"},
+                        "telemetry": {
+                            "contentMode": "redacted",
+                            "redaction": {
+                                "patterns": [r"customer-[0-9]+"],
+                                "metadataKeys": ["tenant"],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(config_path)
+            self.assertEqual(config.telemetry.content_mode, "redacted")
+            self.assertEqual(config.telemetry.redaction.patterns, (r"customer-[0-9]+",))
+            self.assertEqual(config.telemetry.redaction.metadata_keys, ("tenant",))
+
+            for patterns, error in (
+                (["("], "is invalid"),
+                (["x" * 257], "at most 256 bytes"),
+                (["x"] * 21, "at most 20 entries"),
+            ):
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "target": {"provider": "fake"},
+                            "telemetry": {
+                                "contentMode": "redacted",
+                                "redaction": {"patterns": patterns},
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, error):
+                    load_run_config(config_path)
+
     def test_rejects_duplicate_case_ids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dataset_path = Path(directory) / "cases.jsonl"

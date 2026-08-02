@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from unittest.mock import patch
 
 from agentstorm_worker.adapters import (
@@ -17,11 +17,18 @@ from agentstorm_worker.config import (
     RunConfig,
     SourceConfig,
     TargetConfig,
+    TelemetryConfig,
+    TelemetryRedactionConfig,
     WorkloadConfig,
 )
 from agentstorm_worker.models import AdapterResponse, TestCase
 from agentstorm_worker.runner import WorkloadRunner
-from agentstorm_worker.telemetry import AttributeValue, NoopTelemetry, telemetry_from_environment
+from agentstorm_worker.telemetry import (
+    AttributeValue,
+    ContentSanitizer,
+    NoopTelemetry,
+    telemetry_from_environment,
+)
 
 
 @dataclass
@@ -100,9 +107,18 @@ class LifecycleAdapter:
             name="safe_lookup",
             call_id="call-1",
             agent_name="triage-agent",
+            arguments={"query": "private tool arguments", "api_key": "tool-secret"},
         )
         lifecycle.tool_started(tool)
-        lifecycle.tool_finished(tool)
+        lifecycle.tool_finished(
+            replace(
+                tool,
+                result={
+                    "answer": "private tool result",
+                    "nested": {"authorization": "Bearer private-token"},
+                },
+            )
+        )
         lifecycle.handed_off(
             HandoffLifecycleEvent(
                 source_agent="triage-agent",
@@ -145,6 +161,26 @@ class TelemetryTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"AGENTSTORM_OTEL_ENABLED": "sometimes"}, clear=True):
             with self.assertRaisesRegex(ValueError, "must be true or false"):
                 telemetry_from_environment()
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "requires OpenTelemetry"):
+                telemetry_from_environment(TelemetryConfig(content_mode="redacted"))
+
+    def test_sanitizer_removes_sensitive_keys_replaces_patterns_and_truncates_utf8(self) -> None:
+        sanitizer = ContentSanitizer((r"customer-[0-9]+",))
+        content = sanitizer.content(
+            {
+                "customer": "customer-42",
+                "api_key": "must-not-appear",
+                "nested": {"access_token": "must-not-appear", "safe": "customer-7"},
+            }
+        )
+        self.assertEqual(
+            content,
+            '{"customer":"[REDACTED]","nested":{"safe":"[REDACTED]"}}',
+        )
+        truncated = sanitizer.string("😀" * 1000)
+        self.assertLessEqual(len(truncated.encode("utf-8")), 2048)
+        self.assertTrue(truncated)
 
     async def test_spans_omit_prompt_output_and_assertion_content(self) -> None:
         telemetry = RecordingTelemetry()
@@ -224,6 +260,67 @@ class TelemetryTest(unittest.IsolatedAsyncioTestCase):
         rendered = repr([(span.attributes, span.errors) for span in telemetry.spans])
         self.assertNotIn("private tool arguments", rendered)
         self.assertNotIn("private tool result", rendered)
+
+    async def test_redacted_mode_sanitizes_prompt_output_tool_metadata_and_attributes(self) -> None:
+        telemetry = RecordingTelemetry()
+        config = replace(
+            test_config(),
+            telemetry=TelemetryConfig(
+                content_mode="redacted",
+                redaction=TelemetryRedactionConfig(
+                    patterns=(r"private|customer-[0-9]+",),
+                    metadata_keys=("allowed", "api_key"),
+                ),
+            ),
+        )
+        runner = WorkloadRunner(config, LifecycleAdapter(), telemetry=telemetry)
+
+        results, _ = await runner.execute(
+            [
+                TestCase(
+                    case_id="private-case",
+                    prompt="customer-42 private prompt",
+                    metadata={
+                        "allowed": {
+                            "display": "private metadata",
+                            "token": "metadata-secret",
+                        },
+                        "ignored": "private ignored metadata",
+                        "api_key": "allowlisted-sensitive-key-canary",
+                    },
+                )
+            ]
+        )
+
+        self.assertTrue(results[0].success)
+        rendered = repr([(span.attributes, span.errors) for span in telemetry.spans])
+        self.assertIn("[REDACTED]", rendered)
+        self.assertIn("agentstorm.content.prompt", rendered)
+        self.assertIn("agentstorm.content.output", rendered)
+        self.assertIn("agentstorm.content.tool.arguments", rendered)
+        self.assertIn("agentstorm.content.tool.result", rendered)
+        self.assertIn("agentstorm.case.metadata.allowed", rendered)
+        for forbidden in (
+            "private",
+            "customer-42",
+            "tool-secret",
+            "private-token",
+            "metadata-secret",
+            "allowlisted-sensitive-key-canary",
+            "ignored",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    async def test_redacted_mode_still_omits_exception_body(self) -> None:
+        telemetry = RecordingTelemetry()
+        config = replace(
+            test_config(), telemetry=TelemetryConfig(content_mode="redacted")
+        )
+        runner = WorkloadRunner(config, FailingAdapter(), telemetry=telemetry)
+        await runner.execute([TestCase(case_id="case-1", prompt="visible prompt")])
+        rendered = repr([(span.attributes, span.errors) for span in telemetry.spans])
+        self.assertNotIn("private provider error body", rendered)
+        self.assertIn("RuntimeError", rendered)
 
     async def test_unfinished_tool_span_closes_with_provider_error_type(self) -> None:
         telemetry = RecordingTelemetry()

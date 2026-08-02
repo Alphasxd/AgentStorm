@@ -34,7 +34,7 @@ async def execute(args: argparse.Namespace) -> int:
 
     shard_index = int(os.getenv("AGENTSTORM_SHARD_INDEX", "0"))
     shard_count = int(os.getenv("AGENTSTORM_SHARD_COUNT", "1"))
-    telemetry = telemetry_from_environment()
+    telemetry = telemetry_from_environment(config.telemetry)
     run_attributes: dict[str, str | int | bool | float] = {
         "agentstorm.run.id": config.run_id,
         "agentstorm.run.namespace": config.source.namespace,
