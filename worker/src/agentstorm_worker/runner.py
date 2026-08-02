@@ -6,10 +6,64 @@ import math
 import time
 from pathlib import Path
 
-from .adapters import AgentAdapter
+from .adapters import (
+    AgentAdapter,
+    AgentLifecycle,
+    HandoffLifecycleEvent,
+    ToolLifecycleEvent,
+)
 from .config import EvaluationConfig, RunConfig
 from .models import CaseResult, RunSummary, TestCase
-from .telemetry import NoopTelemetry, TelemetryClient
+from .telemetry import DetachedTraceSpan, NoopTelemetry, TelemetryClient
+
+
+class _TelemetryLifecycle(AgentLifecycle):
+    def __init__(self, telemetry: TelemetryClient) -> None:
+        self._telemetry = telemetry
+        self._tools: dict[str, DetachedTraceSpan] = {}
+
+    def tool_started(self, event: ToolLifecycleEvent) -> None:
+        previous = self._tools.pop(event.invocation_id, None)
+        if previous is not None:
+            previous.set_error("duplicate_tool_start")
+            previous.end()
+        attributes: dict[str, str | int | bool | float] = {
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": event.name,
+            "gen_ai.tool.type": event.tool_type,
+        }
+        if event.call_id is not None:
+            attributes["gen_ai.tool.call.id"] = event.call_id
+        if event.agent_name is not None:
+            attributes["gen_ai.agent.name"] = event.agent_name
+        self._tools[event.invocation_id] = self._telemetry.start_detached_span(
+            "gen_ai.execute_tool", attributes
+        )
+
+    def tool_finished(self, event: ToolLifecycleEvent, error_type: str = "") -> None:
+        span = self._tools.pop(event.invocation_id, None)
+        if span is None:
+            self.tool_started(event)
+            span = self._tools.pop(event.invocation_id)
+        if error_type:
+            span.set_error(error_type)
+        span.end()
+
+    def handed_off(self, event: HandoffLifecycleEvent) -> None:
+        span = self._telemetry.start_detached_span(
+            "agentstorm.handoff",
+            {
+                "agentstorm.handoff.source_agent": event.source_agent,
+                "agentstorm.handoff.target_agent": event.target_agent,
+            },
+        )
+        span.end()
+
+    def close(self, error_type: str = "incomplete_tool_call") -> None:
+        for span in self._tools.values():
+            span.set_error(error_type)
+            span.end()
+        self._tools.clear()
 
 
 class WorkloadRunner:
@@ -65,6 +119,7 @@ class WorkloadRunner:
             "agentstorm.case.iteration": iteration,
         }
         with self._telemetry.start_span("agentstorm.case", case_attributes) as case_span:
+            lifecycle = _TelemetryLifecycle(self._telemetry)
             try:
                 provider_attributes: dict[str, str | int | bool | float] = {
                     "gen_ai.operation.name": "invoke_agent",
@@ -77,12 +132,14 @@ class WorkloadRunner:
                 ) as provider_span:
                     try:
                         response = await asyncio.wait_for(
-                            self._adapter.run(case),
+                            self._adapter.run(case, lifecycle=lifecycle),
                             timeout=self._config.workload.timeout_seconds,
                         )
                     except Exception as exc:
+                        lifecycle.close(type(exc).__name__)
                         provider_span.set_error(type(exc).__name__)
                         raise
+                    lifecycle.close()
                     if response.input_tokens is not None:
                         provider_span.set_attribute(
                             "gen_ai.usage.input_tokens", response.input_tokens

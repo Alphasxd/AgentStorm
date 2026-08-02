@@ -1,6 +1,69 @@
 from __future__ import annotations
 
+import itertools
+from typing import Any
+
 from ..models import AdapterResponse, TestCase
+from .base import AgentLifecycle, HandoffLifecycleEvent, ToolLifecycleEvent
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _named(value: object, fallback: str) -> str:
+    return _optional_string(getattr(value, "name", None)) or fallback
+
+
+def _lifecycle_hooks(base: type[Any], lifecycle: AgentLifecycle) -> object:
+    class LifecycleHooks(base):
+        def __init__(self) -> None:
+            super().__init__()
+            self._sequence = itertools.count(1)
+            self._tools: dict[tuple[int, int], ToolLifecycleEvent] = {}
+
+        async def on_tool_start(
+            self, context: object, agent: object, tool: object
+        ) -> None:
+            call_id = _optional_string(getattr(context, "tool_call_id", None))
+            event = ToolLifecycleEvent(
+                invocation_id=call_id or f"local-tool-{next(self._sequence)}",
+                name=_named(tool, type(tool).__name__),
+                call_id=call_id,
+                agent_name=_named(agent, type(agent).__name__),
+            )
+            self._tools[(id(context), id(tool))] = event
+            lifecycle.tool_started(event)
+
+        async def on_tool_end(
+            self, context: object, agent: object, tool: object, result: object
+        ) -> None:
+            del result
+            key = (id(context), id(tool))
+            event = self._tools.pop(key, None)
+            if event is None:
+                call_id = _optional_string(getattr(context, "tool_call_id", None))
+                event = ToolLifecycleEvent(
+                    invocation_id=call_id or f"local-tool-{next(self._sequence)}",
+                    name=_named(tool, type(tool).__name__),
+                    call_id=call_id,
+                    agent_name=_named(agent, type(agent).__name__),
+                )
+                lifecycle.tool_started(event)
+            lifecycle.tool_finished(event)
+
+        async def on_handoff(
+            self, context: object, from_agent: object, to_agent: object
+        ) -> None:
+            del context
+            lifecycle.handed_off(
+                HandoffLifecycleEvent(
+                    source_agent=_named(from_agent, type(from_agent).__name__),
+                    target_agent=_named(to_agent, type(to_agent).__name__),
+                )
+            )
+
+    return LifecycleHooks()
 
 
 class OpenAIAgentsAdapter:
@@ -10,7 +73,7 @@ class OpenAIAgentsAdapter:
         if not model:
             raise ValueError("target.model is required for provider openai-agents")
         try:
-            from agents import Agent, OpenAIProvider, RunConfig
+            from agents import Agent, OpenAIProvider, RunConfig, RunHooks
         except ImportError as exc:
             raise RuntimeError(
                 "openai-agents is not installed; install agentstorm-worker[openai]"
@@ -23,14 +86,20 @@ class OpenAIAgentsAdapter:
             ),
             model=model,
         )
-        self._run_config = (
-            RunConfig(model_provider=OpenAIProvider(base_url=base_url)) if base_url else None
-        )
+        run_config: dict[str, object] = {"trace_include_sensitive_data": False}
+        if base_url:
+            run_config["model_provider"] = OpenAIProvider(base_url=base_url)
+        self._run_config = RunConfig(**run_config)
+        self._run_hooks = RunHooks
 
-    async def run(self, case: TestCase) -> AdapterResponse:
+    async def run(
+        self, case: TestCase, lifecycle: AgentLifecycle | None = None
+    ) -> AdapterResponse:
         from agents import Runner
 
-        run_options = {"run_config": self._run_config} if self._run_config is not None else {}
+        run_options = {"run_config": self._run_config}
+        if lifecycle is not None:
+            run_options["hooks"] = _lifecycle_hooks(self._run_hooks, lifecycle)
         result = await Runner.run(self._agent, case.prompt, **run_options)
         usage = result.context_wrapper.usage
         return AdapterResponse(

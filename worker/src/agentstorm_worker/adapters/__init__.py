@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .base import AgentAdapter
+from .base import AgentAdapter, AgentLifecycle, HandoffLifecycleEvent, ToolLifecycleEvent
 from .fake import FakeAdapter
 
 
@@ -14,4 +14,11 @@ def create_adapter(provider: str, model: str = "", base_url: str = "") -> AgentA
     raise ValueError(f"unsupported provider: {provider}")
 
 
-__all__ = ["AgentAdapter", "FakeAdapter", "create_adapter"]
+__all__ = [
+    "AgentAdapter",
+    "AgentLifecycle",
+    "FakeAdapter",
+    "HandoffLifecycleEvent",
+    "ToolLifecycleEvent",
+    "create_adapter",
+]

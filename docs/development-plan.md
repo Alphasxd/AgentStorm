@@ -61,7 +61,7 @@ single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation,
 
 - Add OpenTelemetry spans for run, case, model generation, tool call, handoff, and evaluator.
   - [x] Add opt-in run, case, provider invocation, and deterministic evaluator spans.
-  - [ ] Add provider-independent tool and handoff lifecycle events and spans.
+  - [x] Add provider-independent, content-safe tool and handoff lifecycle events and spans.
 - Export RED metrics and token/cost counters to Prometheus.
   - [x] Export bounded Result API RED, ingestion, case-result, and Token metrics.
   - [x] Add Result API recording rules and a persistent development dashboard stack.
@@ -76,10 +76,11 @@ Acceptance criteria:
 - [x] Deterministic assertions work without an LLM judge.
 - [x] Sensitive content is absent from default traces and logs.
 
-The M3 observability acceptance path is implemented, but M3 remains open while tool/handoff spans,
-provider cost accounting, assertion plugins, optional Promptfoo integration, and configurable
-redaction controls remain unfinished. `config/dev/telemetry` runs single-replica Tempo, Prometheus,
-and Grafana workloads for local evaluation; they are not a production HA topology.
+The M3 observability acceptance path and provider-independent local-tool/handoff tracing are
+implemented, but M3 remains open while provider cost accounting, assertion plugins, optional
+Promptfoo integration, and configurable redaction controls remain unfinished.
+`config/dev/telemetry` runs single-replica Tempo, Prometheus, and Grafana workloads for local
+evaluation; they are not a production HA topology.
 
 ## M4: Fault injection and reliability testing
 

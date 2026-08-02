@@ -69,8 +69,10 @@ The M3 foundation adds an unauthenticated, NetworkPolicy-restricted `/metrics` e
 Result API and optional OTLP/HTTP worker traces. Tracing is enabled only when the controller injects
 an explicitly configured Collector endpoint. The development overlay persists traces in Tempo and
 metrics in Prometheus, then provisions Grafana with Run ID scoped failed-case and provider-error
-queries. Default spans contain correlation IDs, bounded result categories, latency, and Token usage,
-but never prompt, output, expected-value, tool payload, or exception-message content. See
+queries. Adapter lifecycle callbacks add provider-independent local-tool and handoff spans while
+keeping SDK objects inside each adapter. Default spans contain correlation IDs, bounded result
+categories, latency, and Token usage, but never prompt, output, expected-value, tool payload,
+handoff input, or exception-message content. See
 [observability](observability.md) for the signal contract and production limitations.
 
 ClickHouse should only be added after event volume and comparison queries justify it. The project

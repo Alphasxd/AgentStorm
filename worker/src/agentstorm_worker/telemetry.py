@@ -14,10 +14,18 @@ class TraceSpan(Protocol):
     def set_error(self, error_type: str) -> None: ...
 
 
+class DetachedTraceSpan(TraceSpan, Protocol):
+    def end(self) -> None: ...
+
+
 class TelemetryClient(Protocol):
     def start_span(
         self, name: str, attributes: dict[str, AttributeValue]
     ) -> AbstractContextManager[TraceSpan]: ...
+
+    def start_detached_span(
+        self, name: str, attributes: dict[str, AttributeValue]
+    ) -> DetachedTraceSpan: ...
 
     def shutdown(self) -> None: ...
 
@@ -29,6 +37,9 @@ class _NoopSpan:
     def set_error(self, error_type: str) -> None:
         del error_type
 
+    def end(self) -> None:
+        return None
+
 
 class NoopTelemetry:
     def start_span(
@@ -36,6 +47,12 @@ class NoopTelemetry:
     ) -> AbstractContextManager[TraceSpan]:
         del name, attributes
         return nullcontext(_NoopSpan())
+
+    def start_detached_span(
+        self, name: str, attributes: dict[str, AttributeValue]
+    ) -> DetachedTraceSpan:
+        del name, attributes
+        return _NoopSpan()
 
     def shutdown(self) -> None:
         return None
@@ -71,6 +88,30 @@ class _OpenTelemetrySpan:
         self._span.set_status(Status(StatusCode.ERROR))  # type: ignore[attr-defined]
 
 
+class _OpenTelemetryDetachedSpan:
+    def __init__(self, tracer: object, name: str, attributes: dict[str, AttributeValue]) -> None:
+        self._span = tracer.start_span(name, attributes=attributes)  # type: ignore[attr-defined]
+        self._ended = False
+
+    def set_attribute(self, name: str, value: AttributeValue) -> None:
+        if not self._ended:
+            self._span.set_attribute(name, value)  # type: ignore[attr-defined]
+
+    def set_error(self, error_type: str) -> None:
+        if self._ended:
+            return
+        from opentelemetry.trace import Status, StatusCode
+
+        self._span.set_attribute("error.type", error_type)  # type: ignore[attr-defined]
+        self._span.set_status(Status(StatusCode.ERROR))  # type: ignore[attr-defined]
+
+    def end(self) -> None:
+        if self._ended:
+            return
+        self._span.end()  # type: ignore[attr-defined]
+        self._ended = True
+
+
 class OpenTelemetryClient:
     def __init__(self, tracer: object, provider: object) -> None:
         self._tracer = tracer
@@ -80,6 +121,11 @@ class OpenTelemetryClient:
         self, name: str, attributes: dict[str, AttributeValue]
     ) -> AbstractContextManager[TraceSpan]:
         return _OpenTelemetrySpan(self._tracer, name, attributes)
+
+    def start_detached_span(
+        self, name: str, attributes: dict[str, AttributeValue]
+    ) -> DetachedTraceSpan:
+        return _OpenTelemetryDetachedSpan(self._tracer, name, attributes)
 
     def shutdown(self) -> None:
         self._provider.shutdown()  # type: ignore[attr-defined]

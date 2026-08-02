@@ -32,6 +32,8 @@ hierarchy is:
 agentstorm.run
 └── agentstorm.case
     ├── gen_ai.invoke_agent
+    │   ├── gen_ai.execute_tool
+    │   └── agentstorm.handoff
     └── agentstorm.evaluate
 ```
 
@@ -42,11 +44,20 @@ Token counts. Provider spans use `gen_ai.operation.name`, `gen_ai.provider.name`
 [OpenTelemetry GenAI semantic-conventions repository](https://github.com/open-telemetry/semantic-conventions-genai),
 so AgentStorm treats this mapping as experimental and keeps its persisted result schema independent.
 
-Prompt text, model output, expected values, tool arguments/results, and exception messages are never
-added to default spans. Exceptions record only their type. OpenTelemetry automatic exception
-recording is explicitly disabled so an exporter cannot recover an error body through the standard
-exception event. Tool and handoff spans will be added after the adapter interface exposes stable,
-provider-independent lifecycle events.
+Adapters receive a provider-independent lifecycle sink. Local tool callbacks create
+`gen_ai.execute_tool` spans with `gen_ai.operation.name=execute_tool`, tool name/type, optional call
+ID, and agent name. Handoffs create `agentstorm.handoff` spans with source and target agent names.
+The OpenAI Agents SDK adapter maps `RunHooks` into this sink; provider SDK objects do not cross the
+adapter boundary. Its SDK-native tracing is also forced to omit sensitive LLM and tool content. The
+no-cost fake adapter emits a deterministic synthetic tool and handoff so the cluster E2E can verify
+this trace shape without an API key.
+
+Prompt text, model output, expected values, tool arguments/results, handoff input, and exception
+messages are never added to default spans or lifecycle events. Exceptions record only their type.
+OpenTelemetry automatic exception recording is explicitly disabled so an exporter cannot recover an
+error body through the standard exception event. Arbitrary shell, browser, hosted, and MCP tool
+execution remains outside the alpha worker's sandbox boundary; their trace mapping should be added
+with the execution policy that enables those tools.
 
 ## Result API metrics
 
@@ -100,9 +111,10 @@ echo "http://127.0.0.1:13000/d/agentstorm-observability/agentstorm-observability
 The E2E creates a deterministic failed case, queries its trace from Tempo, verifies Prometheus
 metrics and recording-rule health, loads the provisioned dashboard through the Grafana API, and then
 restarts Tempo and Prometheus to prove both signals remain queryable from their PVCs. It also checks
-the required span hierarchy and confirms that prompts, expected values, case IDs, run IDs, and bearer
-tokens do not enter the wrong telemetry surface: correlation IDs remain trace-only, while content and
-credentials are excluded from both traces and metric labels.
+the required run/case/provider/tool/handoff/evaluator span hierarchy and confirms that prompts,
+expected values, case IDs, run IDs, and bearer tokens do not enter the wrong telemetry surface:
+correlation IDs remain trace-only, while content and credentials are excluded from both traces and
+metric labels.
 
 Published-image smoke tests for releases that predate this interface automatically leave telemetry
 disabled; `ENABLE_TELEMETRY_E2E=true|false` can override that selection.
