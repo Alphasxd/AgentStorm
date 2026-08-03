@@ -23,6 +23,10 @@ from agentstorm_worker.results import ResultClient, ResultSinkConfig
 
 
 class FakeResponse:
+    def __init__(self, body: bytes = b"{}", status: int = 200) -> None:
+        self.body = body
+        self.status = status
+
     def __enter__(self) -> FakeResponse:
         return self
 
@@ -30,16 +34,17 @@ class FakeResponse:
         return None
 
     def read(self) -> bytes:
-        return b"{}"
+        return self.body
 
 
 class RecordingOpener:
-    def __init__(self) -> None:
+    def __init__(self, responses: list[FakeResponse] | None = None) -> None:
         self.requests: list[Any] = []
+        self.responses = responses or []
 
     def __call__(self, request: Any, timeout: float) -> FakeResponse:
         self.requests.append((request, timeout))
-        return FakeResponse()
+        return self.responses.pop(0) if self.responses else FakeResponse()
 
 
 def run_config() -> RunConfig:
@@ -73,6 +78,51 @@ def run_summary() -> RunSummary:
 
 
 class ResultClientTest(unittest.TestCase):
+    def test_queue_and_permit_calls_never_embed_tokens_in_urls(self) -> None:
+        opener = RecordingOpener(
+            [
+                FakeResponse(
+                    json.dumps(
+                        {
+                            "shard_index": 2,
+                            "lease_token": "queue-secret",
+                            "renew_after_ms": 15000,
+                        }
+                    ).encode()
+                ),
+                FakeResponse(b'{"renew_after_ms":15000}'),
+                FakeResponse(
+                    json.dumps(
+                        {
+                            "permit_id": "b" * 32,
+                            "lease_token": "permit-secret",
+                            "renew_after_ms": 10000,
+                        }
+                    ).encode()
+                ),
+                FakeResponse(b'{"renew_after_ms":10000}'),
+                FakeResponse(b'{"released":true}'),
+            ]
+        )
+        client = ResultClient(
+            ResultSinkConfig(base_url="http://results.example", write_token="write-secret"),
+            opener=opener,
+        )
+        claim = client.claim_shard("run-1", "worker-1")
+        self.assertIsNotNone(claim)
+        assert claim is not None
+        self.assertEqual(claim.shard_index, 2)
+        self.assertEqual(client.renew_shard("run-1", 2, claim.lease_token), 15000)
+        grant = client.acquire_permit("run-1", "a" * 64, "worker-1", "fake")
+        self.assertEqual(client.renew_permit("run-1", grant), 10000)
+        client.release_permit("run-1", grant)
+
+        urls = [request.full_url for request, _ in opener.requests]
+        self.assertFalse(any("secret" in url for url in urls))
+        bodies = [json.loads(request.data) for request, _ in opener.requests]
+        self.assertEqual(bodies[1]["lease_token"], "queue-secret")
+        self.assertEqual(bodies[3]["lease_token"], "permit-secret")
+
     def test_registers_and_uploads_without_sensitive_content_by_default(self) -> None:
         opener = RecordingOpener()
         client = ResultClient(

@@ -106,7 +106,9 @@ Borrow in M5:
 - Event-driven scale-to-zero and ScaledJob concepts.
 - Authentication references and external-metric boundaries.
 
-Do not introduce KEDA before a durable pending-shard queue exists. Scaling an in-memory queue would
+Do not introduce KEDA before a durable pending-shard queue exists. The M5 source path therefore
+registers PostgreSQL queue entries before creating its ScaledJob and uses renewable claims for
+Worker ownership; see [event-driven scheduling](scheduling.md). Scaling an in-memory queue would
 produce attractive diagrams but incorrect failure behavior.
 
 ## OpenTelemetry semantic conventions

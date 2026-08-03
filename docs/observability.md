@@ -107,6 +107,8 @@ The Result API exposes a dedicated Prometheus registry with:
 | `agentstorm_result_api_retries_total` | decision, outcome | Actual follow-up attempts by triggering decision and outcome |
 | `agentstorm_result_api_injected_faults_total` | fault | Selected injected faults by supported fault type |
 | `agentstorm_result_api_circuit_events_total` | event | Open, reject, half-open, and close transitions |
+| `agentstorm_result_api_queue_claims_total` | outcome | Granted, empty, lost, or failed durable shard claims |
+| `agentstorm_result_api_scheduler_permits_total` | outcome | Granted, limited, lost, or failed distributed Provider permits |
 
 Run IDs, case IDs, model names, source names, bearer tokens, outputs, and error bodies are not metric
 labels. Unknown Worker categories, outcomes, decisions, faults, and circuit events collapse to
@@ -126,8 +128,9 @@ data remains in the authenticated Result API.
 | Grafana 13.1.0 | Provision Prometheus/Tempo data sources and the `AgentStorm Observability` dashboard | 1 GiB PVC |
 
 Grafana's provisioned dashboard combines low-cardinality operational metrics, cumulative input/
-output cost, failure categories, retry effectiveness, injected-versus-observed faults, and circuit
-events with high-cardinality trace search. Enter the `AgentTestRun` UID in its `Run ID` variable to
+output cost, failure categories, retry effectiveness, injected-versus-observed faults, circuit
+events, durable queue claims, and distributed permit outcomes with high-cardinality trace search.
+Enter the `AgentTestRun` UID in its `Run ID` variable to
 list failed case traces and Provider-error traces. Selecting a trace ID opens the complete span tree
 without copying Run or case identifiers into Prometheus labels.
 

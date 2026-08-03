@@ -5,6 +5,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -140,6 +141,7 @@ func (in *AgentTestRunSpec) DeepCopyInto(out *AgentTestRunSpec) {
 		out.Reliability = new(AgentReliabilitySpec)
 		in.Reliability.DeepCopyInto(out.Reliability)
 	}
+	in.Scheduling.DeepCopyInto(&out.Scheduling)
 }
 
 func (in *AgentTestRunStatus) DeepCopyInto(out *AgentTestRunStatus) {
@@ -165,4 +167,20 @@ func (in *AgentWorkloadSpec) DeepCopyInto(out *AgentWorkloadSpec) {
 
 func (in *AgentRunnerSpec) DeepCopyInto(out *AgentRunnerSpec) {
 	*out = *in
+}
+
+func (in *AgentSchedulingSpec) DeepCopyInto(out *AgentSchedulingSpec) {
+	*out = *in
+	if in.NodeSelector != nil {
+		out.NodeSelector = make(map[string]string, len(in.NodeSelector))
+		for key, value := range in.NodeSelector {
+			out.NodeSelector[key] = value
+		}
+	}
+	if in.Tolerations != nil {
+		out.Tolerations = make([]corev1.Toleration, len(in.Tolerations))
+		for index := range in.Tolerations {
+			in.Tolerations[index].DeepCopyInto(&out.Tolerations[index])
+		}
+	}
 }

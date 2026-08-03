@@ -24,6 +24,8 @@ type resultMetrics struct {
 	circuitEvents    *prometheus.CounterVec
 	tokens           *prometheus.CounterVec
 	costUSD          *prometheus.CounterVec
+	queueClaims      *prometheus.CounterVec
+	permits          *prometheus.CounterVec
 }
 
 func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
@@ -107,6 +109,14 @@ func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
 			Name:      "cost_usd_total",
 			Help:      "Total derived USD cost from uniquely persisted priced shards by direction.",
 		}, []string{"direction"}),
+		queueClaims: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm", Subsystem: "result_api", Name: "queue_claims_total",
+			Help: "Total durable shard claim attempts by bounded outcome.",
+		}, []string{"outcome"}),
+		permits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "agentstorm", Subsystem: "result_api", Name: "scheduler_permits_total",
+			Help: "Total distributed provider permit attempts by bounded outcome.",
+		}, []string{"outcome"}),
 	}
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
@@ -123,6 +133,8 @@ func newResultMetrics() (*resultMetrics, *prometheus.Registry) {
 		metrics.circuitEvents,
 		metrics.tokens,
 		metrics.costUSD,
+		metrics.queueClaims,
+		metrics.permits,
 	)
 	return metrics, registry
 }
@@ -139,11 +151,37 @@ func (m *resultMetrics) observeHTTP(method, route string, status int, duration t
 
 func boundedHTTPMethod(method string) string {
 	switch method {
-	case http.MethodGet, http.MethodPut:
+	case http.MethodGet, http.MethodPut, http.MethodPost:
 		return method
 	default:
 		return "other"
 	}
+}
+
+func (m *resultMetrics) observeQueueClaim(err error) {
+	outcome := "granted"
+	switch {
+	case errors.Is(err, ErrQueueEmpty):
+		outcome = "empty"
+	case errors.Is(err, ErrLeaseLost):
+		outcome = "lease_lost"
+	case err != nil:
+		outcome = "error"
+	}
+	m.queueClaims.WithLabelValues(outcome).Inc()
+}
+
+func (m *resultMetrics) observePermit(err error) {
+	outcome := "granted"
+	switch {
+	case errors.Is(err, ErrNoCapacity):
+		outcome = "limited"
+	case errors.Is(err, ErrLeaseLost):
+		outcome = "lease_lost"
+	case err != nil:
+		outcome = "error"
+	}
+	m.permits.WithLabelValues(outcome).Inc()
 }
 
 func (m *resultMetrics) observeRegistration(created bool, err error) {

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestHandler(t *testing.T, repository Repository, objects ObjectStore) http.Handler {
@@ -113,6 +114,43 @@ func TestTerminalEndpointIsWriteAuthenticatedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestQueueStatusIsReadableByKEDAButSchedulerMutationsRequireWriter(t *testing.T) {
+	handler := newTestHandler(t, repositoryStub{
+		queueStatus: func(_ context.Context, runID string) (QueueStatus, error) {
+			if runID != "run-1" {
+				t.Fatalf("unexpected queue run %q", runID)
+			}
+			return QueueStatus{Pending: 2, Available: 2, Expected: 2, RunStatus: RunCollecting}, nil
+		},
+		claimShard: func(_ context.Context, runID, workerID, leaseHash string, duration time.Duration) (int, time.Time, error) {
+			if runID != "run-1" || workerID != "worker-1" || len(leaseHash) != 64 || duration != shardLeaseDuration {
+				t.Fatalf("unexpected shard claim")
+			}
+			return 0, time.Now().Add(duration), nil
+		},
+	}, objectStoreStub{})
+
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/v1/runs/run-1/queue", nil))
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"available":2`) {
+		t.Fatalf("queue status returned %d: %s", statusResponse.Code, statusResponse.Body.String())
+	}
+
+	claimBody := []byte(`{"worker_id":"worker-1"}`)
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/v1/runs/run-1/queue/claims", bytes.NewReader(claimBody)))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated claim returned %d", unauthorized.Code)
+	}
+	authorizedRequest := httptest.NewRequest(http.MethodPost, "/v1/runs/run-1/queue/claims", bytes.NewReader(claimBody))
+	authorizedRequest.Header.Set("Authorization", "Bearer write-secret")
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, authorizedRequest)
+	if authorized.Code != http.StatusCreated || !strings.Contains(authorized.Body.String(), `"lease_token"`) {
+		t.Fatalf("authorized claim returned %d: %s", authorized.Code, authorized.Body.String())
+	}
+}
+
 func TestServiceErrorsHaveStableHTTPMappings(t *testing.T) {
 	handler := newTestHandler(t, repositoryStub{
 		getRun:  func(context.Context, string) (RunDetail, error) { return RunDetail{}, ErrNotFound },
@@ -140,13 +178,13 @@ func TestServiceErrorsHaveStableHTTPMappings(t *testing.T) {
 func TestMetricsExposeBoundedOperationalDataWithoutAuthentication(t *testing.T) {
 	finalizeCalls := 0
 	handler := newTestHandler(t, repositoryStub{
-		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+		reserveShard: func(context.Context, string, int, string, string, string, string, ShardSummary) (ShardReservation, error) {
 			return ShardReservation{Pricing: &RunPricing{
 				InputUSDPerMillionTokens:  "2",
 				OutputUSDPerMillionTokens: "4",
 			}}, nil
 		},
-		finalizeShard: func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error) {
+		finalizeShard: func(context.Context, string, int, string, string, []CaseResult, *RunPricing) (bool, error) {
 			finalizeCalls++
 			return finalizeCalls == 1, nil
 		},

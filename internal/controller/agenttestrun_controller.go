@@ -38,6 +38,7 @@ const (
 	conditionResultSink  = "ResultSinkReady"
 	conditionTelemetry   = "TelemetryReady"
 	conditionScenario    = "ScenarioReady"
+	conditionScheduling  = "SchedulingReady"
 	workerConfigKey      = "run.json"
 )
 
@@ -48,6 +49,7 @@ type ResultSinkConfig struct {
 	WriteTokenSecretName string
 	WriteTokenSecretKey  string
 	IncludeSensitive     bool
+	DistributedLimits    bool
 	TimeoutSeconds       int
 }
 
@@ -81,6 +83,9 @@ func (c *ResultSinkConfig) ValidateAndDefault() error {
 		if c.IncludeSensitive {
 			return fmt.Errorf("include-sensitive-results requires result-api-url")
 		}
+		if c.DistributedLimits {
+			return fmt.Errorf("enable-distributed-limits requires result-api-url")
+		}
 		return nil
 	}
 	parsed, err := url.Parse(c.URL)
@@ -109,14 +114,16 @@ func (c ResultSinkConfig) Enabled() bool {
 	return c.URL != ""
 }
 
-// AgentTestRunReconciler turns an AgentTestRun into an indexed Kubernetes Job.
+// AgentTestRunReconciler turns an AgentTestRun into an Indexed Job or durable KEDA ScaledJob.
 type AgentTestRunReconciler struct {
 	client.Client
 	APIReader    client.Reader
 	Scheme       *runtime.Scheme
 	ResultSink   ResultSinkConfig
 	Telemetry    TelemetryConfig
+	Scheduler    SchedulerConfig
 	ResultWriter ResultWriter
+	QueueReader  QueueReader
 	Recorder     record.EventRecorder
 }
 
@@ -125,7 +132,9 @@ type AgentTestRunReconciler struct {
 // +kubebuilder:rbac:groups=agentstorm.io,resources=agenttestruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -140,7 +149,7 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	before := run.DeepCopy()
-	if err := validateAndDefault(run); err != nil {
+	if err := validateAndDefaultWithScheduler(run, r.Scheduler); err != nil {
 		setTerminalStatus(run, agentstormv1alpha1.AgentTestRunFailed, "InvalidSpec", err.Error())
 		return ctrl.Result{}, r.patchStatus(ctx, before, run)
 	}
@@ -165,11 +174,18 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				})
 			}
 		}
-		if err := r.cancelJob(ctx, run.Namespace, jobName); err != nil {
-			return ctrl.Result{}, err
+		if run.Spec.Scheduling.Strategy == "keda" {
+			if err := r.deleteScaledJob(ctx, run); err != nil {
+				return ctrl.Result{}, err
+			}
+			run.Status.ScaledJobName = jobName
+		} else {
+			if err := r.cancelJob(ctx, run.Namespace, jobName); err != nil {
+				return ctrl.Result{}, err
+			}
+			run.Status.JobName = jobName
 		}
 		setTerminalStatus(run, agentstormv1alpha1.AgentTestRunCancelled, "Cancelled", "run cancellation requested")
-		run.Status.JobName = jobName
 		run.Status.Active = 0
 		run.Status.ObservedGeneration = run.Generation
 		return ctrl.Result{}, r.patchStatus(ctx, before, run)
@@ -276,6 +292,25 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Message: message, ObservedGeneration: run.Generation,
 		})
 	}
+	schedulingReady, reason, message, err := r.schedulingReady(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !schedulingReady {
+		run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: conditionScheduling, Status: metav1.ConditionFalse, Reason: reason,
+			Message: message, ObservedGeneration: run.Generation,
+		})
+		if err := r.patchStatus(ctx, before, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: conditionScheduling, Status: metav1.ConditionTrue, Reason: reason,
+		Message: message, ObservedGeneration: run.Generation,
+	})
 	if err := r.ensureWorkerConfig(ctx, run, scenario); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -303,6 +338,53 @@ func (r *AgentTestRunReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Type: conditionResultSink, Status: metav1.ConditionTrue, Reason: "Registered",
 			Message: "run is registered with the durable result sink", ObservedGeneration: run.Generation,
 		})
+	}
+
+	if run.Spec.Scheduling.Strategy == "keda" {
+		scaledJob, created, err := r.ensureScaledJob(ctx, run)
+		if err != nil {
+			run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+				Type: conditionScheduling, Status: metav1.ConditionFalse, Reason: "ScaledJobUnavailable",
+				Message: "KEDA ScaledJob could not be created", ObservedGeneration: run.Generation,
+			})
+			if patchErr := r.patchStatus(ctx, before, run); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		reader := r.QueueReader
+		if reader == nil {
+			reader = NewHTTPResultWriter(r.ResultSink)
+		}
+		queueStatus, err := reader.QueueStatus(ctx, string(run.UID))
+		if err != nil {
+			run.Status.Phase = agentstormv1alpha1.AgentTestRunPending
+			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+				Type: conditionScheduling, Status: metav1.ConditionFalse, Reason: "QueueStatusUnavailable",
+				Message: "durable shard queue status is unavailable", ObservedGeneration: run.Generation,
+			})
+			if patchErr := r.patchStatus(ctx, before, run); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		applyQueueStatus(run, queueStatus)
+		run.Status.ScaledJobName = scaledJob.GetName()
+		run.Status.JobName = ""
+		run.Status.ObservedGeneration = run.Generation
+		if created && run.Status.StartedAt == nil {
+			now := metav1.Now()
+			run.Status.StartedAt = &now
+		}
+		if err := r.patchStatus(ctx, before, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		if !terminalPhase(run.Status.Phase) {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		logger.Info("AgentTestRun reached terminal phase", "phase", run.Status.Phase, "scaledJob", scaledJob.GetName())
+		return ctrl.Result{}, nil
 	}
 
 	job, created, err := r.ensureJob(ctx, run)
@@ -410,6 +492,17 @@ func (r *AgentTestRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func validateAndDefault(run *agentstormv1alpha1.AgentTestRun) error {
+	config := SchedulerConfig{}
+	if err := config.ValidateAndDefault(); err != nil {
+		return err
+	}
+	return validateAndDefaultWithScheduler(run, config)
+}
+
+func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, config SchedulerConfig) error {
+	if err := config.ValidateAndDefault(); err != nil {
+		return err
+	}
 	if run.Spec.Target.Provider != "fake" && run.Spec.Target.Provider != "openai-agents" {
 		return fmt.Errorf("unsupported provider %q", run.Spec.Target.Provider)
 	}
@@ -461,6 +554,12 @@ func validateAndDefault(run *agentstormv1alpha1.AgentTestRun) error {
 	}
 	if run.Spec.Workload.Parallelism < 1 || run.Spec.Workload.ConcurrencyPerWorker < 1 || run.Spec.Workload.Iterations < 1 || run.Spec.Workload.TimeoutSeconds < 1 {
 		return fmt.Errorf("parallelism, concurrencyPerWorker, iterations and timeoutSeconds must be positive")
+	}
+	if run.Spec.Workload.Parallelism > 10000 {
+		return fmt.Errorf("workload.parallelism must not exceed 10000")
+	}
+	if err := validateScheduling(run, config); err != nil {
+		return err
 	}
 	return nil
 }
@@ -782,6 +881,17 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig,
 			corev1.EnvVar{Name: "AGENTSTORM_INCLUDE_SENSITIVE_RESULTS", Value: strconv.FormatBool(resultSink.IncludeSensitive)},
 			corev1.EnvVar{Name: "AGENTSTORM_RESULT_TIMEOUT_SECONDS", Value: strconv.Itoa(resultSink.TimeoutSeconds)},
 		)
+		if resultSink.DistributedLimits {
+			env = append(env,
+				corev1.EnvVar{Name: "AGENTSTORM_DISTRIBUTED_LIMITS", Value: "true"},
+				corev1.EnvVar{
+					Name: "AGENTSTORM_WORKER_ID",
+					ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.uid",
+					}},
+				},
+			)
+		}
 	}
 	if telemetry.Enabled() {
 		env = append(env,
@@ -792,7 +902,7 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig,
 		)
 	}
 
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: childName(run.Name, "worker"), Namespace: run.Namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			Parallelism:           &parallelism,
@@ -838,6 +948,8 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig,
 			},
 		},
 	}
+	applyScheduling(&job.Spec.Template.Spec, run.Spec.Scheduling)
+	return job
 }
 
 func applyJobStatus(run *agentstormv1alpha1.AgentTestRun, job *batchv1.Job) {

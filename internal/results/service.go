@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Alphasxd/AgentStorm/internal/reliability"
 )
@@ -26,10 +29,21 @@ var (
 type Service struct {
 	repository Repository
 	objects    ObjectStore
+	limits     LimitPolicy
 }
 
 func NewService(repository Repository, objects ObjectStore) *Service {
-	return &Service{repository: repository, objects: objects}
+	return NewServiceWithLimitPolicy(repository, objects, LimitPolicy{})
+}
+
+func NewServiceWithLimitPolicy(repository Repository, objects ObjectStore, policy LimitPolicy) *Service {
+	if policy.LeaseDuration == 0 {
+		policy.LeaseDuration = 30 * time.Second
+	}
+	if policy.Providers == nil {
+		policy.Providers = map[string]Limit{}
+	}
+	return &Service{repository: repository, objects: objects, limits: policy}
 }
 
 func (s *Service) Ready(ctx context.Context) error {
@@ -66,6 +80,17 @@ func (s *Service) TerminateRun(ctx context.Context, runID, idempotencyKey string
 }
 
 func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int, idempotencyKey string, upload ShardUpload) (ShardResult, error) {
+	return s.UploadShardWithLease(ctx, runID, shardIndex, idempotencyKey, "", upload)
+}
+
+func (s *Service) UploadShardWithLease(
+	ctx context.Context,
+	runID string,
+	shardIndex int,
+	idempotencyKey string,
+	leaseToken string,
+	upload ShardUpload,
+) (ShardResult, error) {
 	if err := validateShard(runID, shardIndex, idempotencyKey, upload); err != nil {
 		return ShardResult{}, err
 	}
@@ -79,7 +104,10 @@ func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int,
 	payloadHash := hex.EncodeToString(hash[:])
 	objectKey := fmt.Sprintf("runs/%s/shards/%d/%s.json.gz", url.PathEscape(runID), shardIndex, payloadHash)
 
-	reservation, err := s.repository.ReserveShard(ctx, runID, shardIndex, idempotencyKey, payloadHash, objectKey, upload.Summary)
+	leaseHash := schedulerTokenHash(leaseToken)
+	reservation, err := s.repository.ReserveShard(
+		ctx, runID, shardIndex, idempotencyKey, payloadHash, objectKey, leaseHash, upload.Summary,
+	)
 	if err != nil {
 		return ShardResult{}, err
 	}
@@ -95,7 +123,7 @@ func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int,
 		return ShardResult{}, fmt.Errorf("store raw shard: %w", err)
 	}
 	created, err := s.repository.FinalizeShard(
-		ctx, runID, shardIndex, payloadHash, upload.Cases, reservation.Pricing,
+		ctx, runID, shardIndex, payloadHash, leaseHash, upload.Cases, reservation.Pricing,
 	)
 	if err != nil || !created {
 		return ShardResult{}, err
@@ -110,6 +138,140 @@ func (s *Service) UploadShard(ctx context.Context, runID string, shardIndex int,
 		return ShardResult{}, fmt.Errorf("calculate shard cost: %w", err)
 	}
 	return ShardResult{Created: true, InputCostUSD: inputCost, OutputCostUSD: outputCost}, nil
+}
+
+const shardLeaseDuration = 45 * time.Second
+
+func (s *Service) ClaimShard(ctx context.Context, runID string, request QueueClaimRequest) (QueueClaim, error) {
+	if err := validateRunID(runID); err != nil {
+		return QueueClaim{}, err
+	}
+	if strings.TrimSpace(request.WorkerID) == "" || invalidText(request.WorkerID, 253) {
+		return QueueClaim{}, validationError("worker_id is required and must not exceed 253 bytes")
+	}
+	token, err := schedulerToken()
+	if err != nil {
+		return QueueClaim{}, err
+	}
+	index, expiresAt, err := s.repository.ClaimShard(
+		ctx, runID, request.WorkerID, schedulerTokenHash(token), shardLeaseDuration,
+	)
+	if err != nil {
+		return QueueClaim{}, err
+	}
+	return QueueClaim{
+		ShardIndex: index, LeaseToken: token, LeaseExpiresAt: expiresAt,
+		RenewAfterMS: shardLeaseDuration.Milliseconds() / 3,
+	}, nil
+}
+
+func (s *Service) RenewShardLease(
+	ctx context.Context,
+	runID string,
+	shardIndex int,
+	request QueueRenewRequest,
+) (QueueLease, error) {
+	if err := validateRunID(runID); err != nil {
+		return QueueLease{}, err
+	}
+	if shardIndex < 0 || strings.TrimSpace(request.LeaseToken) == "" || invalidText(request.LeaseToken, 512) {
+		return QueueLease{}, validationError("valid shard index and lease_token are required")
+	}
+	expiresAt, err := s.repository.RenewShardLease(
+		ctx, runID, shardIndex, schedulerTokenHash(request.LeaseToken), shardLeaseDuration,
+	)
+	if err != nil {
+		return QueueLease{}, err
+	}
+	return QueueLease{LeaseExpiresAt: expiresAt, RenewAfterMS: shardLeaseDuration.Milliseconds() / 3}, nil
+}
+
+func (s *Service) QueueStatus(ctx context.Context, runID string) (QueueStatus, error) {
+	if err := validateRunID(runID); err != nil {
+		return QueueStatus{}, err
+	}
+	return s.repository.QueueStatus(ctx, runID)
+}
+
+func (s *Service) AcquirePermit(ctx context.Context, runID string, request PermitRequest) (PermitGrant, error) {
+	if err := validateRunID(runID); err != nil {
+		return PermitGrant{}, err
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(request.RequestID) {
+		return PermitGrant{}, validationError("request_id must be a lowercase SHA-256 digest")
+	}
+	if strings.TrimSpace(request.WorkerID) == "" || invalidText(request.WorkerID, 253) ||
+		strings.TrimSpace(request.Provider) == "" || invalidText(request.Provider, 128) {
+		return PermitGrant{}, validationError("worker_id and provider are required")
+	}
+	token, err := schedulerToken()
+	if err != nil {
+		return PermitGrant{}, err
+	}
+	permitID, expiresAt, err := s.repository.AcquirePermit(
+		ctx, runID, request, schedulerTokenHash(token), s.limits,
+	)
+	if err != nil {
+		return PermitGrant{}, err
+	}
+	return PermitGrant{
+		PermitID: permitID, LeaseToken: token, LeaseExpiresAt: expiresAt,
+		RenewAfterMS: s.limits.LeaseDuration.Milliseconds() / 3,
+	}, nil
+}
+
+func (s *Service) RenewPermit(
+	ctx context.Context,
+	runID string,
+	permitID string,
+	request PermitLeaseRequest,
+) (PermitLease, error) {
+	if err := validateSchedulerLease(runID, permitID, request.LeaseToken); err != nil {
+		return PermitLease{}, err
+	}
+	expiresAt, err := s.repository.RenewPermit(
+		ctx, runID, permitID, schedulerTokenHash(request.LeaseToken), s.limits.LeaseDuration,
+	)
+	if err != nil {
+		return PermitLease{}, err
+	}
+	return PermitLease{LeaseExpiresAt: expiresAt, RenewAfterMS: s.limits.LeaseDuration.Milliseconds() / 3}, nil
+}
+
+func (s *Service) ReleasePermit(ctx context.Context, runID, permitID string, request PermitLeaseRequest) error {
+	if err := validateSchedulerLease(runID, permitID, request.LeaseToken); err != nil {
+		return err
+	}
+	return s.repository.ReleasePermit(ctx, runID, permitID, schedulerTokenHash(request.LeaseToken))
+}
+
+func validateSchedulerLease(runID, permitID, leaseToken string) error {
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	if !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(permitID) {
+		return validationError("permit ID is invalid")
+	}
+	if strings.TrimSpace(leaseToken) == "" || invalidText(leaseToken, 512) {
+		return validationError("lease_token is required")
+	}
+	return nil
+}
+
+func schedulerToken() (string, error) {
+	payload := make([]byte, 32)
+	if _, err := rand.Read(payload); err != nil {
+		return "", fmt.Errorf("generate scheduler token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func schedulerTokenHash(token string) string {
+	if token == "" {
+		return ""
+	}
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
 }
 
 func normalizeShard(upload *ShardUpload) {
@@ -266,6 +428,17 @@ func validateRegistration(runID, idempotencyKey string, registration Registratio
 			if err != nil || len(canonical) > 64*1024 || digest != scenario.Digest {
 				return validationError("reliability scenario digest does not match its normalized document")
 			}
+		}
+	}
+	if scheduling := registration.Scheduling; scheduling != nil {
+		if scheduling.Strategy != "indexed" && scheduling.Strategy != "keda" {
+			return validationError("scheduling strategy must be indexed or keda")
+		}
+		if scheduling.MaxWorkers < 1 || scheduling.MaxWorkers > 1000 {
+			return validationError("scheduling max_workers must be between 1 and 1000")
+		}
+		if scheduling.ResourceProfile != "small" && scheduling.ResourceProfile != "medium" && scheduling.ResourceProfile != "large" {
+			return validationError("scheduling resource_profile is invalid")
 		}
 	}
 	return nil

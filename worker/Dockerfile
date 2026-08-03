@@ -5,7 +5,8 @@ WORKDIR /app
 RUN useradd --create-home --uid 10001 agentstorm
 COPY pyproject.toml README.md ./
 COPY src src
-RUN pip install --no-cache-dir '.[openai,telemetry]'
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install '.[openai,telemetry]'
 USER 10001:10001
 ENTRYPOINT ["python", "-m", "agentstorm_worker"]
 CMD ["run"]

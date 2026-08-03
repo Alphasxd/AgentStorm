@@ -20,6 +20,10 @@ type ResultWriter interface {
 	Terminal(context.Context, string, []byte, results.TerminalRequest) error
 }
 
+type QueueReader interface {
+	QueueStatus(context.Context, string) (results.QueueStatus, error)
+}
+
 type HTTPResultWriter struct {
 	baseURL string
 	client  *http.Client
@@ -45,6 +49,33 @@ func (w *HTTPResultWriter) Terminal(ctx context.Context, runID string, token []b
 		fmt.Sprintf("run/%s/terminal/%s", runID, terminal.Status),
 		terminal,
 	)
+}
+
+func (w *HTTPResultWriter) QueueStatus(ctx context.Context, runID string) (results.QueueStatus, error) {
+	if runID == "" {
+		return results.QueueStatus{}, fmt.Errorf("queue request identity is unavailable")
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, w.baseURL+"/v1/runs/"+url.PathEscape(runID)+"/queue", nil,
+	)
+	if err != nil {
+		return results.QueueStatus{}, fmt.Errorf("create queue status request: %w", err)
+	}
+	response, err := w.client.Do(request)
+	if err != nil {
+		return results.QueueStatus{}, fmt.Errorf("result API is unavailable")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return results.QueueStatus{}, fmt.Errorf("result API returned HTTP %d", response.StatusCode)
+	}
+	var status results.QueueStatus
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
+	if err := decoder.Decode(&status); err != nil {
+		return results.QueueStatus{}, fmt.Errorf("decode queue status: %w", err)
+	}
+	return status, nil
 }
 
 func (w *HTTPResultWriter) put(ctx context.Context, runID string, token []byte, path, idempotencyKey string, value any) error {
@@ -93,6 +124,11 @@ func buildResultRegistration(run *agentstormv1alpha1.AgentTestRun, scenario *rel
 		Evaluation: results.Evaluation{
 			MinSuccessRate: run.Spec.Evaluation.MinSuccessRate,
 			MaxFailureRate: run.Spec.Evaluation.MaxErrorRate,
+		},
+		Scheduling: &results.RunScheduling{
+			Strategy:        run.Spec.Scheduling.Strategy,
+			MaxWorkers:      run.Spec.Scheduling.MaxWorkers,
+			ResourceProfile: run.Spec.Scheduling.ResourceProfile,
 		},
 	}
 	if value := run.Spec.Evaluation.MaxP95LatencyMs; value != nil {

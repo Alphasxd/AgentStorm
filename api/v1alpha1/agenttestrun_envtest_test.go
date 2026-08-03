@@ -91,6 +91,9 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	if stored.Spec.Telemetry.ContentMode != "omit" {
 		t.Fatalf("telemetry content mode = %q, want omit default", stored.Spec.Telemetry.ContentMode)
 	}
+	if stored.Spec.Scheduling.Strategy != "indexed" || stored.Spec.Scheduling.MaxWorkers != 1 || stored.Spec.Scheduling.ResourceProfile != "small" {
+		t.Fatalf("scheduling defaults were not applied: %#v", stored.Spec.Scheduling)
+	}
 
 	seed := int64(42)
 	reliabilityRun := validEnvtestRun(namespace.Name, "reliability")
@@ -207,6 +210,36 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	err = kubernetesClient.Create(ctx, tooManyPatterns)
 	if !apierrors.IsInvalid(err) {
 		t.Fatalf("too many redaction patterns error = %v, want Invalid", err)
+	}
+
+	queued := validEnvtestRun(namespace.Name, "queued")
+	queued.Spec.Workload.Parallelism = 64
+	queued.Spec.Workload.ConcurrencyPerWorker = 2
+	queued.Spec.Scheduling = agentstormv1alpha1.AgentSchedulingSpec{
+		Strategy: "keda", MaxWorkers: 8, ResourceProfile: "medium",
+	}
+	if err := kubernetesClient.Create(ctx, queued); err != nil {
+		t.Fatalf("create queued AgentTestRun: %v", err)
+	}
+	queued.Spec.Scheduling.MaxWorkers = 9
+	err = kubernetesClient.Update(ctx, queued)
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "scheduling is immutable") {
+		t.Fatalf("immutable scheduling update error = %v, want CRD CEL rejection", err)
+	}
+
+	unsafe := validEnvtestRun(namespace.Name, "unsafe-scheduling")
+	unsafe.Spec.Workload.ConcurrencyPerWorker = 101
+	unsafe.Spec.Scheduling = agentstormv1alpha1.AgentSchedulingSpec{
+		Strategy: "keda", MaxWorkers: 10, ResourceProfile: "small",
+	}
+	if err := kubernetesClient.Create(ctx, unsafe); !apierrors.IsInvalid(err) {
+		t.Fatalf("unsafe scheduling error = %v, want Invalid", err)
+	}
+
+	tooManyShards := validEnvtestRun(namespace.Name, "too-many-shards")
+	tooManyShards.Spec.Workload.Parallelism = 10001
+	if err := kubernetesClient.Create(ctx, tooManyShards); !apierrors.IsInvalid(err) {
+		t.Fatalf("excessive shard count error = %v, want Invalid", err)
 	}
 }
 

@@ -115,6 +115,10 @@ Acceptance criteria:
 - Global rate limits remain valid while worker replicas change.
 - A quota violation is rejected before model calls begin.
 
+M5 remains incomplete until the queued path passes source-built and published-image gates on amd64
+and arm64, the v0.5 image-index digests are pinned in public manifests, and main CI is green. The
+current source interface is documented in [event-driven scheduling](scheduling.md).
+
 ## M6: Stable open-source release
 
 - Maintain stable image releases and publish a Helm chart, changelog, architecture decision records,

@@ -107,6 +107,7 @@ spec:
                       type: integer
                       format: int32
                       minimum: 1
+                      maximum: 10000
                       default: 1
                     concurrencyPerWorker:
                       type: integer
@@ -249,9 +250,57 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: runner is immutable; create a new AgentTestRun
+                scheduling:
+                  type: object
+                  default: {}
+                  properties:
+                    strategy:
+                      type: string
+                      enum: [indexed, keda]
+                      default: indexed
+                    maxWorkers:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 1000
+                      default: 1
+                    resourceProfile:
+                      type: string
+                      enum: [small, medium, large]
+                      default: small
+                    nodeSelector:
+                      type: object
+                      maxProperties: 32
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      maxItems: 16
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+                          tolerationSeconds:
+                            type: integer
+                            format: int64
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: scheduling is immutable; create a new AgentTestRun
                 cancel:
                   type: boolean
                   default: false
+              x-kubernetes-validations:
+                - rule: "(!has(self.scheduling) || self.scheduling.strategy != 'keda' ? self.workload.parallelism : self.scheduling.maxWorkers) * self.workload.concurrencyPerWorker <= 1000"
+                  message: requested Worker concurrency must not exceed 1000 in-flight cases
             status:
               type: object
               properties:
@@ -259,6 +308,8 @@ spec:
                   type: string
                   enum: [Pending, Running, Succeeded, Failed, Cancelled]
                 jobName:
+                  type: string
+                scaledJobName:
                   type: string
                 active:
                   type: integer

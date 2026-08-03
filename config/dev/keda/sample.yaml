@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentstorm-keda-dataset
+  namespace: agentstorm-system
+data:
+  cases.jsonl: |
+    {"id":"scale-1","input":"one","expected_contains":"one"}
+    {"id":"scale-2","input":"two","expected_contains":"two"}
+    {"id":"scale-3","input":"three","expected_contains":"three"}
+    {"id":"scale-4","input":"four","expected_contains":"four"}
+---
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-keda-sample
+  namespace: agentstorm-system
+spec:
+  target:
+    provider: fake
+  workload:
+    datasetRef:
+      name: agentstorm-keda-dataset
+      key: cases.jsonl
+    parallelism: 8
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 300
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+  scheduling:
+    strategy: keda
+    maxWorkers: 4
+    resourceProfile: small
+  runner:
+    image: agentstorm-worker:dev
+    imagePullPolicy: IfNotPresent

@@ -13,7 +13,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -152,6 +154,7 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 		URL:                  "http://agentstorm-result-api:8080/",
 		WriteTokenSecretName: "agentstorm-result-auth",
 		WriteTokenSecretKey:  "write-token",
+		DistributedLimits:    true,
 		TimeoutSeconds:       30,
 	}
 	if err := resultSink.ValidateAndDefault(); err != nil {
@@ -183,8 +186,10 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	env := job.Spec.Template.Spec.Containers[0].Env
 	assertEnv(t, env, "AGENTSTORM_RESULT_API_URL", "http://agentstorm-result-api:8080")
 	assertEnv(t, env, "AGENTSTORM_RESULT_PRE_REGISTERED", "true")
+	assertEnv(t, env, "AGENTSTORM_DISTRIBUTED_LIMITS", "true")
 	assertEnv(t, env, "AGENTSTORM_INCLUDE_SENSITIVE_RESULTS", "false")
 	assertEnv(t, env, "AGENTSTORM_RESULT_TIMEOUT_SECONDS", "30")
+	assertFieldRefEnv(t, env, "AGENTSTORM_WORKER_ID", "metadata.uid")
 	assertSecretEnv(t, env, "AGENTSTORM_RESULT_WRITE_TOKEN", "agentstorm-result-auth", "write-token")
 
 	configMap := &corev1.ConfigMap{}
@@ -301,6 +306,7 @@ func TestResultSinkConfigValidation(t *testing.T) {
 		{name: "credentials in URL", config: ResultSinkConfig{URL: "https://user:password@results.example", WriteTokenSecretName: "result-auth", WriteTokenSecretKey: "write-token"}, wantErr: true},
 		{name: "invalid Secret name", config: ResultSinkConfig{URL: "https://results.example", WriteTokenSecretName: "INVALID", WriteTokenSecretKey: "write-token"}, wantErr: true},
 		{name: "sensitive without sink", config: ResultSinkConfig{IncludeSensitive: true}, wantErr: true},
+		{name: "distributed limits without sink", config: ResultSinkConfig{DistributedLimits: true}, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -880,6 +886,124 @@ func TestValidateAndDefault(t *testing.T) {
 	}
 }
 
+func TestBuildScaledJobUsesDurableQueueAndBoundedPlacement(t *testing.T) {
+	run := testRun()
+	run.Spec.Scheduling = agentstormv1alpha1.AgentSchedulingSpec{
+		Strategy: "keda", MaxWorkers: 4, ResourceProfile: "medium",
+		NodeSelector: map[string]string{"agentstorm.io/pool": "evaluation"},
+		Tolerations:  []corev1.Toleration{{Key: "evaluation", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
+	}
+	resultSink := ResultSinkConfig{URL: "http://agentstorm-result-api:8080", WriteTokenSecretName: "auth", WriteTokenSecretKey: "write-token", DistributedLimits: true, TimeoutSeconds: 30}
+	scheduler := SchedulerConfig{EnableKEDA: true, MetricsAPIURL: "http://agentstorm-result-api.agentstorm-system.svc.cluster.local:8080", MaxWorkersPerRun: 100, MaxInFlightCases: 1000, PollingInterval: 2}
+	object, err := buildScaledJob(run, resultSink, TelemetryConfig{}, scheduler)
+	if err != nil {
+		t.Fatalf("build ScaledJob: %v", err)
+	}
+	maxReplicas, _, _ := unstructured.NestedInt64(object.Object, "spec", "maxReplicaCount")
+	strategy, _, _ := unstructured.NestedString(object.Object, "spec", "scalingStrategy", "strategy")
+	metricURL, _, _ := unstructured.NestedString(object.Object, "spec", "triggers", "0", "metadata", "url")
+	if maxReplicas != 4 || strategy != "accurate" {
+		t.Fatalf("unexpected scale policy: max=%d strategy=%q", maxReplicas, strategy)
+	}
+	if metricURL != "" {
+		t.Fatal("NestedString must not interpret array indexes")
+	}
+	triggers, _, _ := unstructured.NestedSlice(object.Object, "spec", "triggers")
+	trigger := triggers[0].(map[string]any)
+	metadata := trigger["metadata"].(map[string]any)
+	if !strings.HasSuffix(metadata["url"].(string), "/v1/runs/run-1/queue") {
+		t.Fatalf("unexpected queue metric URL: %v", metadata["url"])
+	}
+	containers, _, _ := unstructured.NestedSlice(object.Object, "spec", "jobTargetRef", "template", "spec", "containers")
+	worker := containers[0].(map[string]any)
+	environment := worker["env"].([]any)
+	envNames := map[string]bool{}
+	for _, raw := range environment {
+		envNames[raw.(map[string]any)["name"].(string)] = true
+	}
+	if !envNames["AGENTSTORM_QUEUE_MODE"] || !envNames["AGENTSTORM_DISTRIBUTED_LIMITS"] || envNames["AGENTSTORM_SHARD_INDEX"] {
+		t.Fatalf("unexpected queued Worker environment: %#v", envNames)
+	}
+	requests := worker["resources"].(map[string]any)["requests"].(map[string]any)
+	if requests["cpu"] != "500m" || requests["memory"] != "512Mi" {
+		t.Fatalf("unexpected medium resources: %#v", requests)
+	}
+	podSpec, _, _ := unstructured.NestedMap(object.Object, "spec", "jobTargetRef", "template", "spec")
+	nodeSelector := podSpec["nodeSelector"].(map[string]any)
+	tolerations := podSpec["tolerations"].([]any)
+	if nodeSelector["agentstorm.io/pool"] != "evaluation" || len(tolerations) != 1 ||
+		tolerations[0].(map[string]any)["key"] != "evaluation" {
+		t.Fatalf("unexpected queued Worker placement: nodeSelector=%#v tolerations=%#v", nodeSelector, tolerations)
+	}
+}
+
+func TestSchedulerConfigRequiresCredentialFreeMetricsURLWhenKEDAEnabled(t *testing.T) {
+	for name, config := range map[string]SchedulerConfig{
+		"missing URL":     {EnableKEDA: true},
+		"embedded secret": {EnableKEDA: true, MetricsAPIURL: "https://user:secret@results.example"},
+		"query":           {EnableKEDA: true, MetricsAPIURL: "https://results.example?token=secret"},
+		"URL while off":   {MetricsAPIURL: "https://results.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := config.ValidateAndDefault(); err == nil {
+				t.Fatal("invalid scheduler configuration was accepted")
+			}
+		})
+	}
+	valid := SchedulerConfig{EnableKEDA: true, MetricsAPIURL: "http://agentstorm-result-api:8080/"}
+	if err := valid.ValidateAndDefault(); err != nil || valid.MetricsAPIURL != "http://agentstorm-result-api:8080" {
+		t.Fatalf("valid scheduler config failed: %#v err=%v", valid, err)
+	}
+}
+
+func TestSchedulingRejectsUnsafeParallelismAndInsufficientQuota(t *testing.T) {
+	run := testRun()
+	run.Spec.Scheduling = agentstormv1alpha1.AgentSchedulingSpec{Strategy: "keda", MaxWorkers: 10, ResourceProfile: "small"}
+	run.Spec.Workload.ConcurrencyPerWorker = 20
+	config := SchedulerConfig{EnableKEDA: true, MetricsAPIURL: "http://results.example", MaxWorkersPerRun: 20, MaxInFlightCases: 100}
+	if err := validateAndDefaultWithScheduler(run, config); err == nil {
+		t.Fatal("unsafe aggregate concurrency should be rejected")
+	}
+
+	run = testRun()
+	run.Spec.Scheduling = agentstormv1alpha1.AgentSchedulingSpec{Strategy: "keda", MaxWorkers: 4, ResourceProfile: "small"}
+	config.MaxInFlightCases = 1000
+	if err := validateAndDefaultWithScheduler(run, config); err != nil {
+		t.Fatalf("validate scheduling: %v", err)
+	}
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers", Namespace: "default"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourcePods: resource.MustParse("2"),
+		}},
+	}
+	client := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(quota).Build()
+	reconciler := &AgentTestRunReconciler{Client: client, ResultSink: ResultSinkConfig{URL: "http://results.example"}, Scheduler: config}
+	ready, reason, _, err := reconciler.schedulingReady(context.Background(), run)
+	if err != nil || ready || reason != "QuotaExceeded" {
+		t.Fatalf("quota check: ready=%v reason=%q err=%v", ready, reason, err)
+	}
+}
+
+func TestIndexedSchedulingQuotaCountsOneJobAndAllWorkerPods(t *testing.T) {
+	run := testRun()
+	run.Spec.Workload.Parallelism = 4
+	run.Spec.Scheduling = agentstormv1alpha1.AgentSchedulingSpec{Strategy: "indexed", ResourceProfile: "small"}
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers", Namespace: "default"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourcePods:                     resource.MustParse("4"),
+			corev1.ResourceName("count/jobs.batch"): resource.MustParse("1"),
+		}},
+	}
+	client := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(quota).Build()
+	reconciler := &AgentTestRunReconciler{Client: client, Scheduler: SchedulerConfig{MaxWorkersPerRun: 100, MaxInFlightCases: 1000}}
+	ready, reason, _, err := reconciler.schedulingReady(context.Background(), run)
+	if err != nil || !ready || reason != "QuotaAvailable" {
+		t.Fatalf("indexed quota check: ready=%v reason=%q err=%v", ready, reason, err)
+	}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -947,6 +1071,20 @@ func assertSecretEnv(t *testing.T, env []corev1.EnvVar, name, secretName, secret
 		ref := item.ValueFrom.SecretKeyRef
 		if ref.Name != secretName || ref.Key != secretKey {
 			t.Fatalf("env %s SecretKeyRef = %s/%s, want %s/%s", name, ref.Name, ref.Key, secretName, secretKey)
+		}
+		return
+	}
+	t.Fatalf("env %s not found", name)
+}
+
+func assertFieldRefEnv(t *testing.T, env []corev1.EnvVar, name, fieldPath string) {
+	t.Helper()
+	for _, item := range env {
+		if item.Name != name {
+			continue
+		}
+		if item.ValueFrom == nil || item.ValueFrom.FieldRef == nil || item.ValueFrom.FieldRef.FieldPath != fieldPath {
+			t.Fatalf("env %s does not use fieldRef %q", name, fieldPath)
 		}
 		return
 	}

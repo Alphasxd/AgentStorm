@@ -38,6 +38,12 @@ data:
             expr: sum by (fault) (rate(agentstorm_result_api_injected_faults_total[5m]))
           - record: agentstorm:result_api_circuit_events:rate5m
             expr: sum by (event) (rate(agentstorm_result_api_circuit_events_total[5m]))
+          - record: agentstorm:result_api_queue_claims:rate5m
+            expr: sum by (outcome) (rate(agentstorm_result_api_queue_claims_total[5m]))
+          - record: agentstorm:result_api_scheduler_permits:rate5m
+            expr: sum by (outcome) (rate(agentstorm_result_api_scheduler_permits_total[5m]))
+          - record: agentstorm:result_api_scheduler_permits_limited:ratio5m
+            expr: sum(rate(agentstorm_result_api_scheduler_permits_total{outcome="limited"}[5m])) / clamp_min(sum(rate(agentstorm_result_api_scheduler_permits_total[5m])), 0.000001)
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

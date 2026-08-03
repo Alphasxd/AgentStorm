@@ -7,15 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
+	"time"
 )
 
 type repositoryStub struct {
 	ready         func(context.Context) error
 	registerRun   func(context.Context, string, string, string, Registration) (bool, error)
 	terminateRun  func(context.Context, string, string, string, TerminalRequest) (bool, error)
-	reserveShard  func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error)
-	finalizeShard func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error)
+	reserveShard  func(context.Context, string, int, string, string, string, string, ShardSummary) (ShardReservation, error)
+	finalizeShard func(context.Context, string, int, string, string, []CaseResult, *RunPricing) (bool, error)
+	claimShard    func(context.Context, string, string, string, time.Duration) (int, time.Time, error)
+	renewShard    func(context.Context, string, int, string, time.Duration) (time.Time, error)
+	queueStatus   func(context.Context, string) (QueueStatus, error)
+	acquirePermit func(context.Context, string, PermitRequest, string, LimitPolicy) (string, time.Time, error)
+	renewPermit   func(context.Context, string, string, string, time.Duration) (time.Time, error)
+	releasePermit func(context.Context, string, string, string) error
 	getRun        func(context.Context, string) (RunDetail, error)
 	listCases     func(context.Context, string, string, int, bool) (CasePage, error)
 	compare       func(context.Context, string, string) (Comparison, error)
@@ -39,12 +47,54 @@ func (s repositoryStub) TerminateRun(ctx context.Context, runID, key, hash strin
 	return s.terminateRun(ctx, runID, key, hash, terminal)
 }
 
-func (s repositoryStub) ReserveShard(ctx context.Context, runID string, index int, key, hash, objectKey string, summary ShardSummary) (ShardReservation, error) {
-	return s.reserveShard(ctx, runID, index, key, hash, objectKey, summary)
+func (s repositoryStub) ReserveShard(ctx context.Context, runID string, index int, key, hash, objectKey, leaseHash string, summary ShardSummary) (ShardReservation, error) {
+	return s.reserveShard(ctx, runID, index, key, hash, objectKey, leaseHash, summary)
 }
 
-func (s repositoryStub) FinalizeShard(ctx context.Context, runID string, index int, hash string, cases []CaseResult, pricing *RunPricing) (bool, error) {
-	return s.finalizeShard(ctx, runID, index, hash, cases, pricing)
+func (s repositoryStub) FinalizeShard(ctx context.Context, runID string, index int, hash, leaseHash string, cases []CaseResult, pricing *RunPricing) (bool, error) {
+	return s.finalizeShard(ctx, runID, index, hash, leaseHash, cases, pricing)
+}
+
+func (s repositoryStub) ClaimShard(ctx context.Context, runID, workerID, leaseHash string, duration time.Duration) (int, time.Time, error) {
+	if s.claimShard == nil {
+		return 0, time.Time{}, ErrQueueEmpty
+	}
+	return s.claimShard(ctx, runID, workerID, leaseHash, duration)
+}
+
+func (s repositoryStub) RenewShardLease(ctx context.Context, runID string, index int, leaseHash string, duration time.Duration) (time.Time, error) {
+	if s.renewShard == nil {
+		return time.Time{}, ErrLeaseLost
+	}
+	return s.renewShard(ctx, runID, index, leaseHash, duration)
+}
+
+func (s repositoryStub) QueueStatus(ctx context.Context, runID string) (QueueStatus, error) {
+	if s.queueStatus == nil {
+		return QueueStatus{}, ErrNotFound
+	}
+	return s.queueStatus(ctx, runID)
+}
+
+func (s repositoryStub) AcquirePermit(ctx context.Context, runID string, request PermitRequest, leaseHash string, policy LimitPolicy) (string, time.Time, error) {
+	if s.acquirePermit == nil {
+		return "", time.Time{}, ErrNoCapacity
+	}
+	return s.acquirePermit(ctx, runID, request, leaseHash, policy)
+}
+
+func (s repositoryStub) RenewPermit(ctx context.Context, runID, permitID, leaseHash string, duration time.Duration) (time.Time, error) {
+	if s.renewPermit == nil {
+		return time.Time{}, ErrLeaseLost
+	}
+	return s.renewPermit(ctx, runID, permitID, leaseHash, duration)
+}
+
+func (s repositoryStub) ReleasePermit(ctx context.Context, runID, permitID, leaseHash string) error {
+	if s.releasePermit == nil {
+		return ErrLeaseLost
+	}
+	return s.releasePermit(ctx, runID, permitID, leaseHash)
 }
 
 func (s repositoryStub) GetRun(ctx context.Context, runID string) (RunDetail, error) {
@@ -183,6 +233,64 @@ func TestTerminateRunUsesStableIdempotency(t *testing.T) {
 	}
 }
 
+func TestQueueClaimsAndLeaseRenewalKeepTokensOutOfRepository(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	var storedHash string
+	service := NewService(repositoryStub{
+		claimShard: func(_ context.Context, runID, workerID, leaseHash string, duration time.Duration) (int, time.Time, error) {
+			if runID != "run-1" || workerID != "worker-1" || duration != shardLeaseDuration || len(leaseHash) != 64 {
+				t.Fatalf("unexpected queue claim: %q %q %q %s", runID, workerID, leaseHash, duration)
+			}
+			storedHash = leaseHash
+			return 3, expiresAt, nil
+		},
+		renewShard: func(_ context.Context, runID string, index int, leaseHash string, duration time.Duration) (time.Time, error) {
+			if runID != "run-1" || index != 3 || leaseHash != storedHash || duration != shardLeaseDuration {
+				t.Fatal("renewal did not use the claimed lease token hash")
+			}
+			return expiresAt, nil
+		},
+	}, objectStoreStub{})
+
+	claim, err := service.ClaimShard(context.Background(), "run-1", QueueClaimRequest{WorkerID: "worker-1"})
+	if err != nil || claim.ShardIndex != 3 || claim.LeaseToken == "" || claim.RenewAfterMS != 15000 {
+		t.Fatalf("unexpected claim: %#v err=%v", claim, err)
+	}
+	if schedulerTokenHash(claim.LeaseToken) != storedHash || claim.LeaseToken == storedHash {
+		t.Fatal("repository should receive only a one-way lease token hash")
+	}
+	lease, err := service.RenewShardLease(context.Background(), "run-1", 3, QueueRenewRequest{LeaseToken: claim.LeaseToken})
+	if err != nil || !lease.LeaseExpiresAt.Equal(expiresAt) {
+		t.Fatalf("renew lease: %#v err=%v", lease, err)
+	}
+}
+
+func TestDistributedPermitUsesConfiguredPolicyAndStableRequestIdentity(t *testing.T) {
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	policy := LimitPolicy{
+		Global:        Limit{MaxConcurrency: 4, RequestsPerMinute: 60},
+		Providers:     map[string]Limit{"fake": {MaxConcurrency: 2, RequestsPerMinute: 30}},
+		LeaseDuration: 42 * time.Second,
+	}
+	service := NewServiceWithLimitPolicy(repositoryStub{
+		acquirePermit: func(_ context.Context, runID string, request PermitRequest, leaseHash string, got LimitPolicy) (string, time.Time, error) {
+			if runID != "run-1" || request.Provider != "fake" || request.WorkerID != "worker-1" ||
+				request.RequestID != strings.Repeat("a", 64) || got.Global.MaxConcurrency != 4 ||
+				got.Providers["fake"].RequestsPerMinute != 30 || len(leaseHash) != 64 {
+				t.Fatalf("unexpected permit request: %#v %#v", request, got)
+			}
+			return strings.Repeat("b", 32), expiresAt, nil
+		},
+	}, objectStoreStub{}, policy)
+
+	grant, err := service.AcquirePermit(context.Background(), "run-1", PermitRequest{
+		RequestID: strings.Repeat("a", 64), WorkerID: "worker-1", Provider: "fake",
+	})
+	if err != nil || grant.PermitID != strings.Repeat("b", 32) || grant.LeaseToken == "" || grant.RenewAfterMS != 14000 {
+		t.Fatalf("unexpected permit grant: %#v err=%v", grant, err)
+	}
+}
+
 func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 	runID := "run-1"
 	upload := testShard(runID, 0, "case-1", true)
@@ -190,7 +298,7 @@ func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 	finalizeCalled := false
 	var reservedHash string
 	service := NewService(repositoryStub{
-		reserveShard: func(_ context.Context, gotRunID string, index int, key, hash, objectKey string, summary ShardSummary) (ShardReservation, error) {
+		reserveShard: func(_ context.Context, gotRunID string, index int, key, hash, objectKey, leaseHash string, summary ShardSummary) (ShardReservation, error) {
 			if gotRunID != runID || index != 0 || key != "run/run-1/shard/0" {
 				t.Fatalf("unexpected reservation identity: %q %d %q", gotRunID, index, key)
 			}
@@ -200,7 +308,7 @@ func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 			reservedHash = hash
 			return ShardReservation{}, nil
 		},
-		finalizeShard: func(_ context.Context, gotRunID string, index int, hash string, cases []CaseResult, pricing *RunPricing) (bool, error) {
+		finalizeShard: func(_ context.Context, gotRunID string, index int, hash, leaseHash string, cases []CaseResult, pricing *RunPricing) (bool, error) {
 			if pricing != nil {
 				t.Fatal("unpriced test unexpectedly received pricing")
 			}
@@ -249,10 +357,10 @@ func TestUploadShardStoresCanonicalGzipBeforeFinalizing(t *testing.T) {
 
 func TestUploadShardDoesNotFinalizeWhenObjectWriteFails(t *testing.T) {
 	service := NewService(repositoryStub{
-		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+		reserveShard: func(context.Context, string, int, string, string, string, string, ShardSummary) (ShardReservation, error) {
 			return ShardReservation{}, nil
 		},
-		finalizeShard: func(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error) {
+		finalizeShard: func(context.Context, string, int, string, string, []CaseResult, *RunPricing) (bool, error) {
 			t.Fatal("finalize should not run after object failure")
 			return false, nil
 		},
@@ -279,10 +387,10 @@ func TestUploadShardDerivesPricedCostFromRegisteredSnapshot(t *testing.T) {
 	upload.Summary.InputTokens = 1000
 	upload.Summary.OutputTokens = 500
 	service := NewService(repositoryStub{
-		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+		reserveShard: func(context.Context, string, int, string, string, string, string, ShardSummary) (ShardReservation, error) {
 			return ShardReservation{Pricing: pricing}, nil
 		},
-		finalizeShard: func(_ context.Context, _ string, _ int, _ string, _ []CaseResult, got *RunPricing) (bool, error) {
+		finalizeShard: func(_ context.Context, _ string, _ int, _, _ string, _ []CaseResult, got *RunPricing) (bool, error) {
 			if got != pricing {
 				t.Fatal("repository did not receive the registered pricing snapshot")
 			}
@@ -362,10 +470,10 @@ func TestValidateShardChecksAttemptTokensAndUsageCompleteness(t *testing.T) {
 
 func TestUploadShardNormalizesLegacyWorkerClassification(t *testing.T) {
 	service := NewService(repositoryStub{
-		reserveShard: func(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error) {
+		reserveShard: func(context.Context, string, int, string, string, string, string, ShardSummary) (ShardReservation, error) {
 			return ShardReservation{}, nil
 		},
-		finalizeShard: func(_ context.Context, _ string, _ int, _ string, cases []CaseResult, _ *RunPricing) (bool, error) {
+		finalizeShard: func(_ context.Context, _ string, _ int, _, _ string, cases []CaseResult, _ *RunPricing) (bool, error) {
 			if len(cases) != 1 || cases[0].FailureCategory != "evaluation" ||
 				cases[0].ErrorCode != "legacy_assertion_failure" || !usageComplete(cases[0].UsageComplete) ||
 				cases[0].Attempts == nil {

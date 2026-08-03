@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: agentstorm-runner-budget
+spec:
+  hard:
+    pods: "50"
+    count/jobs.batch: "50"
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "64"
+    limits.memory: 64Gi
