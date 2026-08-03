@@ -14,17 +14,20 @@ worker adapters independently testable.
 
 ## API model
 
-`AgentTestRun.spec` has four stable boundaries:
+`AgentTestRun.spec` has seven stable boundaries:
 
 | Section | Responsibility |
 | --- | --- |
 | `target` | Provider, model, endpoint, and Secret reference |
 | `workload` | Dataset, parallelism, per-worker concurrency, iterations, and timeout |
 | `evaluation` | Run-level quality and latency thresholds |
+| `telemetry` | Content omission/redaction policy for optional traces |
+| `reliability` | Fault scenario, retry, and Worker-local circuit-breaker policy |
 | `runner` | Worker image and pull policy |
+| `scheduling` | Indexed or durable queued execution, bounded resources, and placement |
 
-`AgentTestRun.status` is controller-owned and records phase, child Job, pod counters, timestamps,
-observed generation, and Kubernetes conditions.
+`AgentTestRun.status` is controller-owned and records phase, child Job or ScaledJob, shard/Pod
+counters, timestamps, observed generation, and Kubernetes conditions.
 
 ## Reconciliation flow
 
@@ -32,12 +35,13 @@ observed generation, and Kubernetes conditions.
 2. If `spec.cancel=true`, delete the worker Job and mark the run `Cancelled`.
 3. Verify that the referenced dataset ConfigMap and key exist.
 4. Generate a Secret-free worker configuration ConfigMap.
-5. Create one Indexed Job with `parallelism == completions`.
-6. Map Job counters and terminal conditions back into `AgentTestRun.status`.
-7. Rely on owner references for child-resource garbage collection when the run is deleted.
+5. Admit the fixed resource profile against controller safety caps and namespace quota.
+6. Create one Indexed Job, or register a durable shard queue and create a KEDA ScaledJob.
+7. Map Job counters or durable queue state back into `AgentTestRun.status`.
+8. Rely on owner references for child-resource garbage collection when the run is deleted.
 
 The controller treats a run as an execution record. CRD transition rules implemented with Kubernetes
-CEL keep target, workload, evaluation, and runner fields immutable while leaving `spec.cancel`
+CEL keep target, workload, evaluation, telemetry, reliability, runner, and scheduling fields immutable while leaving `spec.cancel`
 declarative. Create a new `AgentTestRun` for a new configuration; no admission webhook is required.
 
 ## Worker execution
@@ -46,8 +50,16 @@ Each worker receives `AGENTSTORM_SHARD_INDEX` and `AGENTSTORM_SHARD_COUNT`. Data
 to a worker when `i % shard_count == shard_index`. Iterations are applied after sharding, so every
 case executes the requested number of times globally without duplication between shards.
 
-Concurrency is bounded by one `asyncio.Semaphore` per worker. Every provider call has a timeout and
-is converted into a `CaseResult`; a provider error does not abort the remaining dataset.
+Concurrency is bounded by a fixed asynchronous task pool per Worker. When durable results and the explicit
+distributed-limit controller flag are enabled, every Provider attempt also passes through a
+PostgreSQL-backed global and Provider-specific permit
+lease, so replica changes cannot bypass configured admission limits. Every provider call has a
+timeout and is converted into a `CaseResult`; a provider error does not abort the remaining dataset.
+
+The optional M5 queued path separates shard count from live Worker count. KEDA polls the Result API
+for available PostgreSQL queue entries and creates one-shard Jobs up to `scheduling.maxWorkers`.
+Workers claim and renew opaque leases; expired leases are eligible for another Worker. See
+[event-driven scheduling](scheduling.md) for the admission and failure contract.
 
 Deterministic assertions run before any future model-based grader. This keeps simple correctness
 checks cheap, explainable, and reproducible.
@@ -91,10 +103,10 @@ every expected shard receipt is finalized.
 | --- | --- | --- |
 | Dataset missing | Run remains Pending | Event and clearer status reason |
 | Provider timeout/error | Case fails; worker continues | Error taxonomy and retry policy |
-| Worker pod failure | Job fails, no automatic replay | Explicit idempotent retry command |
+| Worker pod failure | Indexed Job fails; an expired queued-shard lease can be reclaimed | Durable Worker outbox |
 | Controller restart | Reconcile reconstructs state from API objects | Leader-election tests |
-| Run cancellation | Durable terminal is attempted, in-flight work stops, partial results flush, then the Job is deleted | Cross-Worker cancellation coordination in M5 |
-| Result upload failure | Worker exits non-zero and the Job fails | Durable worker outbox |
+| Run cancellation | Durable terminal is attempted, in-flight work stops, partial results flush, then Job or ScaledJob children are deleted | Faster queue-wide cancellation notification |
+| Result upload failure | Indexed Job fails; queued Worker exits and its lease expires for reclaim | Durable Worker outbox |
 
 Expensive model calls make hidden retries dangerous. Future retries must use the idempotency key
 `run_id / case_id / iteration` and distinguish transport failures from completed model calls.

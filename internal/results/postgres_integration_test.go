@@ -4,9 +4,11 @@ package results
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -407,6 +409,114 @@ func TestConcurrentShardFinalizationCompletesRun(t *testing.T) {
 	}
 	if detail.Status != RunComplete || detail.ReceivedShards != 2 || detail.Summary == nil || detail.Summary.Total != 2 {
 		t.Fatalf("concurrent finalization left an incomplete run: %#v", detail)
+	}
+}
+
+func TestPostgresDurableQueueAndDistributedLimits(t *testing.T) {
+	databaseURL := os.Getenv("AGENTSTORM_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("AGENTSTORM_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	runID := fmt.Sprintf("queue-%d", time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM agentstorm_runs WHERE id = $1`, runID) })
+	policy := LimitPolicy{
+		Global:        Limit{MaxConcurrency: 1, RequestsPerMinute: 2},
+		Providers:     map[string]Limit{"fake": {MaxConcurrency: 1}},
+		LeaseDuration: 30 * time.Second,
+	}
+	service := NewServiceWithLimitPolicy(NewPostgresRepository(pool), &captureObjectStore{}, policy)
+	registration := testRegistration(2)
+	registration.Scheduling = &RunScheduling{Strategy: "keda", MaxWorkers: 2, ResourceProfile: "small"}
+	if _, err := service.RegisterRun(ctx, runID, "run/"+runID, registration); err != nil {
+		t.Fatalf("register queued run: %v", err)
+	}
+	status, err := service.QueueStatus(ctx, runID)
+	if err != nil || status.Pending != 2 || status.Available != 2 || status.Leased != 0 {
+		t.Fatalf("initial queue status: %#v err=%v", status, err)
+	}
+	firstClaim, err := service.ClaimShard(ctx, runID, QueueClaimRequest{WorkerID: "worker-a"})
+	if err != nil || firstClaim.ShardIndex != 0 {
+		t.Fatalf("claim first shard: %#v err=%v", firstClaim, err)
+	}
+	rotatedClaim, err := service.ClaimShard(ctx, runID, QueueClaimRequest{WorkerID: "worker-a"})
+	if err != nil || rotatedClaim.ShardIndex != 0 || rotatedClaim.LeaseToken == firstClaim.LeaseToken {
+		t.Fatalf("repeat claim should rotate the same lease: %#v err=%v", rotatedClaim, err)
+	}
+	if _, err := service.RenewShardLease(ctx, runID, 0, QueueRenewRequest{LeaseToken: firstClaim.LeaseToken}); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("old lease token should be invalid, got %v", err)
+	}
+	if _, err := service.RenewShardLease(ctx, runID, 0, QueueRenewRequest{LeaseToken: rotatedClaim.LeaseToken}); err != nil {
+		t.Fatalf("renew active lease: %v", err)
+	}
+
+	requestA := PermitRequest{RequestID: strings.Repeat("a", 64), WorkerID: "worker-a", Provider: "fake"}
+	permitA, err := service.AcquirePermit(ctx, runID, requestA)
+	if err != nil {
+		t.Fatalf("acquire first permit: %v", err)
+	}
+	requestB := PermitRequest{RequestID: strings.Repeat("b", 64), WorkerID: "worker-b", Provider: "fake"}
+	if _, err := service.AcquirePermit(ctx, runID, requestB); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("second permit should be limited, got %v", err)
+	}
+	if err := service.ReleasePermit(ctx, runID, permitA.PermitID, PermitLeaseRequest{LeaseToken: permitA.LeaseToken}); err != nil {
+		t.Fatalf("release permit: %v", err)
+	}
+	permitB, err := service.AcquirePermit(ctx, runID, requestB)
+	if err != nil {
+		t.Fatalf("acquire permit after release: %v", err)
+	}
+	if err := service.ReleasePermit(ctx, runID, permitB.PermitID, PermitLeaseRequest{LeaseToken: permitB.LeaseToken}); err != nil {
+		t.Fatalf("release second permit: %v", err)
+	}
+	requestC := PermitRequest{RequestID: strings.Repeat("c", 64), WorkerID: "worker-c", Provider: "fake"}
+	if _, err := service.AcquirePermit(ctx, runID, requestC); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("third permit should be rate limited, got %v", err)
+	}
+
+	upload := testShard(runID, 0, "case-a", true)
+	if _, err := service.UploadShardWithLease(ctx, runID, 0, "run/"+runID+"/shard/0", rotatedClaim.LeaseToken, upload); err != nil {
+		t.Fatalf("upload leased shard: %v", err)
+	}
+	status, err = service.QueueStatus(ctx, runID)
+	if err != nil || status.Completed != 1 || status.Pending != 1 || status.Leased != 0 {
+		t.Fatalf("queue status after upload: %#v err=%v", status, err)
+	}
+	expiredClaim, err := service.ClaimShard(ctx, runID, QueueClaimRequest{WorkerID: "worker-c"})
+	if err != nil || expiredClaim.ShardIndex != 1 {
+		t.Fatalf("claim shard for expiry: %#v err=%v", expiredClaim, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE agentstorm_shard_queue
+		SET lease_expires_at = now() - interval '1 second'
+		WHERE run_id = $1 AND shard_index = 1`, runID); err != nil {
+		t.Fatalf("expire shard lease: %v", err)
+	}
+	reclaimed, err := service.ClaimShard(ctx, runID, QueueClaimRequest{WorkerID: "worker-d"})
+	if err != nil || reclaimed.ShardIndex != 1 || reclaimed.LeaseToken == expiredClaim.LeaseToken {
+		t.Fatalf("reclaim expired shard: %#v err=%v", reclaimed, err)
+	}
+	if _, err := service.RenewShardLease(ctx, runID, 1, QueueRenewRequest{LeaseToken: expiredClaim.LeaseToken}); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("expired owner renewed reclaimed shard: %v", err)
+	}
+	if _, err := service.RenewShardLease(ctx, runID, 1, QueueRenewRequest{LeaseToken: reclaimed.LeaseToken}); err != nil {
+		t.Fatalf("renew reclaimed shard: %v", err)
+	}
+	if _, err := service.TerminateRun(ctx, runID, "run/"+runID+"/terminal/cancelled", TerminalRequest{Status: RunCancelled, ReasonCode: "test_cancel"}); err != nil {
+		t.Fatalf("cancel queued run: %v", err)
+	}
+	status, err = service.QueueStatus(ctx, runID)
+	if err != nil || status.Available != 0 || status.RunStatus != RunCancelled {
+		t.Fatalf("cancelled queue status: %#v err=%v", status, err)
 	}
 }
 

@@ -2,13 +2,16 @@ package results
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -74,13 +77,25 @@ func (r *PostgresRepository) RegisterRun(ctx context.Context, runID, key, hash s
 	if err != nil {
 		return false, fmt.Errorf("marshal registration: %w", err)
 	}
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin run registration: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+
 	var inserted string
-	err = r.pool.QueryRow(ctx, `
+	err = transaction.QueryRow(ctx, `
 		INSERT INTO agentstorm_runs (id, registration_key, registration_hash, registration, expected_shards)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT DO NOTHING
 		RETURNING id`, runID, key, hash, payload, registration.ExpectedShards).Scan(&inserted)
 	if err == nil {
+		if err := enqueueRunShards(ctx, transaction, runID, registration); err != nil {
+			return false, err
+		}
+		if err := transaction.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit run registration: %w", err)
+		}
 		return true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -88,17 +103,37 @@ func (r *PostgresRepository) RegisterRun(ctx context.Context, runID, key, hash s
 	}
 
 	var existingID, existingKey, existingHash string
-	err = r.pool.QueryRow(ctx, `
+	err = transaction.QueryRow(ctx, `
 		SELECT id, registration_key, registration_hash
 		FROM agentstorm_runs
-		WHERE id = $1 OR registration_key = $2`, runID, key).Scan(&existingID, &existingKey, &existingHash)
+		WHERE id = $1 OR registration_key = $2
+		FOR UPDATE`, runID, key).Scan(&existingID, &existingKey, &existingHash)
 	if err != nil {
 		return false, fmt.Errorf("read conflicting registration: %w", err)
 	}
 	if existingID != runID || existingKey != key || existingHash != hash {
 		return false, ErrConflict
 	}
+	if err := enqueueRunShards(ctx, transaction, runID, registration); err != nil {
+		return false, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit duplicate run registration: %w", err)
+	}
 	return false, nil
+}
+
+func enqueueRunShards(ctx context.Context, transaction pgx.Tx, runID string, registration Registration) error {
+	if registration.Scheduling == nil || registration.Scheduling.Strategy != "keda" {
+		return nil
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO agentstorm_shard_queue (run_id, shard_index)
+		SELECT $1, generate_series(0, $2 - 1)
+		ON CONFLICT (run_id, shard_index) DO NOTHING`, runID, registration.ExpectedShards); err != nil {
+		return fmt.Errorf("enqueue run shards: %w", err)
+	}
+	return nil
 }
 
 func (r *PostgresRepository) TerminateRun(ctx context.Context, runID, key, hash string, terminal TerminalRequest) (bool, error) {
@@ -139,10 +174,316 @@ func (r *PostgresRepository) TerminateRun(ctx context.Context, runID, key, hash 
 		WHERE id = $1`, runID, terminal.Status, key, hash, terminal.ReasonCode); err != nil {
 		return false, fmt.Errorf("persist terminal update: %w", err)
 	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE agentstorm_shard_queue
+		SET state = 'cancelled', lease_owner = NULL, lease_token_hash = NULL,
+		    lease_expires_at = NULL, updated_at = now()
+		WHERE run_id = $1 AND state <> 'complete'`, runID); err != nil {
+		return false, fmt.Errorf("cancel queued shards: %w", err)
+	}
 	if err := transaction.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit terminal update: %w", err)
 	}
 	return true, nil
+}
+
+func (r *PostgresRepository) ClaimShard(
+	ctx context.Context,
+	runID string,
+	workerID string,
+	leaseHash string,
+	duration time.Duration,
+) (int, time.Time, error) {
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("begin shard claim: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+
+	var status RunStatus
+	var strategy string
+	if err := transaction.QueryRow(ctx, `
+		SELECT status, COALESCE(registration->'scheduling'->>'strategy', '')
+		FROM agentstorm_runs
+		WHERE id = $1
+		FOR UPDATE`, runID).Scan(&status, &strategy); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, time.Time{}, ErrNotFound
+		}
+		return 0, time.Time{}, fmt.Errorf("read queued run: %w", err)
+	}
+	if strategy != "keda" {
+		return 0, time.Time{}, validationError("run does not use queued scheduling")
+	}
+	if status != RunCollecting {
+		return 0, time.Time{}, ErrQueueEmpty
+	}
+
+	var shardIndex int
+	var expiresAt time.Time
+	err = transaction.QueryRow(ctx, `
+		UPDATE agentstorm_shard_queue
+		SET lease_token_hash = $3,
+		    lease_expires_at = now() + ($4 * interval '1 millisecond'),
+		    updated_at = now()
+		WHERE run_id = $1 AND lease_owner = $2 AND state = 'leased' AND lease_expires_at > now()
+		RETURNING shard_index, lease_expires_at`, runID, workerID, leaseHash, duration.Milliseconds()).Scan(&shardIndex, &expiresAt)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, time.Time{}, fmt.Errorf("renew repeated shard claim: %w", err)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = transaction.QueryRow(ctx, `
+			WITH candidate AS (
+				SELECT shard_index
+				FROM agentstorm_shard_queue
+				WHERE run_id = $1
+				  AND (state = 'queued' OR (state = 'leased' AND lease_expires_at <= now()))
+				ORDER BY shard_index
+				FOR UPDATE SKIP LOCKED
+				LIMIT 1
+			)
+			UPDATE agentstorm_shard_queue AS queue
+			SET state = 'leased', lease_owner = $2, lease_token_hash = $3,
+			    lease_expires_at = now() + ($4 * interval '1 millisecond'),
+			    lease_count = lease_count + 1, updated_at = now()
+			FROM candidate
+			WHERE queue.run_id = $1 AND queue.shard_index = candidate.shard_index
+			RETURNING queue.shard_index, queue.lease_expires_at`, runID, workerID, leaseHash, duration.Milliseconds()).Scan(&shardIndex, &expiresAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, time.Time{}, ErrQueueEmpty
+		}
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("claim queued shard: %w", err)
+		}
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return 0, time.Time{}, fmt.Errorf("commit shard claim: %w", err)
+	}
+	return shardIndex, expiresAt, nil
+}
+
+func (r *PostgresRepository) RenewShardLease(
+	ctx context.Context,
+	runID string,
+	shardIndex int,
+	leaseHash string,
+	duration time.Duration,
+) (time.Time, error) {
+	var expiresAt time.Time
+	err := r.pool.QueryRow(ctx, `
+		UPDATE agentstorm_shard_queue
+		SET lease_expires_at = now() + ($4 * interval '1 millisecond'), updated_at = now()
+		WHERE run_id = $1 AND shard_index = $2 AND state = 'leased'
+		  AND lease_token_hash = $3 AND lease_expires_at > now()
+		RETURNING lease_expires_at`, runID, shardIndex, leaseHash, duration.Milliseconds()).Scan(&expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("renew shard lease: %w", err)
+	}
+	return expiresAt, nil
+}
+
+func (r *PostgresRepository) QueueStatus(ctx context.Context, runID string) (QueueStatus, error) {
+	var status QueueStatus
+	var thresholdsPassed *bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT r.status, r.expected_shards,
+		       count(q.shard_index) FILTER (
+		           WHERE q.state = 'queued' OR (q.state = 'leased' AND q.lease_expires_at <= now())
+		       ),
+		       count(q.shard_index) FILTER (WHERE q.state = 'leased' AND q.lease_expires_at > now()),
+		       count(q.shard_index) FILTER (WHERE q.state = 'complete'),
+		       CASE WHEN rs.run_id IS NULL THEN NULL ELSE rs.thresholds_passed END
+		FROM agentstorm_runs r
+		LEFT JOIN agentstorm_shard_queue q ON q.run_id = r.id
+		LEFT JOIN agentstorm_run_summaries rs ON rs.run_id = r.id
+		WHERE r.id = $1
+		GROUP BY r.id, rs.run_id, rs.thresholds_passed`, runID).Scan(
+		&status.RunStatus, &status.Expected, &status.Pending, &status.Leased, &status.Completed, &thresholdsPassed,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return QueueStatus{}, ErrNotFound
+	}
+	if err != nil {
+		return QueueStatus{}, fmt.Errorf("read queue status: %w", err)
+	}
+	if status.RunStatus == RunCollecting {
+		status.Available = status.Pending
+	}
+	status.ThresholdsPassed = thresholdsPassed
+	return status, nil
+}
+
+const schedulerLockID int64 = migrationLockID + 1
+
+func (r *PostgresRepository) AcquirePermit(
+	ctx context.Context,
+	runID string,
+	request PermitRequest,
+	leaseHash string,
+	policy LimitPolicy,
+) (string, time.Time, error) {
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("begin permit acquisition: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	if _, err := transaction.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", schedulerLockID); err != nil {
+		return "", time.Time{}, fmt.Errorf("lock distributed limits: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `
+		DELETE FROM agentstorm_execution_permits
+		WHERE updated_at < now() - interval '1 hour'
+		  AND (released_at IS NOT NULL OR lease_expires_at <= now())`); err != nil {
+		return "", time.Time{}, fmt.Errorf("prune execution permits: %w", err)
+	}
+
+	var runStatus RunStatus
+	var registeredProvider string
+	if err := transaction.QueryRow(ctx, `
+		SELECT status, registration->'target'->>'provider'
+		FROM agentstorm_runs
+		WHERE id = $1`, runID).Scan(&runStatus, &registeredProvider); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", time.Time{}, ErrNotFound
+		}
+		return "", time.Time{}, fmt.Errorf("read permit run: %w", err)
+	}
+	if runStatus != RunCollecting {
+		return "", time.Time{}, ErrLeaseLost
+	}
+	if registeredProvider != request.Provider {
+		return "", time.Time{}, validationError("permit provider does not match registered run")
+	}
+
+	var existingID, existingHash string
+	var existingExpiry time.Time
+	var releasedAt *time.Time
+	var existingActive bool
+	err = transaction.QueryRow(ctx, `
+		SELECT permit_id, lease_token_hash, lease_expires_at, released_at, lease_expires_at > now()
+		FROM agentstorm_execution_permits
+		WHERE request_id = $1
+		FOR UPDATE`, request.RequestID).Scan(&existingID, &existingHash, &existingExpiry, &releasedAt, &existingActive)
+	if err == nil {
+		if releasedAt != nil || !existingActive {
+			return "", time.Time{}, ErrLeaseLost
+		}
+		if _, err := transaction.Exec(ctx, `
+			UPDATE agentstorm_execution_permits
+			SET lease_token_hash = $2,
+			    lease_expires_at = now() + ($3 * interval '1 millisecond'), updated_at = now()
+			WHERE permit_id = $1`, existingID, leaseHash, policy.LeaseDuration.Milliseconds()); err != nil {
+			return "", time.Time{}, fmt.Errorf("refresh repeated permit: %w", err)
+		}
+		if err := transaction.QueryRow(ctx, `SELECT lease_expires_at FROM agentstorm_execution_permits WHERE permit_id = $1`, existingID).Scan(&existingExpiry); err != nil {
+			return "", time.Time{}, fmt.Errorf("read refreshed permit: %w", err)
+		}
+		if err := transaction.Commit(ctx); err != nil {
+			return "", time.Time{}, fmt.Errorf("commit repeated permit: %w", err)
+		}
+		return existingID, existingExpiry, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, fmt.Errorf("read existing permit: %w", err)
+	}
+
+	providerLimit := policy.Providers[request.Provider]
+	var globalActive, providerActive, globalRate, providerRate int
+	if err := transaction.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE released_at IS NULL AND lease_expires_at > now()),
+			count(*) FILTER (WHERE provider = $1 AND released_at IS NULL AND lease_expires_at > now())
+		FROM agentstorm_execution_permits`, request.Provider).Scan(&globalActive, &providerActive); err != nil {
+		return "", time.Time{}, fmt.Errorf("count active permits: %w", err)
+	}
+	if err := transaction.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE provider = $1)
+		FROM agentstorm_rate_events
+		WHERE occurred_at > now() - interval '1 minute'`, request.Provider).Scan(&globalRate, &providerRate); err != nil {
+		return "", time.Time{}, fmt.Errorf("count rate events: %w", err)
+	}
+	if (policy.Global.MaxConcurrency > 0 && globalActive >= policy.Global.MaxConcurrency) ||
+		(providerLimit.MaxConcurrency > 0 && providerActive >= providerLimit.MaxConcurrency) {
+		return "", time.Time{}, &CapacityError{RetryAfter: 250 * time.Millisecond}
+	}
+	if (policy.Global.RequestsPerMinute > 0 && globalRate >= policy.Global.RequestsPerMinute) ||
+		(providerLimit.RequestsPerMinute > 0 && providerRate >= providerLimit.RequestsPerMinute) {
+		return "", time.Time{}, &CapacityError{RetryAfter: time.Second}
+	}
+
+	permitID, err := randomDatabaseIdentifier()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	var expiresAt time.Time
+	if err := transaction.QueryRow(ctx, `
+		INSERT INTO agentstorm_execution_permits
+			(permit_id, request_id, run_id, worker_id, provider, lease_token_hash, lease_expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now() + ($7 * interval '1 millisecond'))
+		RETURNING lease_expires_at`, permitID, request.RequestID, runID, request.WorkerID,
+		request.Provider, leaseHash, policy.LeaseDuration.Milliseconds()).Scan(&expiresAt); err != nil {
+		return "", time.Time{}, fmt.Errorf("persist execution permit: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO agentstorm_rate_events (request_id, provider)
+		VALUES ($1, $2)`, request.RequestID, request.Provider); err != nil {
+		return "", time.Time{}, fmt.Errorf("persist rate event: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `DELETE FROM agentstorm_rate_events WHERE occurred_at < now() - interval '1 hour'`); err != nil {
+		return "", time.Time{}, fmt.Errorf("prune rate events: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return "", time.Time{}, fmt.Errorf("commit execution permit: %w", err)
+	}
+	return permitID, expiresAt, nil
+}
+
+func (r *PostgresRepository) RenewPermit(
+	ctx context.Context,
+	runID string,
+	permitID string,
+	leaseHash string,
+	duration time.Duration,
+) (time.Time, error) {
+	var expiresAt time.Time
+	err := r.pool.QueryRow(ctx, `
+		UPDATE agentstorm_execution_permits
+		SET lease_expires_at = now() + ($4 * interval '1 millisecond'), updated_at = now()
+		WHERE run_id = $1 AND permit_id = $2 AND lease_token_hash = $3
+		  AND released_at IS NULL AND lease_expires_at > now()
+		RETURNING lease_expires_at`, runID, permitID, leaseHash, duration.Milliseconds()).Scan(&expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("renew execution permit: %w", err)
+	}
+	return expiresAt, nil
+}
+
+func (r *PostgresRepository) ReleasePermit(ctx context.Context, runID, permitID, leaseHash string) error {
+	command, err := r.pool.Exec(ctx, `
+		UPDATE agentstorm_execution_permits
+		SET released_at = COALESCE(released_at, now()), updated_at = now()
+		WHERE run_id = $1 AND permit_id = $2 AND lease_token_hash = $3`, runID, permitID, leaseHash)
+	if err != nil {
+		return fmt.Errorf("release execution permit: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func randomDatabaseIdentifier() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generate scheduler identifier: %w", err)
+	}
+	return hex.EncodeToString(buffer), nil
 }
 
 func (r *PostgresRepository) ReserveShard(
@@ -152,6 +493,7 @@ func (r *PostgresRepository) ReserveShard(
 	key string,
 	hash string,
 	objectKey string,
+	leaseHash string,
 	summary ShardSummary,
 ) (ShardReservation, error) {
 	transaction, err := r.pool.Begin(ctx)
@@ -161,8 +503,13 @@ func (r *PostgresRepository) ReserveShard(
 	defer func() { _ = transaction.Rollback(ctx) }()
 
 	var expectedShards int
+	var runStatus RunStatus
 	var registrationPayload []byte
-	if err := transaction.QueryRow(ctx, `SELECT expected_shards, registration FROM agentstorm_runs WHERE id = $1 FOR UPDATE`, runID).Scan(&expectedShards, &registrationPayload); err != nil {
+	if err := transaction.QueryRow(ctx, `
+		SELECT expected_shards, registration, status
+		FROM agentstorm_runs
+		WHERE id = $1
+		FOR UPDATE`, runID).Scan(&expectedShards, &registrationPayload, &runStatus); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ShardReservation{}, ErrNotFound
 		}
@@ -174,6 +521,24 @@ func (r *PostgresRepository) ReserveShard(
 	}
 	if shardIndex >= expectedShards {
 		return ShardReservation{}, validationErrorf("shard index %d is outside expected range [0,%d)", shardIndex, expectedShards)
+	}
+	if registration.Scheduling != nil && registration.Scheduling.Strategy == "keda" && runStatus == RunCollecting {
+		if strings.TrimSpace(leaseHash) == "" {
+			return ShardReservation{}, ErrLeaseLost
+		}
+		var storedLeaseHash string
+		if err := transaction.QueryRow(ctx, `
+			SELECT lease_token_hash
+			FROM agentstorm_shard_queue
+			WHERE run_id = $1 AND shard_index = $2 AND state = 'leased' AND lease_expires_at > now()
+			FOR UPDATE`, runID, shardIndex).Scan(&storedLeaseHash); errors.Is(err, pgx.ErrNoRows) {
+			return ShardReservation{}, ErrLeaseLost
+		} else if err != nil {
+			return ShardReservation{}, fmt.Errorf("validate shard lease: %w", err)
+		}
+		if storedLeaseHash != leaseHash {
+			return ShardReservation{}, ErrLeaseLost
+		}
 	}
 
 	summaryPayload, err := json.Marshal(summary)
@@ -225,6 +590,7 @@ func (r *PostgresRepository) FinalizeShard(
 	runID string,
 	shardIndex int,
 	hash string,
+	leaseHash string,
 	cases []CaseResult,
 	pricing *RunPricing,
 ) (bool, error) {
@@ -235,15 +601,36 @@ func (r *PostgresRepository) FinalizeShard(
 	defer func() { _ = transaction.Rollback(ctx) }()
 
 	var lockedRunID string
+	var runStatus RunStatus
+	var registrationPayload []byte
 	if err := transaction.QueryRow(ctx, `
-		SELECT id
+		SELECT id, registration, status
 		FROM agentstorm_runs
 		WHERE id = $1
-		FOR UPDATE`, runID).Scan(&lockedRunID); err != nil {
+		FOR UPDATE`, runID).Scan(&lockedRunID, &registrationPayload, &runStatus); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, ErrNotFound
 		}
 		return false, fmt.Errorf("lock run for shard finalization: %w", err)
+	}
+	var registration Registration
+	if err := json.Unmarshal(registrationPayload, &registration); err != nil {
+		return false, fmt.Errorf("decode run scheduling: %w", err)
+	}
+	if registration.Scheduling != nil && registration.Scheduling.Strategy == "keda" && runStatus == RunCollecting {
+		var storedLeaseHash string
+		if err := transaction.QueryRow(ctx, `
+			SELECT lease_token_hash
+			FROM agentstorm_shard_queue
+			WHERE run_id = $1 AND shard_index = $2 AND state = 'leased' AND lease_expires_at > now()
+			FOR UPDATE`, runID, shardIndex).Scan(&storedLeaseHash); errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrLeaseLost
+		} else if err != nil {
+			return false, fmt.Errorf("lock shard lease: %w", err)
+		}
+		if storedLeaseHash != leaseHash {
+			return false, ErrLeaseLost
+		}
 	}
 
 	var receiptHash, receiptStatus string
@@ -335,6 +722,15 @@ func (r *PostgresRepository) FinalizeShard(
 		SET status = 'complete', updated_at = now()
 		WHERE run_id = $1 AND shard_index = $2`, runID, shardIndex); err != nil {
 		return false, fmt.Errorf("complete shard receipt: %w", err)
+	}
+	if registration.Scheduling != nil && registration.Scheduling.Strategy == "keda" {
+		if _, err := transaction.Exec(ctx, `
+			UPDATE agentstorm_shard_queue
+			SET state = 'complete', lease_owner = NULL, lease_token_hash = NULL,
+			    lease_expires_at = NULL, updated_at = now()
+			WHERE run_id = $1 AND shard_index = $2`, runID, shardIndex); err != nil {
+			return false, fmt.Errorf("complete queued shard: %w", err)
+		}
 	}
 	if err := refreshAggregate(ctx, transaction, runID); err != nil {
 		return false, err

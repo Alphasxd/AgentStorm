@@ -34,9 +34,16 @@ func main() {
 	var resultWriteTokenSecretName string
 	var resultWriteTokenSecretKey string
 	var includeSensitiveResults bool
+	var enableDistributedLimits bool
 	var resultUploadTimeout time.Duration
 	var otlpEndpoint string
 	var allowRedactedTelemetry bool
+	var enableKEDA bool
+	var kedaMetricsAPIURL string
+	var maxWorkersPerRun int
+	var maxInFlightCases int64
+	var requireResourceQuota bool
+	var kedaPollingInterval int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for the metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address for health probes")
 	flag.BoolVar(&leaderElection, "leader-elect", false, "enable leader election")
@@ -45,9 +52,16 @@ func main() {
 	flag.StringVar(&resultWriteTokenSecretName, "result-write-token-secret-name", "agentstorm-result-auth", "per-run-namespace Secret containing the Result API write token")
 	flag.StringVar(&resultWriteTokenSecretKey, "result-write-token-secret-key", "write-token", "Secret data key containing the Result API write token")
 	flag.BoolVar(&includeSensitiveResults, "include-sensitive-results", false, "upload case output and full error text")
+	flag.BoolVar(&enableDistributedLimits, "enable-distributed-limits", false, "require Workers to acquire Result API backed Provider permits")
 	flag.DurationVar(&resultUploadTimeout, "result-upload-timeout", 30*time.Second, "timeout for each Result API request")
 	flag.StringVar(&otlpEndpoint, "otel-exporter-otlp-endpoint", "", "OTLP/HTTP base endpoint injected into workers; empty disables tracing")
 	flag.BoolVar(&allowRedactedTelemetry, "allow-redacted-telemetry", false, "allow runs to export sanitized prompt, output, tool, and allowlisted metadata content")
+	flag.BoolVar(&enableKEDA, "enable-keda", false, "allow durable queued runs to create KEDA ScaledJobs")
+	flag.StringVar(&kedaMetricsAPIURL, "keda-metrics-api-url", "", "Result API URL reachable by the KEDA operator")
+	flag.IntVar(&maxWorkersPerRun, "max-workers-per-run", 100, "controller safety cap for scheduling.maxWorkers")
+	flag.Int64Var(&maxInFlightCases, "max-in-flight-cases", 1000, "controller safety cap for Worker count multiplied by per-Worker concurrency")
+	flag.BoolVar(&requireResourceQuota, "require-runner-resource-quota", false, "require each execution namespace to define a ResourceQuota")
+	flag.IntVar(&kedaPollingInterval, "keda-polling-interval", 2, "KEDA queue polling interval in seconds")
 	zapOptions := zap.Options{Development: true}
 	zapOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -61,6 +75,7 @@ func main() {
 		WriteTokenSecretName: resultWriteTokenSecretName,
 		WriteTokenSecretKey:  resultWriteTokenSecretKey,
 		IncludeSensitive:     includeSensitiveResults,
+		DistributedLimits:    enableDistributedLimits,
 		TimeoutSeconds:       int(resultUploadTimeout.Seconds()),
 	}
 	if err := resultSink.ValidateAndDefault(); err != nil {
@@ -70,6 +85,19 @@ func main() {
 	telemetry := agentcontroller.TelemetryConfig{OTLPEndpoint: otlpEndpoint, AllowRedacted: allowRedactedTelemetry}
 	if err := telemetry.ValidateAndDefault(); err != nil {
 		ctrl.Log.Error(err, "invalid telemetry configuration")
+		os.Exit(1)
+	}
+	if maxWorkersPerRun < 1 || maxWorkersPerRun > 1000 || kedaPollingInterval < 1 || kedaPollingInterval > 300 {
+		ctrl.Log.Error(fmt.Errorf("scheduler integer flags are outside their supported range"), "invalid scheduler configuration")
+		os.Exit(1)
+	}
+	scheduler := agentcontroller.SchedulerConfig{
+		EnableKEDA: enableKEDA, MetricsAPIURL: kedaMetricsAPIURL,
+		MaxWorkersPerRun: int32(maxWorkersPerRun), MaxInFlightCases: maxInFlightCases,
+		RequireResourceQuota: requireResourceQuota, PollingInterval: int32(kedaPollingInterval),
+	}
+	if err := scheduler.ValidateAndDefault(); err != nil {
+		ctrl.Log.Error(err, "invalid scheduler configuration")
 		os.Exit(1)
 	}
 
@@ -97,6 +125,7 @@ func main() {
 		Scheme:     manager.GetScheme(),
 		ResultSink: resultSink,
 		Telemetry:  telemetry,
+		Scheduler:  scheduler,
 		Recorder:   manager.GetEventRecorderFor("agentstorm-controller"),
 	}).SetupWithManager(manager); err != nil {
 		ctrl.Log.Error(err, "unable to create controller")

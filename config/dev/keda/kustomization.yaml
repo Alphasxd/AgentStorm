@@ -1,0 +1,68 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agentstorm-system
+resources:
+  - ../results
+  - runner-quota.yaml
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: agentstorm-controller
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: agentstorm-controller:dev
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --enable-keda
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --keda-metrics-api-url=http://agentstorm-result-api.agentstorm-system.svc.cluster.local:8080
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --require-runner-resource-quota
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --enable-distributed-limits
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: agentstorm-result-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: agentstorm-result-api:dev
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: AGENTSTORM_GLOBAL_MAX_CONCURRENCY
+          value: "32"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: AGENTSTORM_GLOBAL_REQUESTS_PER_MINUTE
+          value: "600"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: AGENTSTORM_PROVIDER_LIMITS_JSON
+          value: '{"fake":{"max_concurrency":32,"requests_per_minute":600},"openai-agents":{"max_concurrency":8,"requests_per_minute":60}}'
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: agentstorm-result-api
+    patch: |-
+      - op: add
+        path: /spec/ingress/-
+        value:
+          from:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: keda
+          ports:
+            - protocol: TCP
+              port: 8080

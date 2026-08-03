@@ -57,8 +57,9 @@ type AgentTelemetryRedactionSpec struct {
 type AgentWorkloadSpec struct {
 	// DatasetRef points to a JSONL dataset in a ConfigMap.
 	DatasetRef corev1.ConfigMapKeySelector `json:"datasetRef"`
-	// Parallelism is the number of indexed Kubernetes Job pods.
+	// Parallelism is the durable shard count and, for indexed scheduling, the Job pod count.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
 	// +kubebuilder:default=1
 	Parallelism int32 `json:"parallelism,omitempty"`
 	// ConcurrencyPerWorker is the maximum number of in-flight cases in each pod.
@@ -143,6 +144,28 @@ type AgentRunnerSpec struct {
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 }
 
+type AgentSchedulingSpec struct {
+	// Strategy selects the compatibility Indexed Job or the durable KEDA queue path.
+	// +kubebuilder:validation:Enum=indexed;keda
+	// +kubebuilder:default=indexed
+	Strategy string `json:"strategy,omitempty"`
+	// MaxWorkers caps simultaneously active KEDA Jobs for this run.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +kubebuilder:default=1
+	MaxWorkers int32 `json:"maxWorkers,omitempty"`
+	// ResourceProfile selects bounded CPU and memory requests/limits.
+	// +kubebuilder:validation:Enum=small;medium;large
+	// +kubebuilder:default=small
+	ResourceProfile string `json:"resourceProfile,omitempty"`
+	// NodeSelector constrains Worker placement without granting arbitrary Pod mutation.
+	// +kubebuilder:validation:MaxProperties=32
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Tolerations allow Workers to use explicitly tainted execution nodes.
+	// +kubebuilder:validation:MaxItems=16
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+}
+
 type AgentTestRunSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="target is immutable; create a new AgentTestRun"
 	Target AgentTargetSpec `json:"target"`
@@ -160,6 +183,9 @@ type AgentTestRunSpec struct {
 	Reliability *AgentReliabilitySpec `json:"reliability,omitempty"`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="runner is immutable; create a new AgentTestRun"
 	Runner AgentRunnerSpec `json:"runner"`
+	// +kubebuilder:default={}
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="scheduling is immutable; create a new AgentTestRun"
+	Scheduling AgentSchedulingSpec `json:"scheduling,omitempty"`
 	// Cancel declaratively requests termination of the worker Job.
 	Cancel bool `json:"cancel,omitempty"`
 }
@@ -167,6 +193,7 @@ type AgentTestRunSpec struct {
 type AgentTestRunStatus struct {
 	Phase              AgentTestRunPhase  `json:"phase,omitempty"`
 	JobName            string             `json:"jobName,omitempty"`
+	ScaledJobName      string             `json:"scaledJobName,omitempty"`
 	Active             int32              `json:"active,omitempty"`
 	Succeeded          int32              `json:"succeeded,omitempty"`
 	Failed             int32              `json:"failed,omitempty"`

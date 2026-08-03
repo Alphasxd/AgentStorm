@@ -67,6 +67,12 @@ func (h *HTTPHandler) routes() {
 	h.mux.HandleFunc("PUT /v1/runs/{runID}", h.requireWrite(h.registerRun))
 	h.mux.HandleFunc("PUT /v1/runs/{runID}/terminal", h.requireWrite(h.terminateRun))
 	h.mux.HandleFunc("PUT /v1/runs/{runID}/shards/{index}", h.requireWrite(h.uploadShard))
+	h.mux.HandleFunc("GET /v1/runs/{runID}/queue", h.queueStatus)
+	h.mux.HandleFunc("POST /v1/runs/{runID}/queue/claims", h.requireWrite(h.claimShard))
+	h.mux.HandleFunc("POST /v1/runs/{runID}/queue/shards/{index}/renew", h.requireWrite(h.renewShardLease))
+	h.mux.HandleFunc("POST /v1/runs/{runID}/permits", h.requireWrite(h.acquirePermit))
+	h.mux.HandleFunc("POST /v1/runs/{runID}/permits/{permitID}/renew", h.requireWrite(h.renewPermit))
+	h.mux.HandleFunc("POST /v1/runs/{runID}/permits/{permitID}/release", h.requireWrite(h.releasePermit))
 	h.mux.HandleFunc("GET /v1/runs/{runID}", h.requireRead(h.getRun))
 	h.mux.HandleFunc("GET /v1/runs/{runID}/cases", h.requireRead(h.listCases))
 	h.mux.HandleFunc("GET /v1/comparisons", h.requireRead(h.compare))
@@ -161,7 +167,10 @@ func (h *HTTPHandler) uploadShard(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	result, err := h.service.UploadShard(request.Context(), request.PathValue("runID"), index, request.Header.Get("Idempotency-Key"), upload)
+	result, err := h.service.UploadShardWithLease(
+		request.Context(), request.PathValue("runID"), index,
+		request.Header.Get("Idempotency-Key"), request.Header.Get("X-AgentStorm-Queue-Lease"), upload,
+	)
 	h.metrics.observeShard(result, upload, err)
 	if err != nil {
 		writeServiceError(writer, err)
@@ -172,6 +181,111 @@ func (h *HTTPHandler) uploadShard(writer http.ResponseWriter, request *http.Requ
 		status = http.StatusCreated
 	}
 	writeJSON(writer, status, map[string]any{"run_id": request.PathValue("runID"), "shard_index": index, "created": result.Created})
+}
+
+func (h *HTTPHandler) queueStatus(writer http.ResponseWriter, request *http.Request) {
+	status, err := h.service.QueueStatus(request.Context(), request.PathValue("runID"))
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (h *HTTPHandler) claimShard(writer http.ResponseWriter, request *http.Request) {
+	var claimRequest QueueClaimRequest
+	if err := decodeJSON(writer, request, &claimRequest); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	claim, err := h.service.ClaimShard(request.Context(), request.PathValue("runID"), claimRequest)
+	h.metrics.observeQueueClaim(err)
+	if errors.Is(err, ErrQueueEmpty) {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, claim)
+}
+
+func (h *HTTPHandler) renewShardLease(writer http.ResponseWriter, request *http.Request) {
+	index, err := strconv.Atoi(request.PathValue("index"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "shard index must be an integer")
+		return
+	}
+	var renewRequest QueueRenewRequest
+	if err := decodeJSON(writer, request, &renewRequest); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	lease, err := h.service.RenewShardLease(request.Context(), request.PathValue("runID"), index, renewRequest)
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, lease)
+}
+
+func (h *HTTPHandler) acquirePermit(writer http.ResponseWriter, request *http.Request) {
+	var permitRequest PermitRequest
+	if err := decodeJSON(writer, request, &permitRequest); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	grant, err := h.service.AcquirePermit(request.Context(), request.PathValue("runID"), permitRequest)
+	h.metrics.observePermit(err)
+	if err != nil {
+		var capacity *CapacityError
+		if errors.As(err, &capacity) {
+			writer.Header().Set("Retry-After", strconv.FormatInt(max(1, int64(capacity.RetryAfter/time.Second)), 10))
+			writeJSON(writer, http.StatusTooManyRequests, map[string]any{
+				"code": "scheduler_busy", "message": "distributed limit is currently exhausted",
+				"retry_after_ms": capacity.RetryAfter.Milliseconds(),
+			})
+			return
+		}
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, grant)
+}
+
+func (h *HTTPHandler) renewPermit(writer http.ResponseWriter, request *http.Request) {
+	h.permitLeaseAction(writer, request, true)
+}
+
+func (h *HTTPHandler) releasePermit(writer http.ResponseWriter, request *http.Request) {
+	h.permitLeaseAction(writer, request, false)
+}
+
+func (h *HTTPHandler) permitLeaseAction(writer http.ResponseWriter, request *http.Request, renew bool) {
+	var leaseRequest PermitLeaseRequest
+	if err := decodeJSON(writer, request, &leaseRequest); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if renew {
+		lease, err := h.service.RenewPermit(
+			request.Context(), request.PathValue("runID"), request.PathValue("permitID"), leaseRequest,
+		)
+		if err != nil {
+			writeServiceError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, lease)
+		return
+	}
+	if err := h.service.ReleasePermit(
+		request.Context(), request.PathValue("runID"), request.PathValue("permitID"), leaseRequest,
+	); err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]bool{"released": true})
 }
 
 func (h *HTTPHandler) getRun(writer http.ResponseWriter, request *http.Request) {
@@ -240,6 +354,8 @@ func writeServiceError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusConflict, "idempotency_conflict", "idempotency key was reused with different content")
 	case errors.Is(err, ErrNotReady):
 		writeError(writer, http.StatusConflict, "run_not_complete", "both runs must be complete")
+	case errors.Is(err, ErrLeaseLost):
+		writeError(writer, http.StatusConflict, "lease_lost", "scheduler lease is no longer valid")
 	default:
 		var validation *ValidationError
 		if errors.As(err, &validation) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.error
@@ -14,6 +15,26 @@ from .models import CaseResult, RunSummary
 
 class ResultSinkError(RuntimeError):
     """A sanitized failure while communicating with the Result API."""
+
+
+class SchedulerBusy(ResultSinkError):
+    def __init__(self, retry_after_ms: int) -> None:
+        super().__init__("distributed scheduler capacity is unavailable")
+        self.retry_after_ms = max(1, retry_after_ms)
+
+
+@dataclass(frozen=True)
+class QueueClaim:
+    shard_index: int
+    lease_token: str
+    renew_after_ms: int
+
+
+@dataclass(frozen=True)
+class PermitGrant:
+    permit_id: str
+    lease_token: str
+    renew_after_ms: int
 
 
 @dataclass(frozen=True)
@@ -120,6 +141,7 @@ class ResultClient:
         shard_index: int,
         results: list[CaseResult],
         summary: RunSummary,
+        lease_token: str | None = None,
     ) -> None:
         cases = [self._case_payload(run_id, result) for result in results]
         payload = {
@@ -135,10 +157,66 @@ class ResultClient:
             },
             "cases": cases,
         }
+        headers = {"X-AgentStorm-Queue-Lease": lease_token} if lease_token else None
         self._put(
             f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/shards/{shard_index}",
             f"run/{run_id}/shard/{shard_index}",
             payload,
+            extra_headers=headers,
+        )
+
+    def claim_shard(self, run_id: str, worker_id: str) -> QueueClaim | None:
+        payload = self._post(
+            f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/queue/claims",
+            {"worker_id": worker_id},
+        )
+        if payload is None:
+            return None
+        return QueueClaim(
+            shard_index=int(payload["shard_index"]),
+            lease_token=str(payload["lease_token"]),
+            renew_after_ms=int(payload["renew_after_ms"]),
+        )
+
+    def renew_shard(self, run_id: str, shard_index: int, lease_token: str) -> int:
+        payload = self._post(
+            f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/queue/shards/{shard_index}/renew",
+            {"lease_token": lease_token},
+        )
+        if payload is None:
+            raise ResultSinkError("result API returned an empty lease response")
+        return int(payload["renew_after_ms"])
+
+    def acquire_permit(
+        self, run_id: str, request_id: str, worker_id: str, provider: str
+    ) -> PermitGrant:
+        if len(request_id) != 64:
+            request_id = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        payload = self._post(
+            f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/permits",
+            {"request_id": request_id, "worker_id": worker_id, "provider": provider},
+        )
+        if payload is None:
+            raise ResultSinkError("result API returned an empty permit response")
+        return PermitGrant(
+            permit_id=str(payload["permit_id"]),
+            lease_token=str(payload["lease_token"]),
+            renew_after_ms=int(payload["renew_after_ms"]),
+        )
+
+    def renew_permit(self, run_id: str, grant: PermitGrant) -> int:
+        payload = self._post(
+            f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/permits/{grant.permit_id}/renew",
+            {"lease_token": grant.lease_token},
+        )
+        if payload is None:
+            raise ResultSinkError("result API returned an empty permit lease response")
+        return int(payload["renew_after_ms"])
+
+    def release_permit(self, run_id: str, grant: PermitGrant) -> None:
+        self._post(
+            f"/v1/runs/{urllib.parse.quote(run_id, safe='')}/permits/{grant.permit_id}/release",
+            {"lease_token": grant.lease_token},
         )
 
     def _case_payload(self, run_id: str, result: CaseResult) -> dict[str, Any]:
@@ -230,21 +308,66 @@ class ResultClient:
             {"status": status, "reason_code": reason_code},
         )
 
-    def _put(self, path: str, idempotency_key: str, payload: dict[str, Any]) -> None:
+    def _put(
+        self,
+        path: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        headers = {
+            "Authorization": f"Bearer {self._config.write_token}",
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotency_key,
+        }
+        if extra_headers:
+            headers.update(extra_headers)
         request = urllib.request.Request(
             self._config.base_url + path,
             data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
             method="PUT",
-            headers={
-                "Authorization": f"Bearer {self._config.write_token}",
-                "Content-Type": "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
+            headers=headers,
         )
         try:
             with self._opener(request, timeout=self._config.timeout_seconds) as response:
                 response.read()
         except urllib.error.HTTPError as exc:
+            raise ResultSinkError(f"result API returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ResultSinkError("result API is unavailable") from exc
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        request = urllib.request.Request(
+            self._config.base_url + path,
+            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            ),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self._config.write_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with self._opener(
+                request, timeout=self._config.timeout_seconds
+            ) as response:
+                status = getattr(response, "status", 200)
+                body = response.read()
+                if status == 204:
+                    return None
+                decoded = json.loads(body or b"{}")
+                if not isinstance(decoded, dict):
+                    raise ResultSinkError("result API returned an invalid JSON response")
+                return decoded
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                try:
+                    decoded = json.loads(exc.read() or b"{}")
+                    retry_after_ms = int(decoded.get("retry_after_ms", 1000))
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    retry_after_ms = 1000
+                raise SchedulerBusy(retry_after_ms) from exc
             raise ResultSinkError(f"result API returned HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise ResultSinkError("result API is unavailable") from exc

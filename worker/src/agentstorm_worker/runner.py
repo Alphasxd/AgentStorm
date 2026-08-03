@@ -20,6 +20,7 @@ from .faults import FaultInjectionMiddleware
 from .models import AdapterResponse, AttemptResult, CaseResult, RunSummary, TestCase
 from .pricing import case_costs, sum_costs
 from .retry import retry_backoff_ms, retry_eligibility
+from .scheduler import DistributedLimiter
 from .telemetry import (
     ContentSanitizer,
     DetachedTraceSpan,
@@ -99,6 +100,7 @@ class WorkloadRunner:
         shard_index: int = 0,
         shard_count: int = 1,
         telemetry: TelemetryClient | None = None,
+        distributed_limiter: DistributedLimiter | None = None,
     ) -> None:
         if shard_count < 1 or not 0 <= shard_index < shard_count:
             raise ValueError("shard index must be within shard count")
@@ -123,6 +125,7 @@ class WorkloadRunner:
         self._circuit = CircuitBreaker(
             reliability.circuit_breaker if reliability is not None else None
         )
+        self._distributed_limiter = distributed_limiter
 
     async def execute(
         self,
@@ -287,7 +290,7 @@ class WorkloadRunner:
                 },
             ) as attempt_span:
                 response, execution_error, attempt, attempt_tools = await self._invoke_attempt(
-                    case, iteration, attempt_number, remaining
+                    case, iteration, attempt_number, remaining, stop_event, deadline
                 )
                 if attempt_number == 1:
                     attempt.circuit_events.extend(permit.events)
@@ -462,6 +465,8 @@ class WorkloadRunner:
         iteration: int,
         attempt_number: int,
         remaining_seconds: float,
+        stop_event: asyncio.Event,
+        deadline: float,
     ) -> tuple[AdapterResponse | None, ExecutionError | None, AttemptResult, list[str]]:
         lifecycle = _CaseLifecycle(self._telemetry, self._content_sanitizer)
         provider_attributes: dict[str, str | int | bool | float] = {
@@ -481,12 +486,27 @@ class WorkloadRunner:
             try:
                 if remaining_seconds <= 0:
                     raise ExecutionError("provider", "timeout", "timeout", ambiguous=True)
-                response = await asyncio.wait_for(
-                    self._faults.run(
-                        case, iteration, attempt_number, lifecycle=lifecycle
-                    ),
-                    timeout=remaining_seconds,
-                )
+                if self._distributed_limiter is None:
+                    response = await asyncio.wait_for(
+                        self._faults.run(
+                            case, iteration, attempt_number, lifecycle=lifecycle
+                        ),
+                        timeout=remaining_seconds,
+                    )
+                else:
+                    async with self._distributed_limiter.permit(
+                        case.case_id,
+                        iteration,
+                        attempt_number,
+                        stop_event,
+                        deadline,
+                    ):
+                        response = await asyncio.wait_for(
+                            self._faults.run(
+                                case, iteration, attempt_number, lifecycle=lifecycle
+                            ),
+                            timeout=max(0.0, deadline - time.perf_counter()),
+                        )
             except asyncio.CancelledError:
                 lifecycle.close("cancelled")
                 provider_span.set_error("cancelled")

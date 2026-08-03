@@ -1265,6 +1265,9 @@ expected_rules = {
     "agentstorm:result_api_retry_success:ratio5m",
     "agentstorm:result_api_injected_faults:rate5m",
     "agentstorm:result_api_circuit_events:rate5m",
+    "agentstorm:result_api_queue_claims:rate5m",
+    "agentstorm:result_api_scheduler_permits:rate5m",
+    "agentstorm:result_api_scheduler_permits_limited:ratio5m",
 }
 assert expected_rules <= recording_rules.keys(), recording_rules
 assert all(recording_rules[name] == "ok" for name in expected_rules), recording_rules
@@ -1297,6 +1300,8 @@ for title in (
     "Retry effectiveness",
     "Injected vs observed faults",
     "Circuit events",
+    "Durable queue claims",
+    "Distributed Provider permits",
 ):
     assert title in panels, title
 assert "agentstorm.case.success = false" in panels["Failed cases for Run ID"]["targets"][0]["query"]

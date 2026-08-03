@@ -12,9 +12,12 @@ import (
 const SchemaVersion = "v1alpha1"
 
 var (
-	ErrConflict = errors.New("result already exists with different content")
-	ErrNotFound = errors.New("result not found")
-	ErrNotReady = errors.New("result is not complete")
+	ErrConflict   = errors.New("result already exists with different content")
+	ErrNotFound   = errors.New("result not found")
+	ErrNotReady   = errors.New("result is not complete")
+	ErrNoCapacity = errors.New("scheduler capacity is temporarily unavailable")
+	ErrLeaseLost  = errors.New("scheduler lease is no longer valid")
+	ErrQueueEmpty = errors.New("no queued shard is currently available")
 )
 
 type ValidationError struct {
@@ -41,6 +44,15 @@ type Registration struct {
 	Dataset        RunDataset      `json:"dataset"`
 	Evaluation     Evaluation      `json:"evaluation"`
 	Reliability    *RunReliability `json:"reliability,omitempty"`
+	Scheduling     *RunScheduling  `json:"scheduling,omitempty"`
+}
+
+// RunScheduling is the immutable scheduling snapshot registered by the controller.
+// It intentionally contains no Kubernetes or Result API credentials.
+type RunScheduling struct {
+	Strategy        string `json:"strategy"`
+	MaxWorkers      int32  `json:"max_workers"`
+	ResourceProfile string `json:"resource_profile"`
 }
 
 type RunReliability struct {
@@ -281,12 +293,89 @@ type TerminalResult struct {
 	Created bool
 }
 
+type QueueClaimRequest struct {
+	WorkerID string `json:"worker_id"`
+}
+
+type QueueClaim struct {
+	ShardIndex     int       `json:"shard_index"`
+	LeaseToken     string    `json:"lease_token"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	RenewAfterMS   int64     `json:"renew_after_ms"`
+}
+
+type QueueRenewRequest struct {
+	LeaseToken string `json:"lease_token"`
+}
+
+type QueueLease struct {
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	RenewAfterMS   int64     `json:"renew_after_ms"`
+}
+
+type QueueStatus struct {
+	Pending          int64     `json:"pending"`
+	Available        int64     `json:"available"`
+	Leased           int64     `json:"leased"`
+	Completed        int64     `json:"completed"`
+	Expected         int64     `json:"expected"`
+	RunStatus        RunStatus `json:"run_status"`
+	ThresholdsPassed *bool     `json:"thresholds_passed,omitempty"`
+}
+
+type PermitRequest struct {
+	RequestID string `json:"request_id"`
+	WorkerID  string `json:"worker_id"`
+	Provider  string `json:"provider"`
+}
+
+type PermitGrant struct {
+	PermitID       string    `json:"permit_id"`
+	LeaseToken     string    `json:"lease_token"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	RenewAfterMS   int64     `json:"renew_after_ms"`
+}
+
+type PermitLeaseRequest struct {
+	LeaseToken string `json:"lease_token"`
+}
+
+type PermitLease struct {
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	RenewAfterMS   int64     `json:"renew_after_ms"`
+}
+
+type Limit struct {
+	MaxConcurrency    int `json:"max_concurrency"`
+	RequestsPerMinute int `json:"requests_per_minute"`
+}
+
+type LimitPolicy struct {
+	Global        Limit            `json:"global"`
+	Providers     map[string]Limit `json:"providers,omitempty"`
+	LeaseDuration time.Duration    `json:"-"`
+}
+
+type CapacityError struct {
+	RetryAfter time.Duration
+}
+
+func (e *CapacityError) Error() string { return ErrNoCapacity.Error() }
+
+func (e *CapacityError) Unwrap() error { return ErrNoCapacity }
+
 type Repository interface {
 	Ready(context.Context) error
 	RegisterRun(context.Context, string, string, string, Registration) (bool, error)
 	TerminateRun(context.Context, string, string, string, TerminalRequest) (bool, error)
-	ReserveShard(context.Context, string, int, string, string, string, ShardSummary) (ShardReservation, error)
-	FinalizeShard(context.Context, string, int, string, []CaseResult, *RunPricing) (bool, error)
+	ReserveShard(context.Context, string, int, string, string, string, string, ShardSummary) (ShardReservation, error)
+	FinalizeShard(context.Context, string, int, string, string, []CaseResult, *RunPricing) (bool, error)
+	ClaimShard(context.Context, string, string, string, time.Duration) (int, time.Time, error)
+	RenewShardLease(context.Context, string, int, string, time.Duration) (time.Time, error)
+	QueueStatus(context.Context, string) (QueueStatus, error)
+	AcquirePermit(context.Context, string, PermitRequest, string, LimitPolicy) (string, time.Time, error)
+	RenewPermit(context.Context, string, string, string, time.Duration) (time.Time, error)
+	ReleasePermit(context.Context, string, string, string) error
 	GetRun(context.Context, string) (RunDetail, error)
 	ListCases(context.Context, string, string, int, bool) (CasePage, error)
 	Compare(context.Context, string, string) (Comparison, error)

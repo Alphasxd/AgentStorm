@@ -12,7 +12,8 @@ latency thresholds.
 > Promptfoo durable replay bridge. The development stack persists traces and metrics and provisions
 > Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 fault injection, conservative full-Agent
 > retry, Worker-local circuit breaking, durable cancellation, and quality/infrastructure reporting
-> are implemented in `v0.4.0-alpha.1`. Event-driven autoscaling remains planned.
+> are implemented in `v0.4.0-alpha.1`. M5 event-driven scheduling is under source development and
+> is not included in the released v0.4 manifests.
 
 ## Why this project
 
@@ -55,6 +56,10 @@ flowchart LR
     CR --> Controller["Go Controller"]
     Controller --> Config["Generated run ConfigMap"]
     Controller --> Job["Indexed Kubernetes Job"]
+    Controller -. "M5 queued strategy" .-> ScaledJob["KEDA ScaledJob"]
+    KEDA["KEDA operator"] --> ScaledJob
+    ResultAPI -. "available shard count" .-> KEDA
+    ScaledJob --> Job
     Dataset["Dataset ConfigMap"] --> Job
     Secret["Provider Secret"] --> Job
     Job --> W1["Worker shard 0"]
@@ -63,6 +68,7 @@ flowchart LR
     W2 --> Result
     Result --> ResultAPI["Authenticated Result API"]
     ResultAPI --> PostgreSQL["PostgreSQL metadata"]
+    PostgreSQL --> Queue["Durable shard queue + permits"]
     ResultAPI --> ObjectStore["Compressed S3 shards"]
     W1 -. optional OTLP .-> Telemetry["OpenTelemetry Collector"]
     W2 -. optional OTLP .-> Telemetry
@@ -209,6 +215,17 @@ gating, two durable runs, case reads, and a baseline comparison:
 CLUSTER_PROVIDER=kind make e2e-results-local
 ```
 
+The unreleased M5 development gate adds a durable PostgreSQL shard queue, KEDA scale-to-zero,
+resource-profile/quota admission, and distributed Provider concurrency/rate permits. It installs
+KEDA 2.20 into the selected disposable local cluster when needed and uses only the fake Provider:
+
+```bash
+CLUSTER_PROVIDER=kind make e2e-keda-local
+```
+
+This is a source-only preview, not a `v0.4.0-alpha.1` quickstart. See
+[event-driven scheduling](docs/scheduling.md) for its immutable API and safety boundaries.
+
 The local result overlay lives under `config/dev/results`; `config/dev/telemetry` adds a
 digest-pinned Collector, Tempo, Prometheus, and provisioned Grafana dashboard. Source-image E2E
 persists telemetry to PVCs, proves it remains queryable after backend restarts, and verifies default
@@ -338,7 +355,7 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Add KEDA-based queue scaling and resource-aware scheduling.
+1. Finish and release the source-built KEDA queue scaling and resource-aware scheduling work.
 2. Publish Helm charts, reproducible benchmarks, and a public demo.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and

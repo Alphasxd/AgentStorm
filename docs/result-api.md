@@ -7,9 +7,10 @@ complete.
 
 ## HTTP contract
 
-Health and metrics endpoints are unauthenticated. All other endpoints require
-`Authorization: Bearer <token>`. Writer and reader tokens are separate so worker Pods do not receive
-result-read access. The public Kubernetes stack restricts metrics access with NetworkPolicy.
+Health, metrics, and bounded queue-status endpoints are unauthenticated. All mutation and result-read
+endpoints require `Authorization: Bearer <token>`. Writer and reader tokens are separate so worker
+Pods do not receive result-read access. Kubernetes deployments must restrict metrics and queue
+status access with NetworkPolicy; KEDA needs queue-status access but never receives a writer token.
 
 | Method | Path | Token | Purpose |
 | --- | --- | --- | --- |
@@ -19,6 +20,12 @@ result-read access. The public Kubernetes stack restricts metrics access with Ne
 | `PUT` | `/v1/runs/{runID}` | writer | Register immutable run metadata and expected shards |
 | `PUT` | `/v1/runs/{runID}/terminal` | writer | Persist `cancelled` or `harness_failed` without exception text |
 | `PUT` | `/v1/runs/{runID}/shards/{index}` | writer | Persist one complete shard document |
+| `GET` | `/v1/runs/{runID}/queue` | none | Return bounded pending/available/leased/completed counts for KEDA and Controller polling |
+| `POST` | `/v1/runs/{runID}/queue/claims` | writer | Claim one available queued shard with an opaque lease |
+| `POST` | `/v1/runs/{runID}/queue/shards/{index}/renew` | writer | Renew an active queued-shard lease |
+| `POST` | `/v1/runs/{runID}/permits` | writer | Acquire a distributed Provider concurrency/rate permit |
+| `POST` | `/v1/runs/{runID}/permits/{permitID}/renew` | writer | Renew a Provider permit lease |
+| `POST` | `/v1/runs/{runID}/permits/{permitID}/release` | writer | Idempotently release Provider capacity |
 | `GET` | `/v1/runs/{runID}` | reader | Read status, received shards, and aggregates |
 | `GET` | `/v1/runs/{runID}/cases` | reader | Page through cases; `failed=true` filters failures |
 | `GET` | `/v1/comparisons?baseline={id}&candidate={id}` | reader | Compare two complete runs |
@@ -66,6 +73,10 @@ The service reads configuration from environment variables:
 | `AGENTSTORM_RESULT_WRITE_TOKEN` | yes | Worker bearer token |
 | `AGENTSTORM_RESULT_READ_TOKEN` | yes | Query bearer token |
 | `AGENTSTORM_LISTEN_ADDR` | no | Defaults to `:8080` |
+| `AGENTSTORM_GLOBAL_MAX_CONCURRENCY` | no | Global live Provider-attempt cap; `0` disables it |
+| `AGENTSTORM_GLOBAL_REQUESTS_PER_MINUTE` | no | Global one-minute Provider-start cap; `0` disables it |
+| `AGENTSTORM_PROVIDER_LIMITS_JSON` | no | Provider-to-limit JSON object with `max_concurrency` and `requests_per_minute` |
+| `AGENTSTORM_PERMIT_LEASE_SECONDS` | no | Provider permit lease duration; defaults to `30`, range `10..300` |
 
 Database migrations are embedded in the binary and applied under a PostgreSQL advisory lock before
 the service starts accepting traffic.
@@ -76,6 +87,11 @@ the immutable run/reliability snapshot, and discards its in-memory copy after th
 is never serialized to a ConfigMap, status, Event, log, or fixture. Workers receive the same selected
 Secret key only as an environment reference for shard and terminal writes. `--include-sensitive-results`
 is disabled by default, and `--result-upload-timeout` defaults to 30 seconds.
+
+Distributed Provider permits are separately enabled with `--enable-distributed-limits`; the flag
+requires `--result-api-url`. This explicit opt-in prevents ordinary durable ingestion from adding a
+Result API round trip to every Provider attempt. Configure at least one non-zero global or Provider
+cap in the Result API when enabling it. See [event-driven scheduling](scheduling.md).
 
 ## Public Kubernetes stack
 
@@ -132,5 +148,6 @@ only when the controller's sensitive-result switch is enabled for a controlled e
 provider API keys, and bearer tokens must never be included in request bodies, raw objects, logs, or
 test fixtures.
 
-See [Observability](observability.md) for the metric labels, cardinality rules, and local OTLP trace
-verification path.
+See [event-driven scheduling](scheduling.md) for queue leases, KEDA, resource admission, and
+distributed Provider limits. See [Observability](observability.md) for metric labels, cardinality
+rules, and the local OTLP trace verification path.

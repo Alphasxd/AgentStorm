@@ -46,6 +46,9 @@ failure exits non-zero. Duplicate case IDs are rejected before any provider call
 | `AGENTSTORM_RESULT_WRITE_TOKEN` | required when enabled | Writer bearer token injected from a Secret |
 | `AGENTSTORM_RESULT_TIMEOUT_SECONDS` | `30` | Timeout for each registration or upload request |
 | `AGENTSTORM_INCLUDE_SENSITIVE_RESULTS` | `false` | Include output and full error text in durable uploads |
+| `AGENTSTORM_QUEUE_MODE` | `false` | Claim one durable shard instead of using an Indexed Job completion index |
+| `AGENTSTORM_WORKER_ID` | `local-worker` | Pod identity used for queue and permit ownership |
+| `AGENTSTORM_DISTRIBUTED_LIMITS` | `false` | Acquire and renew a Result API Provider permit around every Agent attempt |
 | `AGENTSTORM_OTEL_ENABLED` | `false` | Enable worker OpenTelemetry spans |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP HTTP exporter base URL |
 | `OTEL_SERVICE_NAME` | `agentstorm-worker` | Worker trace service name |
@@ -53,6 +56,14 @@ failure exits non-zero. Duplicate case IDs are rejected before any provider call
 Local `results.jsonl` files retain their existing detail. Durable uploads omit output and full error
 text unless the sensitive-result switch is explicitly enabled. Tool paths and content-safe assertion
 outcomes are always uploaded; custom assertion messages use the same sensitive-result gate.
+
+Queue and distributed-limit variables are Controller-owned M5 interfaces, not end-user credentials.
+Queue claims and permits use opaque renewable tokens, send those tokens only in authenticated request
+bodies or the shard-upload header, and store only hashes in PostgreSQL. A lost queue lease stops that
+Worker and leaves the shard eligible for another Job. A transient queued Result API failure also
+leaves the Run non-terminal so the shard can be reclaimed after lease expiry. A lost Provider permit
+fails closed because the in-flight call can no longer be safely accounted for. See
+[`docs/scheduling.md`](../docs/scheduling.md).
 
 Tracing emits run, case, provider-call, local-tool, handoff, and deterministic-evaluator spans.
 `telemetry.contentMode` defaults to `omit`, which excludes prompts, model/tool content, dataset
