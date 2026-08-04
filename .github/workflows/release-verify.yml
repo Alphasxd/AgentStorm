@@ -1,0 +1,105 @@
+name: release-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      controller_image:
+        description: Immutable Controller image reference
+        required: true
+        type: string
+      worker_image:
+        description: Immutable Worker image reference
+        required: true
+        type: string
+      result_api_image:
+        description: Immutable Result API image reference
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  namespace-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run published namespace smoke
+        env:
+          CLUSTER_PROVIDER: kind
+          DEPLOYMENT_PROFILE: namespace
+          KEEP_E2E_RESOURCES: 'false'
+          E2E_TIMEOUT: 300s
+          SKIP_IMAGE_BUILD: 'true'
+          LOAD_LOCAL_IMAGES: 'false'
+          CONTROLLER_IMAGE: ${{ inputs.controller_image }}
+          WORKER_IMAGE: ${{ inputs.worker_image }}
+        run: make e2e-local
+
+  result-stack-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run published result-stack smoke
+        env:
+          CLUSTER_PROVIDER: kind
+          KEEP_E2E_RESOURCES: 'false'
+          E2E_TIMEOUT: 300s
+          SKIP_IMAGE_BUILD: 'true'
+          LOAD_LOCAL_IMAGES: 'false'
+          ENABLE_TELEMETRY_E2E: 'true'
+          ENABLE_RELIABILITY_E2E: 'true'
+          EXPECT_COST_ACCOUNTING: 'true'
+          CONTROLLER_IMAGE: ${{ inputs.controller_image }}
+          WORKER_IMAGE: ${{ inputs.worker_image }}
+          RESULT_API_IMAGE: ${{ inputs.result_api_image }}
+        run: make e2e-results-local
+
+  keda-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run published KEDA smoke
+        env:
+          CLUSTER_PROVIDER: kind
+          KEEP_E2E_RESOURCES: 'false'
+          E2E_TIMEOUT: 300s
+          SKIP_IMAGE_BUILD: 'true'
+          LOAD_LOCAL_IMAGES: 'false'
+          CONTROLLER_IMAGE: ${{ inputs.controller_image }}
+          WORKER_IMAGE: ${{ inputs.worker_image }}
+          RESULT_API_IMAGE: ${{ inputs.result_api_image }}
+        run: make e2e-keda-local
