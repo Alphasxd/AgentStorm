@@ -24,5 +24,5 @@ spec:
     maxWorkers: 8
     resourceProfile: small
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker:v0.6.0
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:a06b8416f11355ddcfa470aa7932d9ce02546d8959a7ebee4c2ca2a53938cc41
     imagePullPolicy: IfNotPresent

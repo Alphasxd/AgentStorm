@@ -6,17 +6,20 @@ concurrency, rate limits, faults, retries, and autoscaling. Deterministic evalua
 correctness guardrail for that load test; AgentStorm is not a customer-service classifier or a
 single-prompt benchmark.
 
-> Status: alpha moving toward the `v0.6.0` stable distribution. Public multi-architecture controller, worker, and Result API images are
-> available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
+> Status: the `v0.6.0` Controller, Worker, Result API, and Helm chart are published. Public
+> multi-architecture images are available. M2 provides authenticated durable ingestion,
+> PostgreSQL/object storage, and baseline
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
 > price-snapshot cost accounting, configurable trace redaction, bounded Prometheus metrics, and a
 > Promptfoo durable replay bridge. The development stack persists traces and metrics and provisions
 > Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 fault injection, conservative full-Agent
 > retry, Worker-local circuit breaking, durable cancellation, and quality/infrastructure reporting
 > are implemented in `v0.4.0-alpha.1`. M5 adds an opt-in durable shard queue, KEDA scale-to-zero,
-> resource admission, and distributed Provider limits in `v0.5.0-alpha.1`. The M6 source tree adds
+> resource admission, and distributed Provider limits in `v0.5.0-alpha.1`. M6 adds
 > trusted Adapter plugins, a 32-incident SRE Agent workload, Agent-call accounting, Helm packaging,
-> and reproducible benchmark tooling; it is not called released until the v0.6 evidence gate closes.
+> and reproducible benchmark tooling. The paid canonical performance report and final GitHub Release
+> remain gated on a complete, checksummed real-model benchmark; release smokes are not performance
+> evidence.
 
 ## Why this project
 
@@ -139,7 +142,7 @@ make build
 ## Released Kubernetes quickstart
 
 Prerequisite: `kubectl` access to a Kubernetes cluster. The public manifests use immutable
-`v0.5.0-alpha.1` image-index digests and need no local image build or registry credentials.
+`v0.6.0` image-index digests and need no local image build or registry credentials.
 
 ```bash
 kubectl apply -k config/default
@@ -153,41 +156,44 @@ kubectl get agenttestrun/agentstorm-demo
 The released images are public for anonymous pulls:
 
 ```text
-ghcr.io/alphasxd/agentstorm-controller@sha256:c755a11d88d677cf09051509b01686c20e15e0bdff393a466d97d9f8b970902b
-ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654
-ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58
+ghcr.io/alphasxd/agentstorm-controller@sha256:b37ae7edcbc5da61f5f1680f3aca5d5d6311c6a2b7745ebea088dde3279428ca
+ghcr.io/alphasxd/agentstorm-worker@sha256:a06b8416f11355ddcfa470aa7932d9ce02546d8959a7ebee4c2ca2a53938cc41
+ghcr.io/alphasxd/agentstorm-result-api@sha256:8dec868c6e4c118fdf5d0afb7645400422244c532464e5bd10d038887ebb70dd
 ```
 
 All three images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
 
 ```bash
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:c755a11d88d677cf09051509b01686c20e15e0bdff393a466d97d9f8b970902b \
+  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:b37ae7edcbc5da61f5f1680f3aca5d5d6311c6a2b7745ebea088dde3279428ca \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654 \
+  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:a06b8416f11355ddcfa470aa7932d9ce02546d8959a7ebee4c2ca2a53938cc41 \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58 \
+  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:8dec868c6e4c118fdf5d0afb7645400422244c532464e5bd10d038887ebb70dd \
   --repo Alphasxd/AgentStorm
 ```
 
-### Helm source preview for v0.6
+### Released Helm chart
 
 The source chart defaults to a namespace-scoped Controller and CRD. Result API is optional;
 PostgreSQL, S3, and KEDA are always operator-provided. Values contain only Secret names and keys,
 never token/password values:
 
 ```bash
-helm lint charts/agentstorm
-helm template agentstorm charts/agentstorm \
-  --namespace agentstorm-system --include-crds
+helm show chart oci://ghcr.io/alphasxd/charts/agentstorm --version 0.6.0
+helm install agentstorm oci://ghcr.io/alphasxd/charts/agentstorm \
+  --version 0.6.0 --namespace agentstorm-system --create-namespace
 ```
 
-The OCI reference `oci://ghcr.io/alphasxd/charts/agentstorm:0.6.0` is published only with the
-stable v0.6 tag; until then, use the source chart and do not treat it as a released artifact.
+The published chart digest is
+`sha256:ad20aa4da8f389f21f01ebcfe807090318f51cc4fbb833403ff2e4d2f867b509`.
+The source chart remains available under `charts/agentstorm` for linting and local changes.
+The [v0.6.0 verification record](docs/release-v0.6.0.md) captures the tag, digests, attestations,
+and amd64/arm64 smoke evidence separately from the pending real-model performance report.
 
 ### Released durable result stack
 
@@ -264,9 +270,9 @@ To verify the released images without building or loading local images:
 
 ```bash
 CLUSTER_PROVIDER=kind E2E_TIMEOUT=300s SKIP_IMAGE_BUILD=true LOAD_LOCAL_IMAGES=false \
-  CONTROLLER_IMAGE=ghcr.io/alphasxd/agentstorm-controller@sha256:c755a11d88d677cf09051509b01686c20e15e0bdff393a466d97d9f8b970902b \
-  WORKER_IMAGE=ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654 \
-  RESULT_API_IMAGE=ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58 \
+  CONTROLLER_IMAGE=ghcr.io/alphasxd/agentstorm-controller@sha256:b37ae7edcbc5da61f5f1680f3aca5d5d6311c6a2b7745ebea088dde3279428ca \
+  WORKER_IMAGE=ghcr.io/alphasxd/agentstorm-worker@sha256:a06b8416f11355ddcfa470aa7932d9ce02546d8959a7ebee4c2ca2a53938cc41 \
+  RESULT_API_IMAGE=ghcr.io/alphasxd/agentstorm-result-api@sha256:8dec868c6e4c118fdf5d0afb7645400422244c532464e5bd10d038887ebb70dd \
   make e2e-keda-local
 ```
 
@@ -378,7 +384,7 @@ spec:
   telemetry:
     contentMode: omit
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:a06b8416f11355ddcfa470aa7932d9ce02546d8959a7ebee4c2ca2a53938cc41
     imagePullPolicy: IfNotPresent
 ```
 
@@ -419,8 +425,8 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Release v0.6 images and the OCI Helm chart from an immutable stable tag.
-2. Run the fixed real SRE capacity/reliability matrix, publish checksummed evidence, and close M6.
+1. Run the fixed real SRE capacity/reliability matrix with the published v0.6 digests.
+2. Publish checksummed evidence and the demo asset, close M6, and create the final GitHub Release.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

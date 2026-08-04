@@ -1,8 +1,8 @@
 # Event-driven scheduling
 
 M5 adds an optional durable shard queue and KEDA `ScaledJob` execution path while preserving the
-existing Indexed Job behavior. It is released in `v0.5.0-alpha.1`; all three components must use
-the matching immutable release digests when queued scheduling is enabled.
+existing Indexed Job behavior. It is available in `v0.5.0-alpha.1` and later; all three components
+must use the matching immutable release digests when queued scheduling is enabled.
 
 ## Run contract
 
