@@ -5,12 +5,17 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-05
+
 ### Added
 
 - Trusted image-bundled Adapter factories selected through `target.adapterEntrypoint`.
 - A 32-incident SRE diagnostic Agent with deterministic incident, metrics, logs, and runbook tools.
 - Attempt/case/run/comparison model and tool call accounting with unknown-model-call preservation.
 - Helm chart, canonical benchmark tooling, ADRs, contribution guidance, and demo automation.
+
+The images and OCI chart are published and verified on amd64 and arm64. Canonical paid benchmark
+evidence is intentionally tracked separately and is not inferred from release smoke tests.
 
 ## [0.5.0-alpha.1] - 2026-08-04
 

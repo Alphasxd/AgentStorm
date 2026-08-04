@@ -126,9 +126,10 @@ documented in [event-driven scheduling](scheduling.md).
 - [x] Persist nullable model-call and exact tool-call counts through attempts, cases, summaries, and comparisons.
 - [x] Add a namespace-scoped Helm chart, changelog, ADRs, contribution guide, and demo script.
 - [x] Add no-cost canonical-shape benchmark validation and a released-image KEDA benchmark runner.
-- [ ] Publish `v0.6.0` multi-architecture images and `oci://ghcr.io/alphasxd/charts/agentstorm:0.6.0`.
+- [x] Publish `v0.6.0` multi-architecture images and `oci://ghcr.io/alphasxd/charts/agentstorm:0.6.0`.
 - [ ] Complete the fixed 384-execution real-model capacity benchmark and separate reliability run.
-- [ ] Pin v0.6 digests, publish checksummed evidence/demo, and create the stable GitHub Release.
+- [x] Pin the verified v0.6 image-index digests in public manifests.
+- [ ] Publish checksummed benchmark evidence/demo and create the stable GitHub Release.
 
 Acceptance criteria:
 
