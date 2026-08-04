@@ -7,7 +7,7 @@ import os
 import signal
 import sys
 
-from .adapters import create_adapter
+from .adapters import AdapterPluginError, create_adapter
 from .config import load_dataset, load_run_config
 from .models import CaseResult, RunSummary
 from .results import ResultClient, ResultSinkError
@@ -69,8 +69,7 @@ async def execute(args: argparse.Namespace) -> int:
             try:
                 result_client = ResultClient.from_environment()
                 pre_registered = (
-                    os.getenv("AGENTSTORM_RESULT_PRE_REGISTERED", "false").lower()
-                    == "true"
+                    os.getenv("AGENTSTORM_RESULT_PRE_REGISTERED", "false").lower() == "true"
                 )
                 if result_client is not None and not pre_registered:
                     await asyncio.to_thread(result_client.register_run, config, shard_count)
@@ -115,6 +114,7 @@ async def execute(args: argparse.Namespace) -> int:
                     config.target.provider,
                     model=config.target.model,
                     base_url=config.target.base_url,
+                    adapter_entrypoint=config.target.adapter_entrypoint,
                 )
                 distributed_limiter = (
                     DistributedLimiter(
@@ -137,8 +137,7 @@ async def execute(args: argparse.Namespace) -> int:
                 )
                 results, summary = await runner.execute(cases, stop_event=stop_event)
                 if lease_lost.is_set() or (
-                    distributed_limiter is not None
-                    and distributed_limiter.lease_lost.is_set()
+                    distributed_limiter is not None and distributed_limiter.lease_lost.is_set()
                 ):
                     # A queue lease can be reclaimed after expiry, so losing it is a
                     # shard-local retry signal rather than a terminal run failure.
@@ -193,8 +192,13 @@ async def execute(args: argparse.Namespace) -> int:
                     "agentstorm.run.thresholds_passed": summary.thresholds_passed,
                     "gen_ai.usage.input_tokens": summary.input_tokens,
                     "gen_ai.usage.output_tokens": summary.output_tokens,
+                    "agentstorm.agent.tool_call_count": summary.tool_call_count,
                 }.items():
                     run_span.set_attribute(name, value)
+                if summary.model_call_count is not None:
+                    run_span.set_attribute(
+                        "agentstorm.agent.model_call_count", summary.model_call_count
+                    )
                 print(json.dumps(summary.to_dict(), ensure_ascii=False))
                 return 0 if summary.thresholds_passed else 2
             except Exception as exc:
@@ -207,7 +211,11 @@ async def execute(args: argparse.Namespace) -> int:
                                 result_client.mark_terminal,
                                 config.run_id,
                                 "harness_failed",
-                                "worker_harness_failure",
+                                (
+                                    "adapter_plugin_invalid"
+                                    if isinstance(exc, AdapterPluginError)
+                                    else "worker_harness_failure"
+                                ),
                             ),
                             timeout=10,
                         )

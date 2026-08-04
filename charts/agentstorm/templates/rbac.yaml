@@ -1,0 +1,59 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agentstorm.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentstorm.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [agentstorm.io]
+    resources: [agenttestruns]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [agentstorm.io]
+    resources: [agenttestruns/status]
+    verbs: [get, update, patch]
+  - apiGroups: [agentstorm.io]
+    resources: [agenttestruns/finalizers]
+    verbs: [update]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs/status]
+    verbs: [get]
+  {{- if .Values.keda.enabled }}
+  - apiGroups: [keda.sh]
+    resources: [scaledjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  {{- end }}
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agentstorm.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentstorm.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agentstorm.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agentstorm.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

@@ -24,6 +24,10 @@ type AgentTargetSpec struct {
 	Model string `json:"model,omitempty"`
 	// BaseURL optionally points to an OpenAI-compatible endpoint.
 	BaseURL string `json:"baseURL,omitempty"`
+	// AdapterEntrypoint selects trusted adapter factory code preinstalled in the Worker image.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$`
+	AdapterEntrypoint string `json:"adapterEntrypoint,omitempty"`
 	// APIKeySecretRef injects the selected secret value as OPENAI_API_KEY.
 	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
 	// Pricing snapshots the USD price used to calculate reproducible run cost.

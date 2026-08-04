@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentstorm-worker"
-version = "0.5.0a1"
-description = "Execution worker for distributed AI Agent evaluations"
+version = "0.6.0"
+description = "Execution worker for distributed AI Agent load and reliability tests"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
@@ -26,6 +26,9 @@ agentstorm-worker = "agentstorm_worker.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"agentstorm_worker.benchmarks" = ["*.json"]
 
 [tool.ruff]
 line-length = 100

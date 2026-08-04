@@ -12,8 +12,8 @@ from .adapters import (
     HandoffLifecycleEvent,
     ToolLifecycleEvent,
 )
-from .config import EvaluationConfig, RunConfig
 from .circuit import CircuitBreaker, CircuitPermit
+from .config import EvaluationConfig, RunConfig
 from .evaluators import EvaluationContext, EvaluatorRegistry
 from .execution_errors import ExecutionError, classify_adapter_exception
 from .faults import FaultInjectionMiddleware
@@ -107,9 +107,7 @@ class WorkloadRunner:
         self._config = config
         self._shard_index = shard_index
         self._shard_count = shard_count
-        self._telemetry = telemetry_with_policy(
-            telemetry or NoopTelemetry(), config.telemetry
-        )
+        self._telemetry = telemetry_with_policy(telemetry or NoopTelemetry(), config.telemetry)
         self._content_sanitizer = (
             ContentSanitizer(config.telemetry.redaction.patterns)
             if config.telemetry.content_mode == "redacted"
@@ -166,9 +164,7 @@ class WorkloadRunner:
         if tasks:
             gathered = asyncio.gather(*tasks)
             stop_waiter = asyncio.create_task(stop.wait())
-            await asyncio.wait(
-                {gathered, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
-            )
+            await asyncio.wait({gathered, stop_waiter}, return_when=asyncio.FIRST_COMPLETED)
             if stop.is_set():
                 for task in tasks:
                     if not task.done():
@@ -225,6 +221,8 @@ class WorkloadRunner:
                         input_tokens=0,
                         output_tokens=0,
                         usage_complete=True,
+                        model_call_count=0,
+                        tool_call_count=0,
                         circuit_events=list(circuit_error.circuit_events),
                     )
                 )
@@ -241,19 +239,20 @@ class WorkloadRunner:
                     case, iteration, permit, attempts, tool_path, case_started, stop_event
                 )
             case_span.set_attribute("agentstorm.case.success", result.success)
-            case_span.set_attribute(
-                "agentstorm.case.failure_kind", result.failure_kind or "none"
-            )
+            case_span.set_attribute("agentstorm.case.failure_kind", result.failure_kind or "none")
             if not result.success:
                 case_span.set_error(result.failure_kind or "failure")
-                case_span.set_attribute(
-                    "agentstorm.case.failure_category", result.failure_category
-                )
+                case_span.set_attribute("agentstorm.case.failure_category", result.failure_category)
                 case_span.set_attribute("agentstorm.case.error_code", result.error_code)
             if result.input_tokens is not None:
                 case_span.set_attribute("gen_ai.usage.input_tokens", result.input_tokens)
             if result.output_tokens is not None:
                 case_span.set_attribute("gen_ai.usage.output_tokens", result.output_tokens)
+            if result.model_call_count is not None:
+                case_span.set_attribute(
+                    "agentstorm.agent.model_call_count", result.model_call_count
+                )
+            case_span.set_attribute("agentstorm.agent.tool_call_count", result.tool_call_count)
             return result
 
     async def _execute_permitted_case(
@@ -328,15 +327,18 @@ class WorkloadRunner:
                     attempt.backoff_ms = backoff_ms
                 attempts.append(attempt)
                 attempt_span.set_attribute("agentstorm.attempt.outcome", attempt.outcome)
-                attempt_span.set_attribute(
-                    "agentstorm.retry.decision", attempt.retry_decision
-                )
+                attempt_span.set_attribute("agentstorm.retry.decision", attempt.retry_decision)
                 attempt_span.set_attribute("agentstorm.retry.backoff_ms", attempt.backoff_ms)
                 attempt_span.set_attribute("agentstorm.attempt.ambiguous", attempt.ambiguous)
-                if attempt.injected_fault:
+                if attempt.model_call_count is not None:
                     attempt_span.set_attribute(
-                        "agentstorm.fault.type", attempt.injected_fault
+                        "agentstorm.agent.model_call_count", attempt.model_call_count
                     )
+                attempt_span.set_attribute(
+                    "agentstorm.agent.tool_call_count", attempt.tool_call_count
+                )
+                if attempt.injected_fault:
+                    attempt_span.set_attribute("agentstorm.fault.type", attempt.injected_fault)
                 if execution_error is not None:
                     attempt_span.set_error(execution_error.code)
 
@@ -355,9 +357,7 @@ class WorkloadRunner:
                 },
             ):
                 try:
-                    await asyncio.wait_for(
-                        stop_event.wait(), timeout=attempt.backoff_ms / 1000
-                    )
+                    await asyncio.wait_for(stop_event.wait(), timeout=attempt.backoff_ms / 1000)
                     raise asyncio.CancelledError
                 except TimeoutError:
                     pass
@@ -387,6 +387,14 @@ class WorkloadRunner:
         assert response is not None
         assert self._evaluators is not None
         try:
+            evaluation_metadata = dict(case.metadata)
+            evaluation_metadata.update(
+                {
+                    key: value
+                    for key, value in response.metadata.items()
+                    if key.startswith("agentstorm.")
+                }
+            )
             outcomes = await self._evaluators.evaluate(
                 case,
                 EvaluationContext(
@@ -395,7 +403,7 @@ class WorkloadRunner:
                     output=response.output,
                     latency_ms=final_provider_latency_ms,
                     tool_path=tool_path,
-                    metadata=case.metadata,
+                    metadata=evaluation_metadata,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - evaluator boundary
@@ -434,6 +442,7 @@ class WorkloadRunner:
                     evaluator_span.set_error("assertion")
         success = all(outcome.passed for outcome in outcomes)
         input_tokens, output_tokens, usage_complete = _attempt_usage(attempts)
+        model_call_count, tool_call_count = _attempt_calls(attempts)
         input_cost, output_cost, total_cost = _costs_for_usage(
             self._config, input_tokens, output_tokens, usage_complete
         )
@@ -452,6 +461,8 @@ class WorkloadRunner:
             error=None if success else f"failed assertions: {', '.join(failed_types)}",
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            model_call_count=model_call_count,
+            tool_call_count=tool_call_count,
             tool_path=tool_path,
             assertions=outcomes,
             input_cost_usd=input_cost,
@@ -488,9 +499,7 @@ class WorkloadRunner:
                     raise ExecutionError("provider", "timeout", "timeout", ambiguous=True)
                 if self._distributed_limiter is None:
                     response = await asyncio.wait_for(
-                        self._faults.run(
-                            case, iteration, attempt_number, lifecycle=lifecycle
-                        ),
+                        self._faults.run(case, iteration, attempt_number, lifecycle=lifecycle),
                         timeout=remaining_seconds,
                     )
                 else:
@@ -502,9 +511,7 @@ class WorkloadRunner:
                         deadline,
                     ):
                         response = await asyncio.wait_for(
-                            self._faults.run(
-                                case, iteration, attempt_number, lifecycle=lifecycle
-                            ),
+                            self._faults.run(case, iteration, attempt_number, lifecycle=lifecycle),
                             timeout=max(0.0, deadline - time.perf_counter()),
                         )
             except asyncio.CancelledError:
@@ -516,9 +523,7 @@ class WorkloadRunner:
                 execution_error = classify_adapter_exception(exc)
                 response = execution_error.response
                 provider_span.set_error(provider_error_type)
-                provider_span.set_attribute(
-                    "agentstorm.failure.category", execution_error.category
-                )
+                provider_span.set_attribute("agentstorm.failure.category", execution_error.category)
                 provider_span.set_attribute("agentstorm.error.code", execution_error.code)
             latency_ms = (time.perf_counter() - provider_started) * 1000
             if execution_error is None:
@@ -529,7 +534,11 @@ class WorkloadRunner:
                 provider_span.set_attribute("gen_ai.usage.input_tokens", response.input_tokens)
             if response is not None and response.output_tokens is not None:
                 provider_span.set_attribute("gen_ai.usage.output_tokens", response.output_tokens)
-            if execution_error is None and response is not None and self._content_sanitizer is not None:
+            if (
+                execution_error is None
+                and response is not None
+                and self._content_sanitizer is not None
+            ):
                 provider_span.set_attribute(
                     "agentstorm.content.output",
                     self._content_sanitizer.string(response.output),
@@ -568,7 +577,23 @@ class WorkloadRunner:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             usage_complete=usage_complete,
-            circuit_events=list(execution_error.circuit_events) if execution_error is not None else [],
+            model_call_count=(
+                response.model_call_count
+                if response is not None
+                else 0
+                if injected_fault in {"timeout", "rate_limit", "http_error"}
+                else None
+            ),
+            tool_call_count=(
+                len(lifecycle.tool_path)
+                if lifecycle.tool_path
+                else response.tool_call_count
+                if response is not None and response.tool_call_count is not None
+                else 0
+            ),
+            circuit_events=list(execution_error.circuit_events)
+            if execution_error is not None
+            else [],
         )
         return response, execution_error, attempt, lifecycle.tool_path
 
@@ -582,6 +607,7 @@ class WorkloadRunner:
         latency_ms: float,
     ) -> CaseResult:
         input_tokens, output_tokens, usage_complete = _attempt_usage(attempts)
+        model_call_count, tool_call_count = _attempt_calls(attempts)
         input_cost, output_cost, total_cost = _costs_for_usage(
             self._config, input_tokens, output_tokens, usage_complete
         )
@@ -598,6 +624,8 @@ class WorkloadRunner:
             error=str(error),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            model_call_count=model_call_count,
+            tool_call_count=tool_call_count,
             tool_path=tool_path,
             input_cost_usd=input_cost,
             output_cost_usd=output_cost,
@@ -622,6 +650,15 @@ def _attempt_usage(attempts: list[AttemptResult]) -> tuple[int, int, bool]:
         sum(attempt.output_tokens or 0 for attempt in attempts),
         all(attempt.usage_complete for attempt in attempts),
     )
+
+
+def _attempt_calls(attempts: list[AttemptResult]) -> tuple[int | None, int]:
+    model_calls = (
+        sum(attempt.model_call_count or 0 for attempt in attempts)
+        if all(attempt.model_call_count is not None for attempt in attempts)
+        else None
+    )
+    return model_calls, sum(attempt.tool_call_count for attempt in attempts)
 
 
 def _costs_for_usage(
@@ -652,13 +689,23 @@ def summarize(
     p95 = latencies[max(0, math.ceil(len(latencies) * 0.95) - 1)] if latencies else 0.0
     failures: list[str] = []
     if evaluation.min_success_rate is not None and success_rate < evaluation.min_success_rate:
-        failures.append(
-            f"success_rate {success_rate:.4f} < {evaluation.min_success_rate:.4f}"
-        )
+        failures.append(f"success_rate {success_rate:.4f} < {evaluation.min_success_rate:.4f}")
     if evaluation.max_error_rate is not None and error_rate > evaluation.max_error_rate:
         failures.append(f"error_rate {error_rate:.4f} > {evaluation.max_error_rate:.4f}")
     if evaluation.max_p95_latency_ms is not None and p95 > evaluation.max_p95_latency_ms:
         failures.append(f"p95_latency_ms {p95:.2f} > {evaluation.max_p95_latency_ms}")
+    model_calls = (
+        sum(result.model_call_count or 0 for result in results)
+        if all(result.model_call_count is not None for result in results)
+        else None
+    )
+    successful_results = [result for result in results if result.success]
+    successful_model_calls = (
+        sum(result.model_call_count or 0 for result in successful_results)
+        if successful_results
+        and all(result.model_call_count is not None for result in successful_results)
+        else None
+    )
     return RunSummary(
         run_id=run_id,
         shard_index=shard_index,
@@ -672,6 +719,18 @@ def summarize(
         p95_latency_ms=p95,
         input_tokens=sum(result.input_tokens or 0 for result in results),
         output_tokens=sum(result.output_tokens or 0 for result in results),
+        model_call_count=model_calls,
+        tool_call_count=sum(result.tool_call_count for result in results),
+        model_calls_per_successful_agent=(
+            successful_model_calls / succeeded
+            if successful_model_calls is not None and succeeded
+            else None
+        ),
+        tool_calls_per_successful_agent=(
+            sum(result.tool_call_count for result in successful_results) / succeeded
+            if succeeded
+            else None
+        ),
         input_cost_usd=sum_costs([result.input_cost_usd for result in results]),
         output_cost_usd=sum_costs([result.output_cost_usd for result in results]),
         cost_usd=sum_costs([result.cost_usd for result in results]),

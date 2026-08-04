@@ -65,6 +65,10 @@ spec:
                       type: string
                     baseURL:
                       type: string
+                    adapterEntrypoint:
+                      type: string
+                      maxLength: 256
+                      pattern: '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$'
                     apiKeySecretRef:
                       type: object
                       required: [name, key]

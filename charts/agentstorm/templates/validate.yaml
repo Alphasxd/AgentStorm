@@ -1,0 +1,12 @@
+{{- if .Values.resultApi.enabled -}}
+{{- $storage := required "resultApi.existingStorageSecret is required when resultApi.enabled=true" .Values.resultApi.existingStorageSecret -}}
+{{- $endpoint := required "resultApi.s3Endpoint is required when resultApi.enabled=true" .Values.resultApi.s3Endpoint -}}
+{{- $auth := include "agentstorm.authSecret" . -}}
+{{- end -}}
+{{- if and .Values.controller.resultSink.enabled (not .Values.resultApi.enabled) -}}
+{{- $url := include "agentstorm.resultSinkURL" . -}}
+{{- $auth := include "agentstorm.authSecret" . -}}
+{{- end -}}
+{{- if and .Values.keda.enabled (not (include "agentstorm.resultSinkEnabled" .)) -}}
+{{- fail "keda.enabled requires resultApi.enabled or controller.resultSink.enabled" -}}
+{{- end -}}

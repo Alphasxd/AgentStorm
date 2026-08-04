@@ -22,6 +22,7 @@ import (
 var (
 	runIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
 	pricePattern      = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
+	entrypointPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$`)
 	reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
@@ -381,8 +382,12 @@ func validateRegistration(runID, idempotencyKey string, registration Registratio
 	if strings.TrimSpace(registration.Target.Provider) == "" {
 		return validationError("target provider is required")
 	}
-	if invalidText(registration.Target.Provider, 128) || invalidText(registration.Target.Model, 512) {
+	if invalidText(registration.Target.Provider, 128) || invalidText(registration.Target.Model, 512) ||
+		invalidText(registration.Target.AdapterEntrypoint, 256) {
 		return validationError("target fields exceed their size limit or contain NUL")
+	}
+	if registration.Target.AdapterEntrypoint != "" && !entrypointPattern.MatchString(registration.Target.AdapterEntrypoint) {
+		return validationError("target adapter_entrypoint must be a module:function reference")
 	}
 	if registration.Target.Pricing != nil &&
 		(!pricePattern.MatchString(registration.Target.Pricing.InputUSDPerMillionTokens) ||
@@ -493,14 +498,17 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 	}
 	if upload.Summary.Total < 0 || upload.Summary.Succeeded < 0 || upload.Summary.Failed < 0 ||
 		!validMetric(upload.Summary.DurationMS) || upload.Summary.DurationMS < 0 ||
-		upload.Summary.InputTokens < 0 || upload.Summary.OutputTokens < 0 {
+		upload.Summary.InputTokens < 0 || upload.Summary.OutputTokens < 0 ||
+		(upload.Summary.ModelCallCount != nil && *upload.Summary.ModelCallCount < 0) ||
+		upload.Summary.ToolCallCount < 0 {
 		return validationError("summary contains a negative or non-finite metric")
 	}
 	if len(upload.Cases) > 100000 {
 		return validationError("a shard cannot contain more than 100000 cases")
 	}
 	seen := make(map[string]struct{}, len(upload.Cases))
-	var caseInputTokens, caseOutputTokens int64
+	var caseInputTokens, caseOutputTokens, caseModelCalls, caseToolCalls int64
+	allModelCallsKnown := true
 	allUsageComplete := true
 	for index, item := range upload.Cases {
 		if strings.TrimSpace(item.CaseID) == "" {
@@ -521,7 +529,8 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 			return validationErrorf("duplicate case %q iteration %d", item.CaseID, item.Iteration)
 		}
 		seen[identity] = struct{}{}
-		if !validMetric(item.LatencyMS) || item.LatencyMS < 0 || item.InputTokens < 0 || item.OutputTokens < 0 {
+		if !validMetric(item.LatencyMS) || item.LatencyMS < 0 || item.InputTokens < 0 || item.OutputTokens < 0 ||
+			(item.ModelCallCount != nil && *item.ModelCallCount < 0) || item.ToolCallCount < 0 {
 			return validationErrorf("cases[%d] contains a negative metric", index)
 		}
 		if invalidText(item.FailureKind, 128) ||
@@ -539,7 +548,8 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		if item.ErrorCode != "" && !reasonCodePattern.MatchString(item.ErrorCode) {
 			return validationErrorf("cases[%d].error_code is invalid", index)
 		}
-		var attemptInputTokens, attemptOutputTokens int64
+		var attemptInputTokens, attemptOutputTokens, attemptModelCalls, attemptToolCalls int64
+		attemptModelCallsKnown := true
 		attemptsUsageComplete := true
 		if len(item.Attempts) > 10 {
 			return validationErrorf("cases[%d].attempts cannot contain more than 10 items", index)
@@ -547,6 +557,7 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		for attemptIndex, attempt := range item.Attempts {
 			if attempt.Number != attemptIndex+1 || !validMetric(attempt.LatencyMS) || attempt.LatencyMS < 0 ||
 				attempt.BackoffMS < 0 || attempt.InputTokens < 0 || attempt.OutputTokens < 0 ||
+				(attempt.ModelCallCount != nil && *attempt.ModelCallCount < 0) || attempt.ToolCallCount < 0 ||
 				!validAttemptOutcome(attempt.Outcome) || strings.TrimSpace(attempt.RetryDecision) == "" ||
 				invalidText(attempt.RetryDecision, 64) || invalidText(attempt.InjectedRule, 128) ||
 				invalidText(attempt.ErrorCode, 128) || invalidText(attempt.FailureCategory, 64) ||
@@ -567,6 +578,17 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 			}
 			attemptInputTokens += attempt.InputTokens
 			attemptOutputTokens += attempt.OutputTokens
+			if attempt.ModelCallCount == nil {
+				attemptModelCallsKnown = false
+			} else if *attempt.ModelCallCount > math.MaxInt64-attemptModelCalls {
+				return validationError("attempt model call totals exceed the supported range")
+			} else {
+				attemptModelCalls += *attempt.ModelCallCount
+			}
+			if attempt.ToolCallCount > math.MaxInt64-attemptToolCalls {
+				return validationError("attempt tool call totals exceed the supported range")
+			}
+			attemptToolCalls += attempt.ToolCallCount
 			attemptsUsageComplete = attemptsUsageComplete && usageComplete(attempt.UsageComplete)
 		}
 		if len(item.Attempts) > 0 && (attemptInputTokens != item.InputTokens || attemptOutputTokens != item.OutputTokens) {
@@ -574,6 +596,18 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		}
 		if len(item.Attempts) > 0 && usageComplete(item.UsageComplete) != attemptsUsageComplete {
 			return validationErrorf("cases[%d].usage_complete does not match attempts", index)
+		}
+		if len(item.Attempts) > 0 {
+			if attemptModelCallsKnown {
+				if item.ModelCallCount == nil || *item.ModelCallCount != attemptModelCalls {
+					return validationErrorf("cases[%d] model call count does not match attempts", index)
+				}
+			} else if item.ModelCallCount != nil {
+				return validationErrorf("cases[%d] model call count must be unknown when any attempt is unknown", index)
+			}
+			if item.ToolCallCount != attemptToolCalls {
+				return validationErrorf("cases[%d] tool call count does not match attempts", index)
+			}
 		}
 		allUsageComplete = allUsageComplete && usageComplete(item.UsageComplete)
 		if len(item.ToolPath) > 1000 {
@@ -612,12 +646,37 @@ func validateShard(runID string, shardIndex int, idempotencyKey string, upload S
 		}
 		caseInputTokens += item.InputTokens
 		caseOutputTokens += item.OutputTokens
+		if item.ModelCallCount == nil {
+			allModelCallsKnown = false
+		} else if *item.ModelCallCount > math.MaxInt64-caseModelCalls {
+			return validationError("case model call totals exceed the supported range")
+		} else {
+			caseModelCalls += *item.ModelCallCount
+		}
+		if item.ToolCallCount > math.MaxInt64-caseToolCalls {
+			return validationError("case tool call totals exceed the supported range")
+		}
+		caseToolCalls += item.ToolCallCount
 	}
 	if caseInputTokens != upload.Summary.InputTokens || caseOutputTokens != upload.Summary.OutputTokens {
 		return validationError("summary token counts do not match case totals")
 	}
 	if upload.Summary.UsageComplete != nil && *upload.Summary.UsageComplete != allUsageComplete {
 		return validationError("summary usage_complete does not match cases")
+	}
+	if len(upload.Cases) == 0 {
+		if upload.Summary.ModelCallCount != nil && *upload.Summary.ModelCallCount != 0 {
+			return validationError("empty summary model call count must be zero or unknown")
+		}
+	} else if allModelCallsKnown {
+		if upload.Summary.ModelCallCount == nil || *upload.Summary.ModelCallCount != caseModelCalls {
+			return validationError("summary model call count does not match cases")
+		}
+	} else if upload.Summary.ModelCallCount != nil {
+		return validationError("summary model call count must be unknown when any case is unknown")
+	}
+	if upload.Summary.ToolCallCount != caseToolCalls {
+		return validationError("summary tool call count does not match cases")
 	}
 	return nil
 }

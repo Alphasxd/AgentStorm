@@ -47,6 +47,8 @@ class AdapterResponse:
     output: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    model_call_count: int | None = None
+    tool_call_count: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -65,6 +67,8 @@ class AttemptResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     usage_complete: bool = True
+    model_call_count: int | None = None
+    tool_call_count: int = 0
     circuit_events: list[str] = field(default_factory=list)
 
 
@@ -83,6 +87,8 @@ class CaseResult:
     error: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    model_call_count: int | None = None
+    tool_call_count: int = 0
     tool_path: list[str] = field(default_factory=list)
     assertions: list[AssertionOutcome] = field(default_factory=list)
     input_cost_usd: str | None = None
@@ -109,6 +115,10 @@ class RunSummary:
     output_tokens: int
     thresholds_passed: bool
     threshold_failures: list[str]
+    model_call_count: int | None = None
+    tool_call_count: int = 0
+    model_calls_per_successful_agent: float | None = None
+    tool_calls_per_successful_agent: float | None = None
     input_cost_usd: str | None = None
     output_cost_usd: str | None = None
     cost_usd: str | None = None

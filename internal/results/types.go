@@ -93,9 +93,10 @@ type RunSource struct {
 }
 
 type RunTarget struct {
-	Provider string      `json:"provider"`
-	Model    string      `json:"model,omitempty"`
-	Pricing  *RunPricing `json:"pricing,omitempty"`
+	Provider          string      `json:"provider"`
+	Model             string      `json:"model,omitempty"`
+	AdapterEntrypoint string      `json:"adapter_entrypoint,omitempty"`
+	Pricing           *RunPricing `json:"pricing,omitempty"`
 }
 
 type RunPricing struct {
@@ -121,13 +122,15 @@ type ShardUpload struct {
 }
 
 type ShardSummary struct {
-	Total         int     `json:"total"`
-	Succeeded     int     `json:"succeeded"`
-	Failed        int     `json:"failed"`
-	DurationMS    float64 `json:"duration_ms"`
-	InputTokens   int64   `json:"input_tokens"`
-	OutputTokens  int64   `json:"output_tokens"`
-	UsageComplete *bool   `json:"usage_complete,omitempty"`
+	Total          int     `json:"total"`
+	Succeeded      int     `json:"succeeded"`
+	Failed         int     `json:"failed"`
+	DurationMS     float64 `json:"duration_ms"`
+	InputTokens    int64   `json:"input_tokens"`
+	OutputTokens   int64   `json:"output_tokens"`
+	ModelCallCount *int64  `json:"model_call_count"`
+	ToolCallCount  int64   `json:"tool_call_count,omitempty"`
+	UsageComplete  *bool   `json:"usage_complete,omitempty"`
 }
 
 type CaseResult struct {
@@ -138,6 +141,8 @@ type CaseResult struct {
 	LatencyMS       float64           `json:"latency_ms"`
 	InputTokens     int64             `json:"input_tokens"`
 	OutputTokens    int64             `json:"output_tokens"`
+	ModelCallCount  *int64            `json:"model_call_count"`
+	ToolCallCount   int64             `json:"tool_call_count,omitempty"`
 	FailureKind     string            `json:"failure_kind,omitempty"`
 	FailureCategory string            `json:"failure_category,omitempty"`
 	ErrorCode       string            `json:"error_code,omitempty"`
@@ -165,6 +170,8 @@ type AttemptResult struct {
 	BackoffMS       int64    `json:"backoff_ms"`
 	InputTokens     int64    `json:"input_tokens"`
 	OutputTokens    int64    `json:"output_tokens"`
+	ModelCallCount  *int64   `json:"model_call_count"`
+	ToolCallCount   int64    `json:"tool_call_count,omitempty"`
 	UsageComplete   *bool    `json:"usage_complete,omitempty"`
 	CircuitEvents   []string `json:"circuit_events,omitempty"`
 }
@@ -198,32 +205,36 @@ type TerminalReason struct {
 }
 
 type Aggregate struct {
-	Total                     int64   `json:"total"`
-	Succeeded                 int64   `json:"succeeded"`
-	Failed                    int64   `json:"failed"`
-	SuccessRate               float64 `json:"success_rate"`
-	FailureRate               float64 `json:"failure_rate"`
-	QualityFailures           int64   `json:"quality_failures"`
-	QualityFailureRate        float64 `json:"quality_failure_rate"`
-	InfrastructureFailures    int64   `json:"infrastructure_failures"`
-	InfrastructureFailureRate float64 `json:"infrastructure_failure_rate"`
-	AttemptCount              int64   `json:"attempt_count"`
-	RetryCount                int64   `json:"retry_count"`
-	RetriedCases              int64   `json:"retried_cases"`
-	RetrySuccesses            int64   `json:"retry_successes"`
-	RetrySuccessRate          float64 `json:"retry_success_rate"`
-	InjectedFaults            int64   `json:"injected_faults"`
-	CircuitRejections         int64   `json:"circuit_rejections"`
-	P50MS                     float64 `json:"p50_ms"`
-	P95MS                     float64 `json:"p95_ms"`
-	P99MS                     float64 `json:"p99_ms"`
-	InputTokens               int64   `json:"input_tokens"`
-	OutputTokens              int64   `json:"output_tokens"`
-	InputCostUSD              *string `json:"input_cost_usd"`
-	OutputCostUSD             *string `json:"output_cost_usd"`
-	CostUSD                   *string `json:"cost_usd"`
-	ThresholdsPassed          bool    `json:"thresholds_passed"`
-	UsageComplete             bool    `json:"usage_complete"`
+	Total                        int64    `json:"total"`
+	Succeeded                    int64    `json:"succeeded"`
+	Failed                       int64    `json:"failed"`
+	SuccessRate                  float64  `json:"success_rate"`
+	FailureRate                  float64  `json:"failure_rate"`
+	QualityFailures              int64    `json:"quality_failures"`
+	QualityFailureRate           float64  `json:"quality_failure_rate"`
+	InfrastructureFailures       int64    `json:"infrastructure_failures"`
+	InfrastructureFailureRate    float64  `json:"infrastructure_failure_rate"`
+	AttemptCount                 int64    `json:"attempt_count"`
+	RetryCount                   int64    `json:"retry_count"`
+	RetriedCases                 int64    `json:"retried_cases"`
+	RetrySuccesses               int64    `json:"retry_successes"`
+	RetrySuccessRate             float64  `json:"retry_success_rate"`
+	InjectedFaults               int64    `json:"injected_faults"`
+	CircuitRejections            int64    `json:"circuit_rejections"`
+	P50MS                        float64  `json:"p50_ms"`
+	P95MS                        float64  `json:"p95_ms"`
+	P99MS                        float64  `json:"p99_ms"`
+	InputTokens                  int64    `json:"input_tokens"`
+	OutputTokens                 int64    `json:"output_tokens"`
+	ModelCallCount               *int64   `json:"model_call_count"`
+	ToolCallCount                int64    `json:"tool_call_count"`
+	ModelCallsPerSuccessfulAgent *float64 `json:"model_calls_per_successful_agent"`
+	ToolCallsPerSuccessfulAgent  *float64 `json:"tool_calls_per_successful_agent"`
+	InputCostUSD                 *string  `json:"input_cost_usd"`
+	OutputCostUSD                *string  `json:"output_cost_usd"`
+	CostUSD                      *string  `json:"cost_usd"`
+	ThresholdsPassed             bool     `json:"thresholds_passed"`
+	UsageComplete                bool     `json:"usage_complete"`
 }
 
 type RunDetail struct {
@@ -253,29 +264,33 @@ type Comparison struct {
 }
 
 type ComparisonDelta struct {
-	SuccessRate               float64  `json:"success_rate"`
-	FailureRate               float64  `json:"failure_rate"`
-	QualityFailures           int64    `json:"quality_failures"`
-	QualityFailureRate        float64  `json:"quality_failure_rate"`
-	InfrastructureFailures    int64    `json:"infrastructure_failures"`
-	InfrastructureFailureRate float64  `json:"infrastructure_failure_rate"`
-	AttemptCount              int64    `json:"attempt_count"`
-	RetryCount                int64    `json:"retry_count"`
-	RetriedCases              int64    `json:"retried_cases"`
-	RetrySuccesses            int64    `json:"retry_successes"`
-	RetrySuccessRate          float64  `json:"retry_success_rate"`
-	InjectedFaults            int64    `json:"injected_faults"`
-	CircuitRejections         int64    `json:"circuit_rejections"`
-	P50MS                     float64  `json:"p50_ms"`
-	P50Percent                *float64 `json:"p50_percent"`
-	P95MS                     float64  `json:"p95_ms"`
-	P95Percent                *float64 `json:"p95_percent"`
-	P99MS                     float64  `json:"p99_ms"`
-	P99Percent                *float64 `json:"p99_percent"`
-	InputTokens               int64    `json:"input_tokens"`
-	OutputTokens              int64    `json:"output_tokens"`
-	CostUSD                   *string  `json:"cost_usd"`
-	CostPercent               *float64 `json:"cost_percent"`
+	SuccessRate                  float64  `json:"success_rate"`
+	FailureRate                  float64  `json:"failure_rate"`
+	QualityFailures              int64    `json:"quality_failures"`
+	QualityFailureRate           float64  `json:"quality_failure_rate"`
+	InfrastructureFailures       int64    `json:"infrastructure_failures"`
+	InfrastructureFailureRate    float64  `json:"infrastructure_failure_rate"`
+	AttemptCount                 int64    `json:"attempt_count"`
+	RetryCount                   int64    `json:"retry_count"`
+	RetriedCases                 int64    `json:"retried_cases"`
+	RetrySuccesses               int64    `json:"retry_successes"`
+	RetrySuccessRate             float64  `json:"retry_success_rate"`
+	InjectedFaults               int64    `json:"injected_faults"`
+	CircuitRejections            int64    `json:"circuit_rejections"`
+	P50MS                        float64  `json:"p50_ms"`
+	P50Percent                   *float64 `json:"p50_percent"`
+	P95MS                        float64  `json:"p95_ms"`
+	P95Percent                   *float64 `json:"p95_percent"`
+	P99MS                        float64  `json:"p99_ms"`
+	P99Percent                   *float64 `json:"p99_percent"`
+	InputTokens                  int64    `json:"input_tokens"`
+	OutputTokens                 int64    `json:"output_tokens"`
+	ModelCallCount               *int64   `json:"model_call_count"`
+	ToolCallCount                int64    `json:"tool_call_count"`
+	ModelCallsPerSuccessfulAgent *float64 `json:"model_calls_per_successful_agent"`
+	ToolCallsPerSuccessfulAgent  *float64 `json:"tool_calls_per_successful_agent"`
+	CostUSD                      *string  `json:"cost_usd"`
+	CostPercent                  *float64 `json:"cost_percent"`
 }
 
 type ShardReservation struct {

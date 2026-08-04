@@ -36,6 +36,18 @@ The `openai-agents` adapter accepts an explicit model and optional OpenAI-compat
 Credentials are read from `OPENAI_API_KEY`; in Kubernetes the controller injects that variable
 directly from `spec.target.apiKeySecretRef` without writing it to a ConfigMap.
 
+`target.adapterEntrypoint` may select a trusted `module:function` factory already installed in the
+Worker image. Its factory context contains only provider, model, and base URL; no API key, price,
+or Kubernetes Secret object is passed through that interface. Because plugin code is trusted and
+runs in the Worker process, it can still read process environment variables such as Provider
+credentials. Import/factory/return failures stop before the first model call. Inline and remotely
+downloaded plugins are unsupported.
+
+Attempt and case results include `model_call_count` and `tool_call_count`. Model calls remain `null`
+when a public SDK usage object cannot prove the value; tool calls come from the provider-independent
+lifecycle. The bundled `agentstorm_worker.benchmarks.sre:create_adapter` demonstrates a 32-incident
+four-tool Agent with matching fake and OpenAI execution paths.
+
 When `AGENTSTORM_RESULT_API_URL` is set, the worker validates the complete dataset, registers the run
 before creating the provider adapter, and uploads its shard after execution. Registration or upload
 failure exits non-zero. Duplicate case IDs are rejected before any provider call.

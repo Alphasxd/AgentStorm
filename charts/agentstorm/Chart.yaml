@@ -1,0 +1,11 @@
+apiVersion: v2
+name: agentstorm
+description: Kubernetes-native distributed AI Agent load and reliability testing
+type: application
+version: 0.6.0
+appVersion: "0.6.0"
+home: https://github.com/Alphasxd/AgentStorm
+sources:
+  - https://github.com/Alphasxd/AgentStorm
+annotations:
+  artifacthub.io/license: MIT

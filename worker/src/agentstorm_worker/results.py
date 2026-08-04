@@ -100,6 +100,11 @@ class ResultClient:
                 "provider": config.target.provider,
                 "model": config.target.model,
                 **(
+                    {"adapter_entrypoint": config.target.adapter_entrypoint}
+                    if config.target.adapter_entrypoint
+                    else {}
+                ),
+                **(
                     {
                         "pricing": {
                             "input_usd_per_million_tokens": (
@@ -154,6 +159,8 @@ class ResultClient:
                 "input_tokens": summary.input_tokens,
                 "output_tokens": summary.output_tokens,
                 "usage_complete": summary.usage_complete,
+                "model_call_count": summary.model_call_count,
+                "tool_call_count": summary.tool_call_count,
             },
             "cases": cases,
         }
@@ -222,9 +229,7 @@ class ResultClient:
     def _case_payload(self, run_id: str, result: CaseResult) -> dict[str, Any]:
         case_key = urllib.parse.quote_plus(result.case_id, safe="")
         payload: dict[str, Any] = {
-            "idempotency_key": (
-                f"run/{run_id}/case/{case_key}/iteration/{result.iteration}"
-            ),
+            "idempotency_key": (f"run/{run_id}/case/{case_key}/iteration/{result.iteration}"),
             "case_id": result.case_id,
             "iteration": result.iteration,
             "success": result.success,
@@ -232,6 +237,8 @@ class ResultClient:
             "input_tokens": result.input_tokens or 0,
             "output_tokens": result.output_tokens or 0,
             "usage_complete": result.usage_complete,
+            "model_call_count": result.model_call_count,
+            "tool_call_count": result.tool_call_count,
         }
         if result.failure_kind:
             payload["failure_kind"] = result.failure_kind
@@ -251,26 +258,20 @@ class ResultClient:
                     "input_tokens": attempt.input_tokens or 0,
                     "output_tokens": attempt.output_tokens or 0,
                     "usage_complete": attempt.usage_complete,
+                    "model_call_count": attempt.model_call_count,
+                    "tool_call_count": attempt.tool_call_count,
                     **(
                         {"failure_category": attempt.failure_category}
                         if attempt.failure_category
                         else {}
                     ),
                     **({"error_code": attempt.error_code} if attempt.error_code else {}),
+                    **({"injected_rule": attempt.injected_rule} if attempt.injected_rule else {}),
                     **(
-                        {"injected_rule": attempt.injected_rule}
-                        if attempt.injected_rule
-                        else {}
+                        {"injected_fault": attempt.injected_fault} if attempt.injected_fault else {}
                     ),
                     **(
-                        {"injected_fault": attempt.injected_fault}
-                        if attempt.injected_fault
-                        else {}
-                    ),
-                    **(
-                        {"circuit_events": attempt.circuit_events}
-                        if attempt.circuit_events
-                        else {}
+                        {"circuit_events": attempt.circuit_events} if attempt.circuit_events else {}
                     ),
                 }
                 for attempt in result.attempts
@@ -339,9 +340,7 @@ class ResultClient:
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         request = urllib.request.Request(
             self._config.base_url + path,
-            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
-                "utf-8"
-            ),
+            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
             method="POST",
             headers={
                 "Authorization": f"Bearer {self._config.write_token}",
@@ -349,9 +348,7 @@ class ResultClient:
             },
         )
         try:
-            with self._opener(
-                request, timeout=self._config.timeout_seconds
-            ) as response:
+            with self._opener(request, timeout=self._config.timeout_seconds) as response:
                 status = getattr(response, "status", 200)
                 body = response.read()
                 if status == 204:

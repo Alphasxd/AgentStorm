@@ -18,7 +18,7 @@ worker adapters independently testable.
 
 | Section | Responsibility |
 | --- | --- |
-| `target` | Provider, model, endpoint, and Secret reference |
+| `target` | Provider, model, endpoint, Secret reference, and optional trusted Adapter entrypoint |
 | `workload` | Dataset, parallelism, per-worker concurrency, iterations, and timeout |
 | `evaluation` | Run-level quality and latency thresholds |
 | `telemetry` | Content omission/redaction policy for optional traces |
@@ -64,6 +64,12 @@ Workers claim and renew opaque leases; expired leases are eligible for another W
 Deterministic assertions run before any future model-based grader. This keeps simple correctness
 checks cheap, explainable, and reproducible.
 
+The optional `target.adapterEntrypoint` loads a `module:function` factory already present in the
+Worker image. Its context contains only provider, model, and base URL. The Controller only validates
+and snapshots the string; import, SDK, and domain behavior stay in the Worker. Inline code,
+ConfigMap scripts, remote downloads, and passing credential values through the factory context are
+intentionally unsupported. Trusted plugin code still shares the Worker process environment.
+
 ## Result model
 
 The alpha worker writes one `results.jsonl` and one `summary.json` per shard and prints the summary
@@ -96,6 +102,11 @@ document. The service reserves the shard in PostgreSQL, writes the canonical JSO
 and only then commits case rows and recomputes the run aggregate. A retry with the same key and body
 is a no-op; reusing a key with different content is a conflict. A run becomes complete only when
 every expected shard receipt is finalized.
+
+M6 adds nullable model-call and exact tool-call counts to each attempt and case. Aggregates remain
+`null` for model calls if any Worker cannot confirm the value from public SDK usage data; unknown is
+never converted to zero. Tool counts come from the provider-independent lifecycle, and successful-
+Agent averages make multi-turn/tool behavior visible alongside throughput.
 
 ## Failure semantics
 

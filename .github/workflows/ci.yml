@@ -8,6 +8,57 @@ permissions:
   contents: read
 
 jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - name: Install Worker dependencies
+        run: python -m pip install -e worker
+      - name: Install Helm 3.21.0 and 4.2.2
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --output /tmp/helm3.tgz https://get.helm.sh/helm-v3.21.0-linux-amd64.tar.gz
+          curl --fail --silent --show-error --location --output /tmp/helm4.tgz https://get.helm.sh/helm-v4.2.2-linux-amd64.tar.gz
+          mkdir -p /tmp/helm3 /tmp/helm4
+          tar -xzf /tmp/helm3.tgz -C /tmp/helm3
+          tar -xzf /tmp/helm4.tgz -C /tmp/helm4
+          mv /tmp/helm3/linux-amd64/helm /tmp/helm-3.21.0
+          mv /tmp/helm4/linux-amd64/helm /tmp/helm-4.2.2
+      - name: Lint and render the Helm chart with both major versions
+        env:
+          HELM3: /tmp/helm-3.21.0
+          HELM4: /tmp/helm-4.2.2
+        run: make helm-test
+      - name: Validate fake canonical benchmark artifacts
+        run: make test-benchmark
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Test Helm 4 install, upgrade, and uninstall
+        shell: bash
+        run: |
+          kind create cluster --name agentstorm-helm --wait 120s
+          /tmp/helm-4.2.2 install agentstorm charts/agentstorm \
+            --kube-context kind-agentstorm-helm --namespace agentstorm-system --create-namespace \
+            --set controller.image.repository=agentstorm-controller \
+            --set controller.image.tag=dev --set controller.image.pullPolicy=Never
+          /tmp/helm-4.2.2 upgrade agentstorm charts/agentstorm \
+            --kube-context kind-agentstorm-helm --namespace agentstorm-system \
+            --set controller.image.repository=agentstorm-controller \
+            --set controller.image.tag=dev --set controller.image.pullPolicy=Never \
+            --set controller.leaderElection=true
+          /tmp/helm-4.2.2 uninstall agentstorm \
+            --kube-context kind-agentstorm-helm --namespace agentstorm-system
+
   promptfoo-replay:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -52,6 +103,8 @@ jobs:
         run: PYTHONPATH=worker/src python -m unittest discover -s worker/tests -v
       - name: Run no-cost smoke workload
         run: make worker-local
+      - name: Run no-cost SRE Agent workload
+        run: make sre-local
 
   results-integration:
     runs-on: ubuntu-latest

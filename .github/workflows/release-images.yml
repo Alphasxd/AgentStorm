@@ -107,3 +107,47 @@ jobs:
             echo
             echo '${{ matrix.image }}@${{ steps.build.outputs.digest }}'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-chart:
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate stable tag and chart version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Helm charts are published only for stable SemVer tags" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          chart_version="$(awk '$1 == "version:" {print $2}' charts/agentstorm/Chart.yaml)"
+          if [[ "v$chart_version" != "$GITHUB_REF_NAME" ]]; then
+            echo "chart version $chart_version does not match $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+      - name: Install Helm 4.2.2
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --output /tmp/helm.tgz https://get.helm.sh/helm-v4.2.2-linux-amd64.tar.gz
+          tar -xzf /tmp/helm.tgz -C /tmp
+          mv /tmp/linux-amd64/helm /tmp/helm
+      - name: Log in to GHCR
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | /tmp/helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Package chart
+        shell: bash
+        run: |
+          mkdir -p .out/chart
+          /tmp/helm package charts/agentstorm --destination .out/chart
+      - name: Attest chart package
+        uses: actions/attest@v4
+        with:
+          subject-path: .out/chart/agentstorm-*.tgz
+      - name: Publish OCI chart
+        shell: bash
+        run: /tmp/helm push .out/chart/agentstorm-*.tgz oci://ghcr.io/alphasxd/charts

@@ -1,11 +1,12 @@
 # AgentStorm
 
-AgentStorm is a Kubernetes-native platform for load testing, evaluating, and observing AI
-Agent workloads. It turns an `AgentTestRun` custom resource into indexed Kubernetes Jobs,
-runs a JSONL scenario set with bounded concurrency, and evaluates deterministic quality and
-latency thresholds.
+AgentStorm is a Kubernetes-native distributed load-testing, reliability-testing, and performance-
+observability platform for AI Agents. It measures complete multi-turn model/tool execution under
+concurrency, rate limits, faults, retries, and autoscaling. Deterministic evaluation is the
+correctness guardrail for that load test; AgentStorm is not a customer-service classifier or a
+single-prompt benchmark.
 
-> Status: early alpha. Public multi-architecture controller, worker, and Result API images are
+> Status: alpha moving toward the `v0.6.0` stable distribution. Public multi-architecture controller, worker, and Result API images are
 > available. M2 provides authenticated durable ingestion, PostgreSQL/object storage, and baseline
 > comparison. M3 currently provides deterministic assertion plugins, tool/handoff tracing, explicit
 > price-snapshot cost accounting, configurable trace redaction, bounded Prometheus metrics, and a
@@ -13,14 +14,17 @@ latency thresholds.
 > Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 fault injection, conservative full-Agent
 > retry, Worker-local circuit breaking, durable cancellation, and quality/infrastructure reporting
 > are implemented in `v0.4.0-alpha.1`. M5 adds an opt-in durable shard queue, KEDA scale-to-zero,
-> resource admission, and distributed Provider limits in `v0.5.0-alpha.1`.
+> resource admission, and distributed Provider limits in `v0.5.0-alpha.1`. The M6 source tree adds
+> trusted Adapter plugins, a 32-incident SRE Agent workload, Agent-call accounting, Helm packaging,
+> and reproducible benchmark tooling; it is not called released until the v0.6 evidence gate closes.
 
 ## Why this project
 
 Most Agent demos optimize for a single successful conversation. AgentStorm focuses on the
 engineering questions that appear after a workflow becomes a service:
 
-- Does quality regress when the prompt, model, tool, or workflow version changes?
+- How many complete Agent executions can the system finish per second, and what happens to P95/P99?
+- Does tool/model-call behavior remain correct as KEDA changes Worker count?
 - What happens under concurrent load, rate limiting, timeouts, and tool failures?
 - Can a run be scheduled, cancelled, retried, observed, and cleaned up declaratively?
 - Can test evidence be compared without treating an LLM judge as the only source of truth?
@@ -49,6 +53,9 @@ engineering questions that appear after a workflow becomes a service:
 - Explicit full-Agent retry budgets, Worker-local circuit breakers, and durable partial cancellation.
 - Optional PostgreSQL-backed queued scheduling with KEDA scale-to-zero and bounded live Workers.
 - Resource-profile/quota admission plus global and Provider-specific distributed request limits.
+- Trusted, image-bundled `module:function` Adapter plugins with no inline or downloaded code.
+- Per-attempt, case, run, and comparison model/tool call accounting.
+- A realistic 32-case SRE diagnostic Agent using four deterministic read-only tools.
 
 ## Architecture
 
@@ -89,6 +96,19 @@ The fake provider uses only the Python standard library.
 
 ```bash
 make worker-local
+```
+
+Run the full fake SRE Agent lifecycle (32 incidents, 128 tool calls, deterministic assertions):
+
+```bash
+make sre-local
+```
+
+Validate the complete benchmark shape without a model bill (384 capacity executions plus the
+32-case reliability run and checksummed artifacts):
+
+```bash
+make benchmark-fake
 ```
 
 Results are written to:
@@ -153,6 +173,21 @@ gh attestation verify \
   oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58 \
   --repo Alphasxd/AgentStorm
 ```
+
+### Helm source preview for v0.6
+
+The source chart defaults to a namespace-scoped Controller and CRD. Result API is optional;
+PostgreSQL, S3, and KEDA are always operator-provided. Values contain only Secret names and keys,
+never token/password values:
+
+```bash
+helm lint charts/agentstorm
+helm template agentstorm charts/agentstorm \
+  --namespace agentstorm-system --include-crds
+```
+
+The OCI reference `oci://ghcr.io/alphasxd/charts/agentstorm:0.6.0` is published only with the
+stable v0.6 tag; until then, use the source chart and do not treat it as a released artifact.
 
 ### Released durable result stack
 
@@ -347,6 +382,20 @@ spec:
     imagePullPolicy: IfNotPresent
 ```
 
+An image-bundled trusted Adapter can be selected without adding domain logic to the generic
+OpenAI Adapter:
+
+```yaml
+target:
+  provider: openai-agents
+  model: gpt-5.6-luna
+  adapterEntrypoint: agentstorm_worker.benchmarks.sre:create_adapter
+```
+
+The factory context contains only provider, model, and base URL. It never receives API keys,
+pricing, or Kubernetes Secret objects through that interface; trusted plugin code still shares the
+Worker process environment and must already exist in the immutable Worker image.
+
 Set `spec.cancel: true` to request cancellation. Worker Jobs use `backoffLimit: 0` by default so
 an expensive Agent case is not silently replayed after a pod failure.
 
@@ -363,13 +412,15 @@ config/             CRD, RBAC, deployment, and samples
 worker/             Python Agent execution worker
 integrations/       Optional external evaluator bridges
 examples/           local run configuration and datasets
+benchmarks/          reproducible SRE benchmark methodology
+charts/              namespace-scoped Helm distribution
 docs/               architecture, roadmap, and reference designs
 ```
 
 ## Development roadmap
 
-1. Publish a realistic SRE Agent capacity and reliability benchmark.
-2. Publish Helm charts, reproducible benchmark artifacts, ADRs, and a public demo.
+1. Release v0.6 images and the OCI Helm chart from an immutable stable tag.
+2. Run the fixed real SRE capacity/reliability matrix, publish checksummed evidence, and close M6.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

@@ -1,0 +1,13 @@
+AgentStorm is watching namespace {{ .Release.Namespace }}.
+
+Create a dataset ConfigMap, then submit an AgentTestRun whose runner.image is an immutable
+AgentStorm Worker reference. The v0.6 SRE example uses:
+
+  ghcr.io/alphasxd/agentstorm-worker:v0.6.0
+
+{{- if .Values.keda.enabled }}
+KEDA scheduling is enabled. The KEDA CRDs/operator and the configured Result API must already exist.
+{{- end }}
+{{- if not .Values.resultApi.enabled }}
+The Result API is not installed by this release. PostgreSQL, S3, and KEDA are never bundled.
+{{- end }}

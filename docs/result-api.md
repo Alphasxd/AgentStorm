@@ -52,6 +52,12 @@ failure category/code, and usage completeness. Assertion values and custom messa
 unless sensitive result upload was explicitly enabled. A case and run cost remains `null` whenever
 any attempt has unknown Token usage, while known Token totals are still retained.
 
+M6 adds optional `model_call_count` and `tool_call_count` fields to attempts and cases, plus totals
+and per-successful-Agent averages in run summaries. Comparison deltas cover all four values.
+`model_call_count` is `null` whenever the public Provider SDK does not prove the number or any
+constituent attempt is unknown; the API never guesses zero. Migration `006_m6_agent_calls` leaves
+old Worker payloads and historical rows readable.
+
 The optional [Promptfoo replay bridge](../integrations/promptfoo/README.md) reads only these public
 run and case endpoints. It refuses collecting runs and case pages without durable output, and it
 never triggers a Provider or model request. Read access remains protected by the Result API bearer

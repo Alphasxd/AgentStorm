@@ -20,6 +20,7 @@ class TargetConfig:
     provider: str
     model: str = ""
     base_url: str = ""
+    adapter_entrypoint: str = ""
     pricing: PricingConfig | None = None
 
 
@@ -141,6 +142,9 @@ def load_run_config(path: str | Path) -> RunConfig:
             provider=str(target.get("provider") or "fake"),
             model=str(target.get("model") or ""),
             base_url=str(target.get("baseURL") or target.get("base_url") or ""),
+            adapter_entrypoint=str(
+                target.get("adapterEntrypoint") or target.get("adapter_entrypoint") or ""
+            ),
             pricing=_pricing(target.get("pricing")),
         ),
         workload=WorkloadConfig(
@@ -151,9 +155,7 @@ def load_run_config(path: str | Path) -> RunConfig:
         evaluation=EvaluationConfig(
             min_success_rate=_optional_float(evaluation, "minSuccessRate", "min_success_rate"),
             max_error_rate=_optional_float(evaluation, "maxErrorRate", "max_error_rate"),
-            max_p95_latency_ms=_optional_int(
-                evaluation, "maxP95LatencyMs", "max_p95_latency_ms"
-            ),
+            max_p95_latency_ms=_optional_int(evaluation, "maxP95LatencyMs", "max_p95_latency_ms"),
         ),
         telemetry=_telemetry(telemetry),
         reliability=_reliability(raw.get("reliability")),
@@ -162,6 +164,15 @@ def load_run_config(path: str | Path) -> RunConfig:
         raise ValueError("workload concurrency and iterations must be positive")
     if config.workload.timeout_seconds < 1:
         raise ValueError("workload timeout_seconds must be positive")
+    if config.target.adapter_entrypoint and (
+        len(config.target.adapter_entrypoint.encode("utf-8")) > 256
+        or re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*",
+            config.target.adapter_entrypoint,
+        )
+        is None
+    ):
+        raise ValueError("target.adapterEntrypoint must be a module:function reference")
     return config
 
 
@@ -226,11 +237,14 @@ def _retry(value: Any) -> RetryConfig:
         raise ValueError("reliability.retry.allowAmbiguousRetries must be a boolean")
     if not 1 <= retry.max_attempts <= 10:
         raise ValueError("reliability.retry.maxAttempts must be between 1 and 10")
-    if min(
-        retry.initial_backoff_ms,
-        retry.max_backoff_ms,
-        retry.max_cumulative_backoff_ms,
-    ) < 1:
+    if (
+        min(
+            retry.initial_backoff_ms,
+            retry.max_backoff_ms,
+            retry.max_cumulative_backoff_ms,
+        )
+        < 1
+    ):
         raise ValueError("reliability retry backoff values must be positive")
     if retry.initial_backoff_ms > retry.max_backoff_ms:
         raise ValueError("reliability.retry.initialBackoffMs cannot exceed maxBackoffMs")
@@ -273,7 +287,10 @@ def _scenario_snapshot(value: Any) -> FaultScenarioConfig | None:
     if not isinstance(scenario, dict):
         raise ValueError("reliability.scenario.scenario must be an object")
     _only_keys(scenario, {"apiVersion", "kind", "rules"}, "FaultScenario")
-    if scenario.get("apiVersion") != "agentstorm.io/v1alpha1" or scenario.get("kind") != "FaultScenario":
+    if (
+        scenario.get("apiVersion") != "agentstorm.io/v1alpha1"
+        or scenario.get("kind") != "FaultScenario"
+    ):
         raise ValueError("FaultScenario apiVersion or kind is invalid")
     raw_rules = scenario.get("rules")
     if not isinstance(raw_rules, list) or len(raw_rules) > 100:
@@ -490,9 +507,7 @@ def _telemetry(value: Any) -> TelemetryConfig:
         try:
             re.compile(pattern)
         except re.error:
-            raise ValueError(
-                f"telemetry.redaction.patterns[{index}] is invalid"
-            ) from None
+            raise ValueError(f"telemetry.redaction.patterns[{index}] is invalid") from None
         parsed_patterns.append(pattern)
     if not isinstance(metadata_keys, list) or not all(
         isinstance(key, str) and key for key in metadata_keys
@@ -515,9 +530,7 @@ def _assertions(value: Any, line_number: int) -> tuple[AssertionSpec, ...]:
     assertions: list[AssertionSpec] = []
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
-            raise ValueError(
-                f"dataset line {line_number} assertions[{index}] must be an object"
-            )
+            raise ValueError(f"dataset line {line_number} assertions[{index}] must be an object")
         assertion_type = raw.get("type")
         if assertion_type not in {
             "exact",
@@ -528,9 +541,7 @@ def _assertions(value: Any, line_number: int) -> tuple[AssertionSpec, ...]:
             "latency",
             "python",
         }:
-            raise ValueError(
-                f"dataset line {line_number} assertions[{index}] has unsupported type"
-            )
+            raise ValueError(f"dataset line {line_number} assertions[{index}] has unsupported type")
         allowed = {
             "exact": {"type", "value"},
             "contains": {"type", "value"},
@@ -542,9 +553,7 @@ def _assertions(value: Any, line_number: int) -> tuple[AssertionSpec, ...]:
         }[assertion_type]
         unknown = set(raw) - allowed
         if unknown:
-            raise ValueError(
-                f"dataset line {line_number} assertions[{index}] has unknown fields"
-            )
+            raise ValueError(f"dataset line {line_number} assertions[{index}] has unknown fields")
         assertions.append(_assertion_spec(raw, assertion_type, line_number, index))
     return tuple(assertions)
 
@@ -567,9 +576,7 @@ def _assertion_spec(
         return AssertionSpec(type=assertion_type, schema=raw["schema"])
     if assertion_type == "tool_path":
         path = raw.get("path")
-        if not isinstance(path, list) or not all(
-            isinstance(item, str) and item for item in path
-        ):
+        if not isinstance(path, list) or not all(isinstance(item, str) and item for item in path):
             raise ValueError(f"{location} path must be an array of non-empty strings")
         return AssertionSpec(type=assertion_type, path=tuple(path))
     if assertion_type == "latency":

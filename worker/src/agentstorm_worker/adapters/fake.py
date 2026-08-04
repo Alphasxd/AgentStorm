@@ -12,9 +12,7 @@ class FakeAdapter:
     def __init__(self, delay_seconds: float = 0.001) -> None:
         self._delay_seconds = delay_seconds
 
-    async def run(
-        self, case: TestCase, lifecycle: AgentLifecycle | None = None
-    ) -> AdapterResponse:
+    async def run(self, case: TestCase, lifecycle: AgentLifecycle | None = None) -> AdapterResponse:
         tool_event = ToolLifecycleEvent(
             invocation_id="fake-echo",
             name="fake.echo",
@@ -41,4 +39,10 @@ class FakeAdapter:
                     target_agent="fake-responder",
                 )
             )
-        return AdapterResponse(output=output, input_tokens=11, output_tokens=7)
+        return AdapterResponse(
+            output=output,
+            input_tokens=11,
+            output_tokens=7,
+            model_call_count=1,
+            tool_call_count=1,
+        )

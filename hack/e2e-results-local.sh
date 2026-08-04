@@ -12,6 +12,7 @@ load_local_images="${LOAD_LOCAL_IMAGES:-true}"
 telemetry_e2e="${ENABLE_TELEMETRY_E2E:-}"
 expect_cost_accounting="${EXPECT_COST_ACCOUNTING:-}"
 reliability_e2e="${ENABLE_RELIABILITY_E2E:-}"
+sre_e2e="${ENABLE_SRE_E2E:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 result_api_image="${RESULT_API_IMAGE:-agentstorm-result-api:dev}"
@@ -71,9 +72,17 @@ if [[ -z "$reliability_e2e" ]]; then
     reliability_e2e="false"
   fi
 fi
+if [[ -z "$sre_e2e" ]]; then
+  if [[ "$skip_image_build" == "false" ]]; then
+    sre_e2e="true"
+  else
+    sre_e2e="false"
+  fi
+fi
 require_boolean ENABLE_TELEMETRY_E2E "$telemetry_e2e"
 require_boolean EXPECT_COST_ACCOUNTING "$expect_cost_accounting"
 require_boolean ENABLE_RELIABILITY_E2E "$reliability_e2e"
+require_boolean ENABLE_SRE_E2E "$sre_e2e"
 require_command "$kubectl_bin"
 require_command "$docker_bin"
 require_command curl
@@ -216,12 +225,14 @@ cleanup_stack() {
     agentstorm-results-deterministic-a \
     agentstorm-results-deterministic-b \
     agentstorm-results-circuit \
+    agentstorm-results-sre \
     agentstorm-results-redacted \
     agentstorm-results-reference; do
     delete_run "$run_name" || true
   done
   "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset agentstorm-results-cancel-scenario \
-    agentstorm-results-reliability-scenarios -n "$e2e_namespace" --ignore-not-found >/dev/null || true
+    agentstorm-results-reliability-scenarios agentstorm-results-sre-dataset \
+    -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete deployment agentstorm-result-api -n "$e2e_namespace" --ignore-not-found >/dev/null || true
   "${kubectl_cmd[@]}" delete deployment agentstorm-otel-collector agentstorm-tempo agentstorm-prometheus agentstorm-grafana \
     -n "$e2e_namespace" --ignore-not-found >/dev/null || true
@@ -278,12 +289,14 @@ for run_name in \
   agentstorm-results-deterministic-a \
   agentstorm-results-deterministic-b \
   agentstorm-results-circuit \
+  agentstorm-results-sre \
   agentstorm-results-redacted \
   agentstorm-results-reference; do
   delete_run "$run_name"
 done
 "${kubectl_cmd[@]}" delete configmap agentstorm-results-dataset agentstorm-results-cancel-scenario \
-  agentstorm-results-reliability-scenarios -n "$e2e_namespace" --ignore-not-found >/dev/null
+  agentstorm-results-reliability-scenarios agentstorm-results-sre-dataset \
+  -n "$e2e_namespace" --ignore-not-found >/dev/null
 
 # Persistent database credentials are initialized only once. Reset the complete test-owned stack so
 # a retained PVC can never be paired with a newly generated password on a later E2E invocation.
@@ -382,6 +395,12 @@ data:
     {"id":"circuit-c","input":"c","expected_contains":"c"}
     {"id":"circuit-d","input":"d","expected_contains":"d"}
 YAML
+
+if [[ "$sre_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" create configmap agentstorm-results-sre-dataset \
+    -n "$e2e_namespace" \
+    --from-file="cases.jsonl=$repo_root/examples/datasets/sre-incidents.jsonl" >/dev/null
+fi
 
 if [[ "$reliability_e2e" == "true" ]]; then
   "${kubectl_cmd[@]}" apply -f - <<YAML
@@ -738,9 +757,41 @@ spec:
 YAML
 }
 
+create_sre_run() {
+  "${kubectl_cmd[@]}" apply -f - <<YAML
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: agentstorm-results-sre
+  namespace: $e2e_namespace
+spec:
+  target:
+    provider: fake
+    model: fake-sre-v1
+    adapterEntrypoint: agentstorm_worker.benchmarks.sre:create_adapter
+  workload:
+    datasetRef:
+      name: agentstorm-results-sre-dataset
+      key: cases.jsonl
+    parallelism: 4
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 120
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+  runner:
+    image: "$worker_image"
+    imagePullPolicy: IfNotPresent
+YAML
+}
+
 create_run agentstorm-results-baseline 2.5 10
 create_run agentstorm-results-candidate 5 20
 create_failure_run
+if [[ "$sre_e2e" == "true" ]]; then
+  create_sre_run
+fi
 if [[ "$telemetry_e2e" == "true" ]]; then
   create_redacted_run
 fi
@@ -759,6 +810,10 @@ fi
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-baseline -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-candidate -n "$e2e_namespace" --timeout="$wait_timeout"
 "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-failure -n "$e2e_namespace" --timeout="$wait_timeout"
+if [[ "$sre_e2e" == "true" ]]; then
+  "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+    agenttestrun/agentstorm-results-sre -n "$e2e_namespace" --timeout="$wait_timeout"
+fi
 if [[ "$telemetry_e2e" == "true" ]]; then
   "${kubectl_cmd[@]}" wait --for=jsonpath='{.status.phase}'=Succeeded agenttestrun/agentstorm-results-redacted -n "$e2e_namespace" --timeout="$wait_timeout"
 fi
@@ -778,6 +833,10 @@ fi
 baseline_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-baseline -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 candidate_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-candidate -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
 failure_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-failure -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+sre_id=""
+if [[ "$sre_e2e" == "true" ]]; then
+  sre_id="$("${kubectl_cmd[@]}" get agenttestrun agentstorm-results-sre -n "$e2e_namespace" -o jsonpath='{.metadata.uid}')"
+fi
 cancel_id=""
 faults_id=""
 retry_default_id=""
@@ -800,6 +859,10 @@ if [[ "$telemetry_e2e" == "true" ]]; then
 fi
 if [[ -z "$baseline_id" || -z "$candidate_id" || -z "$failure_id" || "$baseline_id" == "$candidate_id" ]]; then
   echo "invalid durable run identifiers" >&2
+  exit 1
+fi
+if [[ "$sre_e2e" == "true" && -z "$sre_id" ]]; then
+  echo "invalid durable SRE run identifier" >&2
   exit 1
 fi
 if [[ "$reliability_e2e" == "true" ]]; then
@@ -839,6 +902,12 @@ curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$candidate_id" >"$test_dir/candidate.json"
 curl --fail --silent --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$failure_id" >"$test_dir/failure.json"
+if [[ "$sre_e2e" == "true" ]]; then
+  curl --fail --silent --header "Authorization: Bearer $read_token" \
+    "$base_url/v1/runs/$sre_id" >"$test_dir/sre.json"
+  curl --fail --silent --header "Authorization: Bearer $read_token" \
+    "$base_url/v1/runs/$sre_id/cases?limit=100" >"$test_dir/sre-cases.json"
+fi
 if [[ "$reliability_e2e" == "true" ]]; then
   curl --fail --silent --header "Authorization: Bearer $read_token" \
     "$base_url/v1/runs/$cancel_id" >"$test_dir/cancel.json"
@@ -938,6 +1007,44 @@ if expect_cost_accounting:
     assert comparison["delta"]["cost_usd"] == "0.000195000000", comparison
     assert comparison["delta"]["cost_percent"] == 100, comparison
 PY
+
+if [[ "$sre_e2e" == "true" ]]; then
+  python3 - "$test_dir/sre.json" "$test_dir/sre-cases.json" "$sre_id" <<'PY'
+import json
+import sys
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))
+page = json.load(open(sys.argv[2], encoding="utf-8"))
+run_id = sys.argv[3]
+
+assert run["id"] == run_id, run
+assert run["status"] == "complete", run
+assert run["registration"]["target"]["adapter_entrypoint"] == (
+    "agentstorm_worker.benchmarks.sre:create_adapter"
+), run
+summary = run["summary"]
+assert summary["total"] == 32, summary
+assert summary["succeeded"] == 32, summary
+assert summary["failed"] == 0, summary
+assert summary["model_call_count"] == 160, summary
+assert summary["tool_call_count"] == 128, summary
+assert summary["model_calls_per_successful_agent"] == 5, summary
+assert summary["tool_calls_per_successful_agent"] == 4, summary
+
+assert len(page["cases"]) == 32, page
+for case in page["cases"]:
+    path = case["tool_path"]
+    assert len(path) == 4, case
+    assert path[0] == "get_incident", case
+    assert set(path[1:3]) == {"query_metrics", "search_logs"}, case
+    assert path[3] == "lookup_runbook", case
+    assert case["model_call_count"] == 5, case
+    assert case["tool_call_count"] == 4, case
+    assert len(case["attempts"]) == 1, case
+    assert case["attempts"][0]["model_call_count"] == 5, case
+    assert case["attempts"][0]["tool_call_count"] == 4, case
+PY
+fi
 
 if [[ "$reliability_e2e" == "true" ]]; then
   python3 - \

@@ -41,6 +41,33 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.evaluation.min_success_rate, 1.0)
             self.assertEqual(cases[0].case_id, "case-1")
 
+    def test_loads_and_validates_adapter_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "run.json"
+            raw = {
+                "target": {
+                    "provider": "fake",
+                    "adapterEntrypoint": "agentstorm_worker.benchmarks.sre:create_adapter",
+                }
+            }
+            config_path.write_text(json.dumps(raw), encoding="utf-8")
+            self.assertEqual(
+                load_run_config(config_path).target.adapter_entrypoint,
+                "agentstorm_worker.benchmarks.sre:create_adapter",
+            )
+            for invalid in (
+                "module",
+                "module:bad-name",
+                "1module:create",
+                "module..nested:create",
+                "m:" + "x" * 256,
+            ):
+                raw["target"]["adapterEntrypoint"] = invalid
+                config_path.write_text(json.dumps(raw), encoding="utf-8")
+                with self.subTest(entrypoint=invalid):
+                    with self.assertRaisesRegex(ValueError, "module:function"):
+                        load_run_config(config_path)
+
     def test_loads_and_validates_price_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "run.json"
@@ -127,8 +154,7 @@ class ConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             dataset_path = Path(directory) / "cases.jsonl"
             dataset_path.write_text(
-                '{"id":"duplicate","input":"first"}\n'
-                '{"id":"duplicate","input":"second"}\n',
+                '{"id":"duplicate","input":"first"}\n{"id":"duplicate","input":"second"}\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "duplicate dataset case id"):

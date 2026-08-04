@@ -1,11 +1,13 @@
-FROM golang:1.24@sha256:d2d2bc1c84f7e60d7d2438a3836ae7d0c847f4888464e7ec9ba3a1339a1ee804 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24@sha256:d2d2bc1c84f7e60d7d2438a3836ae7d0c847f4888464e7ec9ba3a1339a1ee804 AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY api api
 COPY cmd cmd
 COPY internal internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /agentstorm-controller ./cmd/controller
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /agentstorm-controller ./cmd/controller
 
 FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 COPY --from=builder /agentstorm-controller /agentstorm-controller

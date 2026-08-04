@@ -1,0 +1,29 @@
+{
+  "run_id": "sre-local",
+  "source": {
+    "namespace": "local",
+    "name": "sre-local"
+  },
+  "dataset": {
+    "name": "sre-incidents",
+    "key": "sre-incidents.jsonl"
+  },
+  "target": {
+    "provider": "fake",
+    "model": "fake-sre",
+    "adapterEntrypoint": "agentstorm_worker.benchmarks.sre:create_adapter"
+  },
+  "workload": {
+    "concurrency": 8,
+    "iterations": 1,
+    "timeout_seconds": 300
+  },
+  "evaluation": {
+    "minSuccessRate": 1,
+    "maxErrorRate": 0,
+    "maxP95LatencyMs": 1000
+  },
+  "telemetry": {
+    "contentMode": "omit"
+  }
+}
