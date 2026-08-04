@@ -12,8 +12,8 @@ latency thresholds.
 > Promptfoo durable replay bridge. The development stack persists traces and metrics and provisions
 > Grafana. M3 is implemented in `v0.3.0-alpha.1`. M4 fault injection, conservative full-Agent
 > retry, Worker-local circuit breaking, durable cancellation, and quality/infrastructure reporting
-> are implemented in `v0.4.0-alpha.1`. M5 event-driven scheduling is under source development and
-> is not included in the released v0.4 manifests.
+> are implemented in `v0.4.0-alpha.1`. M5 adds an opt-in durable shard queue, KEDA scale-to-zero,
+> resource admission, and distributed Provider limits in `v0.5.0-alpha.1`.
 
 ## Why this project
 
@@ -45,8 +45,10 @@ engineering questions that appear after a workflow becomes a service:
 - Bounded Result API RED/Token/cost Prometheus metrics.
 - A development-only persistent Tempo/Prometheus stack with a provisioned Grafana run drill-down.
 - Optional Promptfoo replay of sensitive durable output without another model call.
-- Source-built deterministic fault scenarios with stable failure categories and per-attempt evidence.
+- Deterministic fault scenarios with stable failure categories and per-attempt evidence.
 - Explicit full-Agent retry budgets, Worker-local circuit breakers, and durable partial cancellation.
+- Optional PostgreSQL-backed queued scheduling with KEDA scale-to-zero and bounded live Workers.
+- Resource-profile/quota admission plus global and Provider-specific distributed request limits.
 
 ## Architecture
 
@@ -56,7 +58,7 @@ flowchart LR
     CR --> Controller["Go Controller"]
     Controller --> Config["Generated run ConfigMap"]
     Controller --> Job["Indexed Kubernetes Job"]
-    Controller -. "M5 queued strategy" .-> ScaledJob["KEDA ScaledJob"]
+    Controller -. "queued strategy" .-> ScaledJob["KEDA ScaledJob"]
     KEDA["KEDA operator"] --> ScaledJob
     ResultAPI -. "available shard count" .-> KEDA
     ScaledJob --> Job
@@ -117,7 +119,7 @@ make build
 ## Released Kubernetes quickstart
 
 Prerequisite: `kubectl` access to a Kubernetes cluster. The public manifests use immutable
-`v0.4.0-alpha.1` image-index digests and need no local image build or registry credentials.
+`v0.5.0-alpha.1` image-index digests and need no local image build or registry credentials.
 
 ```bash
 kubectl apply -k config/default
@@ -131,24 +133,24 @@ kubectl get agenttestrun/agentstorm-demo
 The released images are public for anonymous pulls:
 
 ```text
-ghcr.io/alphasxd/agentstorm-controller@sha256:28b5ba2bc2a1d2a8fa4e00154483981e1c5459229d44cefbc1a9bab0065f2eb0
-ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
-ghcr.io/alphasxd/agentstorm-result-api@sha256:b09a346666c08747948f33089c53cf77a0c6c626f8c0242d3098353f4dbd0162
+ghcr.io/alphasxd/agentstorm-controller@sha256:c755a11d88d677cf09051509b01686c20e15e0bdff393a466d97d9f8b970902b
+ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654
+ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58
 ```
 
 All three images include SPDX SBOM and SLSA provenance attestations. Verify them with the GitHub CLI:
 
 ```bash
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:28b5ba2bc2a1d2a8fa4e00154483981e1c5459229d44cefbc1a9bab0065f2eb0 \
+  oci://ghcr.io/alphasxd/agentstorm-controller@sha256:c755a11d88d677cf09051509b01686c20e15e0bdff393a466d97d9f8b970902b \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118 \
+  oci://ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654 \
   --repo Alphasxd/AgentStorm
 
 gh attestation verify \
-  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:b09a346666c08747948f33089c53cf77a0c6c626f8c0242d3098353f4dbd0162 \
+  oci://ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58 \
   --repo Alphasxd/AgentStorm
 ```
 
@@ -215,7 +217,7 @@ gating, two durable runs, case reads, and a baseline comparison:
 CLUSTER_PROVIDER=kind make e2e-results-local
 ```
 
-The unreleased M5 development gate adds a durable PostgreSQL shard queue, KEDA scale-to-zero,
+The released M5 gate exercises the durable PostgreSQL shard queue, KEDA scale-to-zero,
 resource-profile/quota admission, and distributed Provider concurrency/rate permits. It installs
 KEDA 2.20 into the selected disposable local cluster when needed and uses only the fake Provider:
 
@@ -223,8 +225,19 @@ KEDA 2.20 into the selected disposable local cluster when needed and uses only t
 CLUSTER_PROVIDER=kind make e2e-keda-local
 ```
 
-This is a source-only preview, not a `v0.4.0-alpha.1` quickstart. See
-[event-driven scheduling](docs/scheduling.md) for its immutable API and safety boundaries.
+To verify the released images without building or loading local images:
+
+```bash
+CLUSTER_PROVIDER=kind E2E_TIMEOUT=300s SKIP_IMAGE_BUILD=true LOAD_LOCAL_IMAGES=false \
+  CONTROLLER_IMAGE=ghcr.io/alphasxd/agentstorm-controller@sha256:c755a11d88d677cf09051509b01686c20e15e0bdff393a466d97d9f8b970902b \
+  WORKER_IMAGE=ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654 \
+  RESULT_API_IMAGE=ghcr.io/alphasxd/agentstorm-result-api@sha256:6ca7e9e187266573d0c109176fa1947ebb0660cccd4abc650c381806add62c58 \
+  make e2e-keda-local
+```
+
+See [event-driven scheduling](docs/scheduling.md) for the immutable API, release quickstart, and
+safety boundaries. The queue-status endpoint must be network-isolated; PostgreSQL and Result API
+form part of the scheduling control plane, and distributed limits are not billing guarantees.
 
 The local result overlay lives under `config/dev/results`; `config/dev/telemetry` adds a
 digest-pinned Collector, Tempo, Prometheus, and provisioned Grafana dashboard. Source-image E2E
@@ -330,7 +343,7 @@ spec:
   telemetry:
     contentMode: omit
   runner:
-    image: ghcr.io/alphasxd/agentstorm-worker@sha256:a189cc0735a8f28b8119315f18c4d87fe5713927025529a6007dfce6933e0118
+    image: ghcr.io/alphasxd/agentstorm-worker@sha256:b4fbfd5f910bcd8b0a7ed6d6fd79e421a5c2e30d0eb6c9c6da4517b598e0c654
     imagePullPolicy: IfNotPresent
 ```
 
@@ -355,8 +368,8 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Finish and release the source-built KEDA queue scaling and resource-aware scheduling work.
-2. Publish Helm charts, reproducible benchmarks, and a public demo.
+1. Publish a realistic SRE Agent capacity and reliability benchmark.
+2. Publish Helm charts, reproducible benchmark artifacts, ADRs, and a public demo.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

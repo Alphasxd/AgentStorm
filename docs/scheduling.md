@@ -1,9 +1,8 @@
 # Event-driven scheduling
 
 M5 adds an optional durable shard queue and KEDA `ScaledJob` execution path while preserving the
-existing Indexed Job behavior. This document describes the current source-tree interface. It is not
-part of the released `v0.4.0-alpha.1` manifests; M5 is complete only after the v0.5 images are
-published, verified, and pinned.
+existing Indexed Job behavior. It is released in `v0.5.0-alpha.1`; all three components must use
+the matching immutable release digests when queued scheduling is enabled.
 
 ## Run contract
 
@@ -80,7 +79,7 @@ terminal state. Production deployments must restrict it to the Controller and KE
 NetworkPolicy or an equivalent network boundary. Claims, renewals, permits, result uploads, and
 terminal writes still require the Result API writer token.
 
-The source-only local overlay assumes KEDA 2.20 is installed:
+The no-cost local and release-verification paths install KEDA 2.20 when needed:
 
 ```bash
 CLUSTER_PROVIDER=kind make e2e-keda-local

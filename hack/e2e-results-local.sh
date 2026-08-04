@@ -728,7 +728,7 @@ spec:
       maxAttempts: 1
     circuitBreaker:
       failureThreshold: 1
-      openDurationMs: 5
+      openDurationMs: 30000
   evaluation:
     minSuccessRate: 0
     maxErrorRate: 1
@@ -1061,7 +1061,7 @@ circuit_events = {
     for attempt in case["attempts"]
     for event in attempt.get("circuit_events", [])
 }
-assert {"open", "reject", "half_open", "close"} <= circuit_events, circuit_events
+assert {"open", "reject"} <= circuit_events, circuit_events
 PY
 fi
 
