@@ -4,11 +4,11 @@ package results
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,8 +66,13 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	first.Cases[0].InputTokens = 3
 	first.Cases[0].Attempts = []AttemptResult{{
 		Number: 1, LatencyMS: 10, Outcome: "succeeded", RetryDecision: "not_needed", InputTokens: 3,
+		ModelCallCount: int64Pointer(2), ToolCallCount: 1,
 	}}
+	first.Cases[0].ModelCallCount = int64Pointer(2)
+	first.Cases[0].ToolCallCount = 1
 	first.Summary.InputTokens = 3
+	first.Summary.ModelCallCount = int64Pointer(2)
+	first.Summary.ToolCallCount = 1
 	shardResult, err := service.UploadShard(ctx, runID, 0, "run/"+runID+"/shard/0", first)
 	if err != nil || !shardResult.Created {
 		t.Fatalf("upload first shard: created=%v err=%v", shardResult.Created, err)
@@ -86,8 +91,13 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	second.Cases[0].OutputTokens = 5
 	second.Cases[0].Attempts = []AttemptResult{{
 		Number: 1, LatencyMS: 30, Outcome: "succeeded", RetryDecision: "not_needed", OutputTokens: 5,
+		ModelCallCount: int64Pointer(3), ToolCallCount: 2,
 	}}
+	second.Cases[0].ModelCallCount = int64Pointer(3)
+	second.Cases[0].ToolCallCount = 2
 	second.Summary.OutputTokens = 5
+	second.Summary.ModelCallCount = int64Pointer(3)
+	second.Summary.ToolCallCount = 2
 	second.Cases[0].Assertions[0].Message = stringPointer("sensitive detail")
 	shardResult, err = service.UploadShard(ctx, runID, 1, "run/"+runID+"/shard/1", second)
 	if err != nil || !shardResult.Created {
@@ -113,6 +123,12 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 	}
 	if detail.Summary.CostUSD == nil || *detail.Summary.CostUSD != "0.000026000000" {
 		t.Fatalf("unexpected priced aggregate: %#v", detail.Summary)
+	}
+	if detail.Summary.ModelCallCount == nil || *detail.Summary.ModelCallCount != 5 ||
+		detail.Summary.ToolCallCount != 3 || detail.Summary.ModelCallsPerSuccessfulAgent == nil ||
+		*detail.Summary.ModelCallsPerSuccessfulAgent != 2 ||
+		detail.Summary.ToolCallsPerSuccessfulAgent == nil || *detail.Summary.ToolCallsPerSuccessfulAgent != 1 {
+		t.Fatalf("unexpected agent call aggregate: %#v", detail.Summary)
 	}
 	failed, err := service.ListCases(ctx, runID, "", 1, true)
 	if err != nil || len(failed.Cases) != 1 || failed.Cases[0].CaseID != "case-b" {
@@ -153,12 +169,15 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 		{
 			Number: 1, LatencyMS: 1, Outcome: "failed", FailureCategory: "provider",
 			ErrorCode: "rate_limited", InjectedRule: "first-attempt", InjectedFault: "rate_limit",
-			RetryDecision: "retry_safe",
+			RetryDecision: "retry_safe", ModelCallCount: int64Pointer(0),
 		},
 		{
 			Number: 2, LatencyMS: 39, Outcome: "succeeded", RetryDecision: "not_needed", InputTokens: 10,
+			ModelCallCount: int64Pointer(4), ToolCallCount: 3,
 		},
 	}
+	candidateShard.Cases[0].ModelCallCount = int64Pointer(4)
+	candidateShard.Cases[0].ToolCallCount = 3
 	candidateShard.Cases = append(candidateShard.Cases, CaseResult{
 		IdempotencyKey:  "run/" + candidateID + "/case/case-d/iteration/0",
 		CaseID:          "case-d",
@@ -170,13 +189,16 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 		ErrorCode:       "circuit_open",
 		Attempts: []AttemptResult{{
 			Number: 1, Outcome: "rejected", FailureCategory: "provider", ErrorCode: "circuit_open",
-			RetryDecision: "not_retryable", CircuitEvents: []string{"reject"},
+			RetryDecision: "not_retryable", CircuitEvents: []string{"reject"}, ModelCallCount: int64Pointer(0),
 		}},
+		ModelCallCount: int64Pointer(0),
 	})
 	candidateShard.Summary.Total = 2
 	candidateShard.Summary.Succeeded = 1
 	candidateShard.Summary.Failed = 1
 	candidateShard.Summary.InputTokens = 10
+	candidateShard.Summary.ModelCallCount = int64Pointer(4)
+	candidateShard.Summary.ToolCallCount = 3
 	if _, err := service.UploadShard(ctx, candidateID, 0, "run/"+candidateID+"/shard/0", candidateShard); err != nil {
 		t.Fatalf("upload candidate: %v", err)
 	}
@@ -195,7 +217,12 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 		comparison.Delta.AttemptCount != 1 || comparison.Delta.RetryCount != 1 ||
 		comparison.Delta.RetriedCases != 1 || comparison.Delta.RetrySuccesses != 1 ||
 		comparison.Delta.RetrySuccessRate != 1 || comparison.Delta.InjectedFaults != 1 ||
-		comparison.Delta.CircuitRejections != 1 {
+		comparison.Delta.CircuitRejections != 1 || comparison.Delta.ModelCallCount == nil ||
+		*comparison.Delta.ModelCallCount != -1 || comparison.Delta.ToolCallCount != 0 ||
+		comparison.Delta.ModelCallsPerSuccessfulAgent == nil ||
+		*comparison.Delta.ModelCallsPerSuccessfulAgent != 2 ||
+		comparison.Delta.ToolCallsPerSuccessfulAgent == nil ||
+		*comparison.Delta.ToolCallsPerSuccessfulAgent != 2 {
 		t.Fatalf("unexpected comparison: %#v", comparison)
 	}
 
@@ -205,6 +232,10 @@ func TestPostgresLifecycleAndIdempotency(t *testing.T) {
 }
 
 func stringPointer(value string) *string { return &value }
+func int64Pointer(value int64) *int64    { return &value }
+func permitRequestID(runID, suffix string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(runID+"\x00"+suffix)))
+}
 
 func TestMigrationUpgradeFromM3BackfillsM4Reporting(t *testing.T) {
 	databaseURL := os.Getenv("AGENTSTORM_TEST_DATABASE_URL")
@@ -263,19 +294,24 @@ func TestMigrationUpgradeFromM3BackfillsM4Reporting(t *testing.T) {
 		t.Fatalf("upgrade legacy schema: %v", err)
 	}
 	var category string
-	var qualityFailures, infrastructureFailures, attempts int64
+	var modelCalls *int64
+	var qualityFailures, infrastructureFailures, attempts, toolCalls int64
 	if err := legacyPool.QueryRow(ctx, `
-		SELECT c.failure_category, s.quality_failures, s.infrastructure_failures, s.attempt_count
+		SELECT c.failure_category, s.quality_failures, s.infrastructure_failures, s.attempt_count,
+		       s.model_call_count, s.tool_call_count
 		FROM agentstorm_case_results c
 		JOIN agentstorm_run_summaries s ON s.run_id = c.run_id
 		WHERE c.run_id = 'legacy-run'`).Scan(
-		&category, &qualityFailures, &infrastructureFailures, &attempts,
+		&category, &qualityFailures, &infrastructureFailures, &attempts, &modelCalls, &toolCalls,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if category != "evaluation" || qualityFailures != 1 || infrastructureFailures != 0 || attempts != 0 {
 		t.Fatalf("legacy M3 data was not backfilled: category=%q quality=%d infrastructure=%d attempts=%d",
 			category, qualityFailures, infrastructureFailures, attempts)
+	}
+	if modelCalls != nil || toolCalls != 0 {
+		t.Fatalf("legacy call counts must remain unknown/zero: model=%v tool=%d", modelCalls, toolCalls)
 	}
 }
 
@@ -459,12 +495,12 @@ func TestPostgresDurableQueueAndDistributedLimits(t *testing.T) {
 		t.Fatalf("renew active lease: %v", err)
 	}
 
-	requestA := PermitRequest{RequestID: strings.Repeat("a", 64), WorkerID: "worker-a", Provider: "fake"}
+	requestA := PermitRequest{RequestID: permitRequestID(runID, "a"), WorkerID: "worker-a", Provider: "fake"}
 	permitA, err := service.AcquirePermit(ctx, runID, requestA)
 	if err != nil {
 		t.Fatalf("acquire first permit: %v", err)
 	}
-	requestB := PermitRequest{RequestID: strings.Repeat("b", 64), WorkerID: "worker-b", Provider: "fake"}
+	requestB := PermitRequest{RequestID: permitRequestID(runID, "b"), WorkerID: "worker-b", Provider: "fake"}
 	if _, err := service.AcquirePermit(ctx, runID, requestB); !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("second permit should be limited, got %v", err)
 	}
@@ -478,7 +514,7 @@ func TestPostgresDurableQueueAndDistributedLimits(t *testing.T) {
 	if err := service.ReleasePermit(ctx, runID, permitB.PermitID, PermitLeaseRequest{LeaseToken: permitB.LeaseToken}); err != nil {
 		t.Fatalf("release second permit: %v", err)
 	}
-	requestC := PermitRequest{RequestID: strings.Repeat("c", 64), WorkerID: "worker-c", Provider: "fake"}
+	requestC := PermitRequest{RequestID: permitRequestID(runID, "c"), WorkerID: "worker-c", Provider: "fake"}
 	if _, err := service.AcquirePermit(ctx, runID, requestC); !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("third permit should be rate limited, got %v", err)
 	}

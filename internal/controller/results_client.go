@@ -114,8 +114,9 @@ func buildResultRegistration(run *agentstormv1alpha1.AgentTestRun, scenario *rel
 			Name:      run.Name,
 		},
 		Target: results.RunTarget{
-			Provider: run.Spec.Target.Provider,
-			Model:    run.Spec.Target.Model,
+			Provider:          run.Spec.Target.Provider,
+			Model:             run.Spec.Target.Model,
+			AdapterEntrypoint: run.Spec.Target.AdapterEntrypoint,
 		},
 		Dataset: results.RunDataset{
 			Name: run.Spec.Workload.DatasetRef.Name,

@@ -6,9 +6,45 @@ import types
 import unittest
 from unittest.mock import patch
 
-from agentstorm_worker.adapters import AgentLifecycle, HandoffLifecycleEvent, ToolLifecycleEvent
+from agentstorm_worker.adapters import (
+    AdapterFactoryContext,
+    AdapterPluginError,
+    AgentLifecycle,
+    HandoffLifecycleEvent,
+    ToolLifecycleEvent,
+    create_adapter,
+)
+from agentstorm_worker.adapters.fake import FakeAdapter
 from agentstorm_worker.adapters.openai_agents import OpenAIAgentsAdapter
 from agentstorm_worker.models import TestCase
+
+_plugin_context: AdapterFactoryContext | None = None
+
+
+def valid_plugin(context: AdapterFactoryContext) -> FakeAdapter:
+    global _plugin_context
+    _plugin_context = context
+    return FakeAdapter()
+
+
+def failing_plugin(context: AdapterFactoryContext) -> FakeAdapter:
+    del context
+    raise RuntimeError("private plugin failure")
+
+
+def invalid_plugin(context: AdapterFactoryContext) -> object:
+    del context
+    return object()
+
+
+def synchronous_plugin(context: AdapterFactoryContext) -> object:
+    del context
+
+    class SynchronousAdapter:
+        def run(self, case: TestCase) -> object:
+            return case
+
+    return SynchronousAdapter()
 
 
 class RecordingLifecycle:
@@ -65,7 +101,7 @@ class OpenAIAgentsAdapterTest(unittest.TestCase):
                     await hooks.on_tool_start(context, source, tool)
                     await hooks.on_tool_end(context, source, tool, "private tool result")
                     await hooks.on_handoff(context, source, target)
-                usage = types.SimpleNamespace(input_tokens=11, output_tokens=7)
+                usage = types.SimpleNamespace(input_tokens=11, output_tokens=7, requests=3)
                 return types.SimpleNamespace(
                     final_output="agent response",
                     context_wrapper=types.SimpleNamespace(usage=usage),
@@ -77,16 +113,20 @@ class OpenAIAgentsAdapterTest(unittest.TestCase):
         agents.RunHooks = RunHooks
         agents.Runner = Runner
 
+        model_settings = object()
         with patch.dict(sys.modules, {"agents": agents}):
-            adapter = OpenAIAgentsAdapter("model-test", "https://provider.example/v1")
+            adapter = OpenAIAgentsAdapter(
+                "model-test",
+                "https://provider.example/v1",
+                model_settings=model_settings,
+            )
             lifecycle: AgentLifecycle = RecordingLifecycle()
             response = asyncio.run(
                 adapter.run(TestCase(case_id="1", prompt="hello"), lifecycle=lifecycle)
             )
 
-        self.assertEqual(
-            observed["provider_args"], {"base_url": "https://provider.example/v1"}
-        )
+        self.assertEqual(observed["provider_args"], {"base_url": "https://provider.example/v1"})
+        self.assertIs(observed["agent"]["model_settings"], model_settings)
         self.assertEqual(
             observed["run_config"],
             {
@@ -99,6 +139,7 @@ class OpenAIAgentsAdapterTest(unittest.TestCase):
         self.assertEqual(response.output, "agent response")
         self.assertEqual(response.input_tokens, 11)
         self.assertEqual(response.output_tokens, 7)
+        self.assertEqual(response.model_call_count, 3)
         assert isinstance(lifecycle, RecordingLifecycle)
         self.assertEqual(lifecycle.tools_started[0].name, "safe_lookup")
         self.assertEqual(lifecycle.tools_started[0].call_id, "call-1")
@@ -119,6 +160,45 @@ class OpenAIAgentsAdapterTest(unittest.TestCase):
         )
         rendered = repr((lifecycle.tools_started, lifecycle.tools_finished, lifecycle.handoffs))
         self.assertNotIn("private tool arguments", rendered)
+
+
+class AdapterPluginTest(unittest.TestCase):
+    def test_loads_trusted_factory_with_secret_free_context(self) -> None:
+        adapter = create_adapter(
+            "fake",
+            model="model-test",
+            base_url="https://provider.example/v1",
+            adapter_entrypoint="test_adapters:valid_plugin",
+        )
+        self.assertIsInstance(adapter, FakeAdapter)
+        self.assertEqual(
+            _plugin_context,
+            AdapterFactoryContext(
+                provider="fake",
+                model="model-test",
+                base_url="https://provider.example/v1",
+            ),
+        )
+        self.assertEqual(
+            set(AdapterFactoryContext.__dataclass_fields__),
+            {"provider", "model", "base_url"},
+        )
+
+    def test_rejects_import_factory_and_return_failures_without_details(self) -> None:
+        for entrypoint, message in (
+            ("missing_agentstorm_plugin:create", "import failed"),
+            ("test_adapters:missing_factory", "not callable"),
+            ("test_adapters:failing_plugin", "factory failed"),
+            ("test_adapters:invalid_plugin", "invalid adapter"),
+            ("test_adapters:synchronous_plugin", "invalid adapter"),
+        ):
+            with self.subTest(entrypoint=entrypoint):
+                with self.assertRaisesRegex(AdapterPluginError, message) as raised:
+                    create_adapter("fake", adapter_entrypoint=entrypoint)
+                self.assertNotIn("private plugin failure", str(raised.exception))
+
+    def test_builtin_adapter_remains_default(self) -> None:
+        self.assertIsInstance(create_adapter("fake"), FakeAdapter)
 
 
 if __name__ == "__main__":

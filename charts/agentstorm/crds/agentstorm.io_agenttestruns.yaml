@@ -1,0 +1,332 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agenttestruns.agentstorm.io
+spec:
+  group: agentstorm.io
+  names:
+    kind: AgentTestRun
+    listKind: AgentTestRunList
+    plural: agenttestruns
+    singular: agenttestrun
+    shortNames:
+      - atr
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Active
+          type: integer
+          jsonPath: .status.active
+        - name: Succeeded
+          type: integer
+          jsonPath: .status.succeeded
+        - name: Failed
+          type: integer
+          jsonPath: .status.failed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: AgentTestRun describes a distributed AI Agent evaluation run.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [target, workload, evaluation, runner]
+              properties:
+                target:
+                  type: object
+                  required: [provider]
+                  properties:
+                    provider:
+                      type: string
+                      enum: [fake, openai-agents]
+                    model:
+                      type: string
+                    baseURL:
+                      type: string
+                    adapterEntrypoint:
+                      type: string
+                      maxLength: 256
+                      pattern: '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$'
+                    apiKeySecretRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name: {type: string}
+                        key: {type: string}
+                        optional: {type: boolean}
+                    pricing:
+                      type: object
+                      required: [inputUSDPerMillionTokens, outputUSDPerMillionTokens]
+                      properties:
+                        inputUSDPerMillionTokens:
+                          type: string
+                          pattern: '^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$'
+                        outputUSDPerMillionTokens:
+                          type: string
+                          pattern: '^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: target is immutable; create a new AgentTestRun
+                workload:
+                  type: object
+                  required: [datasetRef]
+                  properties:
+                    datasetRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name: {type: string}
+                        key: {type: string}
+                        optional: {type: boolean}
+                    parallelism:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 10000
+                      default: 1
+                    concurrencyPerWorker:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 1
+                    iterations:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 1
+                    timeoutSeconds:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                      default: 900
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: workload is immutable; create a new AgentTestRun
+                evaluation:
+                  type: object
+                  default: {}
+                  properties:
+                    minSuccessRate:
+                      type: number
+                      format: double
+                      minimum: 0
+                      maximum: 1
+                    maxErrorRate:
+                      type: number
+                      format: double
+                      minimum: 0
+                      maximum: 1
+                    maxP95LatencyMs:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: evaluation is immutable; create a new AgentTestRun
+                telemetry:
+                  type: object
+                  default: {}
+                  properties:
+                    contentMode:
+                      type: string
+                      enum: [omit, redacted]
+                      default: omit
+                    redaction:
+                      type: object
+                      properties:
+                        patterns:
+                          type: array
+                          maxItems: 20
+                          items:
+                            type: string
+                            maxLength: 256
+                        metadataKeys:
+                          type: array
+                          items: {type: string}
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: telemetry is immutable; create a new AgentTestRun
+                reliability:
+                  type: object
+                  properties:
+                    seed:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                    scenarioRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name: {type: string}
+                        key: {type: string}
+                    retry:
+                      type: object
+                      default: {}
+                      properties:
+                        maxAttempts:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                          maximum: 10
+                          default: 1
+                        initialBackoffMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                          default: 100
+                        maxBackoffMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                          default: 2000
+                        maxCumulativeBackoffMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                          default: 5000
+                        jitterRatio:
+                          type: number
+                          format: double
+                          minimum: 0
+                          maximum: 1
+                          default: 0.2
+                        allowAmbiguousRetries:
+                          type: boolean
+                          default: false
+                    circuitBreaker:
+                      type: object
+                      required: [failureThreshold, openDurationMs]
+                      properties:
+                        failureThreshold:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                        openDurationMs:
+                          type: integer
+                          format: int64
+                          minimum: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: reliability is immutable; create a new AgentTestRun
+                    - rule: "!has(self.scenarioRef) || has(self.seed)"
+                      message: reliability.seed is required when scenarioRef is configured
+                runner:
+                  type: object
+                  required: [image]
+                  properties:
+                    image: {type: string}
+                    imagePullPolicy:
+                      type: string
+                      enum: [Always, IfNotPresent, Never]
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: runner is immutable; create a new AgentTestRun
+                scheduling:
+                  type: object
+                  default: {}
+                  properties:
+                    strategy:
+                      type: string
+                      enum: [indexed, keda]
+                      default: indexed
+                    maxWorkers:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 1000
+                      default: 1
+                    resourceProfile:
+                      type: string
+                      enum: [small, medium, large]
+                      default: small
+                    nodeSelector:
+                      type: object
+                      maxProperties: 32
+                      additionalProperties: {type: string}
+                    tolerations:
+                      type: array
+                      maxItems: 16
+                      items:
+                        type: object
+                        properties:
+                          key: {type: string}
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value: {type: string}
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+                          tolerationSeconds:
+                            type: integer
+                            format: int64
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: scheduling is immutable; create a new AgentTestRun
+                cancel:
+                  type: boolean
+                  default: false
+              x-kubernetes-validations:
+                - rule: "(!has(self.scheduling) || self.scheduling.strategy != 'keda' ? self.workload.parallelism : self.scheduling.maxWorkers) * self.workload.concurrencyPerWorker <= 1000"
+                  message: requested Worker concurrency must not exceed 1000 in-flight cases
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Running, Succeeded, Failed, Cancelled]
+                jobName: {type: string}
+                scaledJobName: {type: string}
+                active:
+                  type: integer
+                  format: int32
+                succeeded:
+                  type: integer
+                  format: int32
+                failed:
+                  type: integer
+                  format: int32
+                observedGeneration:
+                  type: integer
+                  format: int64
+                startedAt:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message: {type: string}
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      reason: {type: string}
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      type: {type: string}

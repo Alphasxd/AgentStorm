@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replicaCount", "image", "leaderElection", "resultSink", "telemetry", "resources"],
+      "properties": {
+        "replicaCount": {"type": "integer", "minimum": 1, "maximum": 3},
+        "image": {"$ref": "#/$defs/image"},
+        "leaderElection": {"type": "boolean"},
+        "resultSink": {
+          "type": "object", "additionalProperties": false,
+          "required": ["enabled", "url", "existingAuthSecret", "writeTokenKey", "includeSensitiveResults", "distributedLimits"],
+          "properties": {
+            "enabled": {"type": "boolean"}, "url": {"type": "string"},
+            "existingAuthSecret": {"type": "string"}, "writeTokenKey": {"type": "string", "minLength": 1},
+            "includeSensitiveResults": {"type": "boolean"}, "distributedLimits": {"type": "boolean"}
+          }
+        },
+        "telemetry": {
+          "type": "object", "additionalProperties": false,
+          "required": ["otlpEndpoint", "allowRedacted"],
+          "properties": {"otlpEndpoint": {"type": "string"}, "allowRedacted": {"type": "boolean"}}
+        },
+        "resources": {"type": "object"}
+      }
+    },
+    "serviceAccount": {
+      "type": "object", "additionalProperties": false, "required": ["create", "name"],
+      "properties": {"create": {"type": "boolean"}, "name": {"type": "string"}}
+    },
+    "resultApi": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "image", "existingStorageSecret", "databaseURLKey", "s3Endpoint", "s3AccessKeyKey", "s3SecretKeyKey", "s3Bucket", "s3Region", "s3UseSSL", "existingAuthSecret", "writeTokenKey", "readTokenKey", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"}, "image": {"$ref": "#/$defs/image"},
+        "existingStorageSecret": {"type": "string"}, "databaseURLKey": {"type": "string", "minLength": 1},
+        "s3Endpoint": {"type": "string"}, "s3AccessKeyKey": {"type": "string", "minLength": 1},
+        "s3SecretKeyKey": {"type": "string", "minLength": 1}, "s3Bucket": {"type": "string", "minLength": 1},
+        "s3Region": {"type": "string", "minLength": 1}, "s3UseSSL": {"type": "boolean"},
+        "existingAuthSecret": {"type": "string"}, "writeTokenKey": {"type": "string", "minLength": 1},
+        "readTokenKey": {"type": "string", "minLength": 1}, "resources": {"type": "object"}
+      }
+    },
+    "keda": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "metricsApiUrl", "maxWorkersPerRun", "maxInFlightCases", "requireRunnerResourceQuota", "pollingInterval"],
+      "properties": {
+        "enabled": {"type": "boolean"}, "metricsApiUrl": {"type": "string"},
+        "maxWorkersPerRun": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "maxInFlightCases": {"type": "integer", "minimum": 1},
+        "requireRunnerResourceQuota": {"type": "boolean"},
+        "pollingInterval": {"type": "integer", "minimum": 1, "maximum": 300}
+      }
+    },
+    "networkPolicy": {
+      "type": "object", "additionalProperties": false, "required": ["enabled"],
+      "properties": {"enabled": {"type": "boolean"}}
+    }
+  },
+  "$defs": {
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1}, "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    }
+  }
+}

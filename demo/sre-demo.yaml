@@ -1,0 +1,28 @@
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: sre-demo
+  namespace: agentstorm-system
+spec:
+  target:
+    provider: fake
+    model: fake-sre
+    adapterEntrypoint: agentstorm_worker.benchmarks.sre:create_adapter
+  workload:
+    datasetRef:
+      name: sre-demo-dataset
+      key: cases.jsonl
+    parallelism: 32
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 300
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+  scheduling:
+    strategy: keda
+    maxWorkers: 8
+    resourceProfile: small
+  runner:
+    image: ghcr.io/alphasxd/agentstorm-worker:v0.6.0
+    imagePullPolicy: IfNotPresent

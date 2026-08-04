@@ -685,15 +685,17 @@ func (r *PostgresRepository) FinalizeShard(
 				(run_id, case_id, iteration, shard_index, idempotency_key, payload_hash,
 				 success, latency_ms, input_tokens, output_tokens, failure_kind, output, error,
 				 tool_path, assertions, input_cost_usd, output_cost_usd, cost_usd,
-				 failure_category, error_code, attempts, usage_complete)
+				 failure_category, error_code, attempts, usage_complete,
+				 model_call_count, tool_call_count)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			        $16, $17, $18, $19, $20, $21, $22)
+			        $16, $17, $18, $19, $20, $21, $22, $23, $24)
 			ON CONFLICT DO NOTHING
 			RETURNING case_id`, runID, item.CaseID, item.Iteration, shardIndex, item.IdempotencyKey,
 			itemHash, item.Success, item.LatencyMS, item.InputTokens, item.OutputTokens,
 			item.FailureKind, item.Output, item.Error, item.ToolPath, assertionsPayload,
 			item.InputCostUSD, item.OutputCostUSD, item.CostUSD, item.FailureCategory,
-			item.ErrorCode, attemptsPayload, usageComplete(item.UsageComplete)).Scan(&inserted)
+			item.ErrorCode, attemptsPayload, usageComplete(item.UsageComplete),
+			item.ModelCallCount, item.ToolCallCount).Scan(&inserted)
 		if err == nil {
 			continue
 		}
@@ -767,6 +769,19 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms), 0),
 			COALESCE(sum(input_tokens), 0),
 			COALESCE(sum(output_tokens), 0),
+			CASE WHEN count(*) > 0 AND count(model_call_count) = count(*) THEN sum(model_call_count) END,
+			COALESCE(sum(tool_call_count), 0)::bigint,
+			CASE
+				WHEN count(*) FILTER (WHERE success) > 0
+				 AND count(model_call_count) FILTER (WHERE success) = count(*) FILTER (WHERE success)
+				THEN (sum(model_call_count) FILTER (WHERE success))::double precision /
+				     count(*) FILTER (WHERE success)
+			END,
+			CASE
+				WHEN count(*) FILTER (WHERE success) > 0
+				THEN (sum(tool_call_count) FILTER (WHERE success))::double precision /
+				     count(*) FILTER (WHERE success)
+			END,
 			CASE WHEN count(*) > 0 AND count(input_cost_usd) = count(*) THEN sum(input_cost_usd)::text END,
 			CASE WHEN count(*) > 0 AND count(output_cost_usd) = count(*) THEN sum(output_cost_usd)::text END,
 			CASE WHEN count(*) > 0 AND count(cost_usd) = count(*) THEN sum(cost_usd)::text END,
@@ -789,6 +804,10 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 		&aggregate.P99MS,
 		&aggregate.InputTokens,
 		&aggregate.OutputTokens,
+		&aggregate.ModelCallCount,
+		&aggregate.ToolCallCount,
+		&aggregate.ModelCallsPerSuccessfulAgent,
+		&aggregate.ToolCallsPerSuccessfulAgent,
 		&aggregate.InputCostUSD,
 		&aggregate.OutputCostUSD,
 		&aggregate.CostUSD,
@@ -829,10 +848,12 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			 quality_failures, quality_failure_rate, infrastructure_failures, infrastructure_failure_rate,
 			 attempt_count, retry_count, retried_cases, retry_successes, retry_success_rate,
 			 injected_faults, circuit_rejections, p50_ms, p95_ms, p99_ms,
-			 input_tokens, output_tokens, thresholds_passed,
-			 input_cost_usd, output_cost_usd, cost_usd, usage_complete)
+			 input_tokens, output_tokens, model_call_count, tool_call_count,
+			 model_calls_per_successful_agent, tool_calls_per_successful_agent,
+			 thresholds_passed, input_cost_usd, output_cost_usd, cost_usd, usage_complete)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+		        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
+		        $29, $30, $31)
 		ON CONFLICT (run_id) DO UPDATE SET
 			total = EXCLUDED.total,
 			succeeded = EXCLUDED.succeeded,
@@ -855,6 +876,10 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 			p99_ms = EXCLUDED.p99_ms,
 			input_tokens = EXCLUDED.input_tokens,
 			output_tokens = EXCLUDED.output_tokens,
+			model_call_count = EXCLUDED.model_call_count,
+			tool_call_count = EXCLUDED.tool_call_count,
+			model_calls_per_successful_agent = EXCLUDED.model_calls_per_successful_agent,
+			tool_calls_per_successful_agent = EXCLUDED.tool_calls_per_successful_agent,
 			thresholds_passed = EXCLUDED.thresholds_passed,
 			input_cost_usd = EXCLUDED.input_cost_usd,
 			output_cost_usd = EXCLUDED.output_cost_usd,
@@ -865,7 +890,9 @@ func refreshAggregate(ctx context.Context, transaction pgx.Tx, runID string) err
 		aggregate.InfrastructureFailures, aggregate.InfrastructureFailureRate, aggregate.AttemptCount,
 		aggregate.RetryCount, aggregate.RetriedCases, aggregate.RetrySuccesses, aggregate.RetrySuccessRate,
 		aggregate.InjectedFaults, aggregate.CircuitRejections, aggregate.P50MS, aggregate.P95MS,
-		aggregate.P99MS, aggregate.InputTokens, aggregate.OutputTokens, aggregate.ThresholdsPassed,
+		aggregate.P99MS, aggregate.InputTokens, aggregate.OutputTokens, aggregate.ModelCallCount,
+		aggregate.ToolCallCount, aggregate.ModelCallsPerSuccessfulAgent,
+		aggregate.ToolCallsPerSuccessfulAgent, aggregate.ThresholdsPassed,
 		aggregate.InputCostUSD, aggregate.OutputCostUSD, aggregate.CostUSD, aggregate.UsageComplete); err != nil {
 		return fmt.Errorf("persist run aggregate: %w", err)
 	}
@@ -928,6 +955,8 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		       COALESCE(rs.circuit_rejections, 0),
 		       COALESCE(rs.p50_ms, 0), COALESCE(rs.p95_ms, 0), COALESCE(rs.p99_ms, 0),
 		       COALESCE(rs.input_tokens, 0), COALESCE(rs.output_tokens, 0),
+		       rs.model_call_count, COALESCE(rs.tool_call_count, 0),
+		       rs.model_calls_per_successful_agent, rs.tool_calls_per_successful_agent,
 		       COALESCE(rs.thresholds_passed, false),
 		       rs.input_cost_usd::text, rs.output_cost_usd::text, rs.cost_usd::text,
 		       COALESCE(rs.usage_complete, true)
@@ -968,6 +997,10 @@ func (r *PostgresRepository) GetRun(ctx context.Context, runID string) (RunDetai
 		&summary.P99MS,
 		&summary.InputTokens,
 		&summary.OutputTokens,
+		&summary.ModelCallCount,
+		&summary.ToolCallCount,
+		&summary.ModelCallsPerSuccessfulAgent,
+		&summary.ToolCallsPerSuccessfulAgent,
 		&summary.ThresholdsPassed,
 		&summary.InputCostUSD,
 		&summary.OutputCostUSD,
@@ -1021,7 +1054,8 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 		SELECT idempotency_key, case_id, iteration, success, latency_ms,
 		       input_tokens, output_tokens, failure_kind, output, error, tool_path, assertions,
 		       input_cost_usd::text, output_cost_usd::text, cost_usd::text,
-		       failure_category, error_code, attempts, usage_complete
+		       failure_category, error_code, attempts, usage_complete,
+		       model_call_count, tool_call_count
 		FROM agentstorm_case_results
 		WHERE run_id = $1
 		  AND ($2::boolean = false OR success = false)
@@ -1059,6 +1093,8 @@ func (r *PostgresRepository) ListCases(ctx context.Context, runID, cursor string
 			&item.ErrorCode,
 			&attemptsPayload,
 			&itemUsageComplete,
+			&item.ModelCallCount,
+			&item.ToolCallCount,
 		); err != nil {
 			return CasePage{}, fmt.Errorf("scan case: %w", err)
 		}
@@ -1115,6 +1151,19 @@ func (r *PostgresRepository) Compare(ctx context.Context, baselineID, candidateI
 		P99MS:                     candidate.Summary.P99MS - baseline.Summary.P99MS,
 		InputTokens:               candidate.Summary.InputTokens - baseline.Summary.InputTokens,
 		OutputTokens:              candidate.Summary.OutputTokens - baseline.Summary.OutputTokens,
+		ToolCallCount:             candidate.Summary.ToolCallCount - baseline.Summary.ToolCallCount,
+	}
+	if baseline.Summary.ModelCallCount != nil && candidate.Summary.ModelCallCount != nil {
+		value := *candidate.Summary.ModelCallCount - *baseline.Summary.ModelCallCount
+		delta.ModelCallCount = &value
+	}
+	if baseline.Summary.ModelCallsPerSuccessfulAgent != nil && candidate.Summary.ModelCallsPerSuccessfulAgent != nil {
+		value := *candidate.Summary.ModelCallsPerSuccessfulAgent - *baseline.Summary.ModelCallsPerSuccessfulAgent
+		delta.ModelCallsPerSuccessfulAgent = &value
+	}
+	if baseline.Summary.ToolCallsPerSuccessfulAgent != nil && candidate.Summary.ToolCallsPerSuccessfulAgent != nil {
+		value := *candidate.Summary.ToolCallsPerSuccessfulAgent - *baseline.Summary.ToolCallsPerSuccessfulAgent
+		delta.ToolCallsPerSuccessfulAgent = &value
 	}
 	delta.P50Percent = percentDelta(baseline.Summary.P50MS, candidate.Summary.P50MS)
 	delta.P95Percent = percentDelta(baseline.Summary.P95MS, candidate.Summary.P95MS)

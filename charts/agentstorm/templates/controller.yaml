@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentstorm.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentstorm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "agentstorm.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "agentstorm.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: {{ include "agentstorm.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: controller
+          image: {{ include "agentstorm.image" (list .Values.controller.image .) }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          args:
+            - --watch-namespace={{ .Release.Namespace }}
+            {{- if .Values.controller.leaderElection }}
+            - --leader-elect
+            {{- end }}
+            {{- if include "agentstorm.resultSinkEnabled" . }}
+            - --result-api-url={{ include "agentstorm.resultSinkURL" . }}
+            - --result-write-token-secret-name={{ include "agentstorm.authSecret" . }}
+            - --result-write-token-secret-key={{ if .Values.resultApi.enabled }}{{ .Values.resultApi.writeTokenKey }}{{ else }}{{ .Values.controller.resultSink.writeTokenKey }}{{ end }}
+            - --include-sensitive-results={{ .Values.controller.resultSink.includeSensitiveResults }}
+            - --enable-distributed-limits={{ .Values.controller.resultSink.distributedLimits }}
+            {{- end }}
+            {{- if .Values.controller.telemetry.otlpEndpoint }}
+            - --otel-exporter-otlp-endpoint={{ .Values.controller.telemetry.otlpEndpoint }}
+            - --allow-redacted-telemetry={{ .Values.controller.telemetry.allowRedacted }}
+            {{- end }}
+            {{- if .Values.keda.enabled }}
+            - --enable-keda
+            - --keda-metrics-api-url={{ default (include "agentstorm.resultSinkURL" .) .Values.keda.metricsApiUrl }}
+            - --max-workers-per-run={{ .Values.keda.maxWorkersPerRun }}
+            - --max-in-flight-cases={{ .Values.keda.maxInFlightCases }}
+            - --require-runner-resource-quota={{ .Values.keda.requireRunnerResourceQuota }}
+            - --keda-polling-interval={{ .Values.keda.pollingInterval }}
+            {{- end }}
+          ports:
+            - {name: metrics, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

@@ -102,30 +102,41 @@ ambiguous retry policy, Token/cost completeness, circuit open/reject/half-open/c
 partial cancellation, and quality/infrastructure aggregates on amd64 and arm64. Public manifests
 pin the verified v0.4 image-index digests.
 
-## M5: Event-driven scaling and scheduling
+## M5: Event-driven scaling and scheduling — implemented
 
-- Queue pending shards and add KEDA ScaledJob support.
-- Introduce resource profiles, node selectors, tolerations, and per-namespace quotas.
-- Add global and provider-specific concurrency/rate limits.
-- Add admission validation for unsafe parallelism and missing resource bounds.
+- [x] Queue pending shards and add KEDA ScaledJob support.
+- [x] Introduce resource profiles, node selectors, tolerations, and per-namespace quotas.
+- [x] Add global and provider-specific concurrency/rate limits.
+- [x] Add admission validation for unsafe parallelism and missing resource bounds.
 
 Acceptance criteria:
 
-- Worker capacity scales from zero based on pending shards.
-- Global rate limits remain valid while worker replicas change.
-- A quota violation is rejected before model calls begin.
+- [x] Worker capacity scales from zero based on pending shards.
+- [x] Global rate limits remain valid while worker replicas change.
+- [x] A quota violation is rejected before model calls begin.
 
-M5 remains incomplete until the queued path passes source-built and published-image gates on amd64
-and arm64, the v0.5 image-index digests are pinned in public manifests, and main CI is green. The
-current source interface is documented in [event-driven scheduling](scheduling.md).
+Release `v0.5.0-alpha.1` passed source-built and published-image KEDA gates on amd64 and arm64. Its
+three image-index digests are pinned in public manifests. The contract and safety limitations are
+documented in [event-driven scheduling](scheduling.md).
 
-## M6: Stable open-source release
+## M6: Stable open-source release — in progress
 
-- Maintain stable image releases and publish a Helm chart, changelog, architecture decision records,
-  and demo video.
-- Add one realistic public Agent dataset with deterministic expected behavior.
-- Publish benchmark methodology and raw reproducible result artifacts.
-- Mark beginner-friendly issues and document the adapter/plugin contribution path.
+- [x] Add a trusted image-bundled Adapter entrypoint without inline or remote code.
+- [x] Add a 32-incident SRE diagnostic Agent with deterministic read-only tool fixtures.
+- [x] Persist nullable model-call and exact tool-call counts through attempts, cases, summaries, and comparisons.
+- [x] Add a namespace-scoped Helm chart, changelog, ADRs, contribution guide, and demo script.
+- [x] Add no-cost canonical-shape benchmark validation and a released-image KEDA benchmark runner.
+- [ ] Publish `v0.6.0` multi-architecture images and `oci://ghcr.io/alphasxd/charts/agentstorm:0.6.0`.
+- [ ] Complete the fixed 384-execution real-model capacity benchmark and separate reliability run.
+- [ ] Pin v0.6 digests, publish checksummed evidence/demo, and create the stable GitHub Release.
+
+Acceptance criteria:
+
+- A benchmark case starts from an incident ID and correctly chains incident, metrics, logs, and runbook tools.
+- Capacity reports use complete Agent executions and include tail latency, throughput, calls, Tokens, cost,
+  KEDA scaling, speedup, and efficiency.
+- Helm 3.21.0 and 4.2.2 lint/render the chart; Helm 4 installs, upgrades, and uninstalls it on kind.
+- A canonical report is never emitted for a partial matrix, changed dataset/model, or recorded-cost stop.
 
 ## What not to build yet
 

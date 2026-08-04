@@ -14,6 +14,7 @@ metadata:
 spec:
   target:
     provider: fake
+    # adapterEntrypoint optionally selects trusted module:function code preinstalled in runner.image.
     pricing:
       inputUSDPerMillionTokens: "2.5"
       outputUSDPerMillionTokens: "10"

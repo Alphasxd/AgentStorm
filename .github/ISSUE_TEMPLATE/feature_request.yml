@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a load, reliability, scheduling, or observability capability
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Load-testing problem
+      description: Explain the Agent performance or reliability question this would answer.
+    validations: {required: true}
+  - type: textarea
+    id: proposal
+    attributes: {label: Proposed contract and evidence}
+    validations: {required: true}
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security and reproducibility boundaries
+      description: Note credential, tool side-effect, cost, and deterministic-test implications.

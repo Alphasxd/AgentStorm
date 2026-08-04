@@ -1,0 +1,706 @@
+[
+  {
+    "incident_id": "INC-001",
+    "service": "checkout-api",
+    "window": "2026-07-01T10:00:00Z/2026-07-01T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-002",
+    "service": "orders-api",
+    "window": "2026-07-02T10:00:00Z/2026-07-02T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-003",
+    "service": "payments-api",
+    "window": "2026-07-03T10:00:00Z/2026-07-03T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-004",
+    "service": "inventory-api",
+    "window": "2026-07-04T10:00:00Z/2026-07-04T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-005",
+    "service": "catalog-api",
+    "window": "2026-07-05T10:00:00Z/2026-07-05T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-006",
+    "service": "profile-api",
+    "window": "2026-07-06T10:00:00Z/2026-07-06T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-007",
+    "service": "session-api",
+    "window": "2026-07-07T10:00:00Z/2026-07-07T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-008",
+    "service": "notification-api",
+    "window": "2026-07-08T10:00:00Z/2026-07-08T10:15:00Z",
+    "symptom": "Requests time out while database-backed endpoints return intermittent 503 responses.",
+    "root_cause": "database_pool_exhaustion",
+    "severity": "sev2",
+    "recommended_action": "increase_pool_and_restart",
+    "error_signature": "DB_POOL_TIMEOUT",
+    "runbook": "RB-017",
+    "metrics": {
+      "summary": "db_pool_in_use_100_percent",
+      "latency_p95_ms": 1850,
+      "error_rate": 0.18,
+      "memory_percent": 61,
+      "connection_pool_in_use_percent": 100
+    },
+    "log_entries": [
+      "connection acquisition timed out",
+      "pool has no idle connections"
+    ]
+  },
+  {
+    "incident_id": "INC-009",
+    "service": "image-worker",
+    "window": "2026-07-09T10:00:00Z/2026-07-09T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-010",
+    "service": "report-worker",
+    "window": "2026-07-10T10:00:00Z/2026-07-10T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-011",
+    "service": "recommendation-api",
+    "window": "2026-07-11T10:00:00Z/2026-07-11T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-012",
+    "service": "analytics-api",
+    "window": "2026-07-12T10:00:00Z/2026-07-12T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-013",
+    "service": "search-indexer",
+    "window": "2026-07-13T10:00:00Z/2026-07-13T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-014",
+    "service": "event-consumer",
+    "window": "2026-07-14T10:00:00Z/2026-07-14T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-015",
+    "service": "audit-worker",
+    "window": "2026-07-15T10:00:00Z/2026-07-15T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-016",
+    "service": "pricing-api",
+    "window": "2026-07-16T10:00:00Z/2026-07-16T10:15:00Z",
+    "symptom": "Latency rises gradually and pods restart after sustained memory growth.",
+    "root_cause": "memory_leak",
+    "severity": "sev2",
+    "recommended_action": "rollback_and_restart",
+    "error_signature": "OOM_GROWTH_DETECTED",
+    "runbook": "RB-023",
+    "metrics": {
+      "summary": "memory_rss_monotonic_growth",
+      "latency_p95_ms": 920,
+      "error_rate": 0.07,
+      "memory_percent": 97,
+      "connection_pool_in_use_percent": 42
+    },
+    "log_entries": [
+      "heap retained objects increasing",
+      "container terminated with OOMKilled"
+    ]
+  },
+  {
+    "incident_id": "INC-017",
+    "service": "shipping-api",
+    "window": "2026-07-17T10:00:00Z/2026-07-17T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-018",
+    "service": "tax-api",
+    "window": "2026-07-18T10:00:00Z/2026-07-18T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-019",
+    "service": "fraud-api",
+    "window": "2026-07-19T10:00:00Z/2026-07-19T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-020",
+    "service": "auth-gateway",
+    "window": "2026-07-20T10:00:00Z/2026-07-20T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-021",
+    "service": "email-api",
+    "window": "2026-07-21T10:00:00Z/2026-07-21T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-022",
+    "service": "sms-api",
+    "window": "2026-07-22T10:00:00Z/2026-07-22T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-023",
+    "service": "warehouse-api",
+    "window": "2026-07-23T10:00:00Z/2026-07-23T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-024",
+    "service": "loyalty-api",
+    "window": "2026-07-24T10:00:00Z/2026-07-24T10:15:00Z",
+    "symptom": "User requests stall while calls to one downstream dependency exceed their deadline.",
+    "root_cause": "downstream_dependency_timeout",
+    "severity": "sev1",
+    "recommended_action": "enable_failover_and_reduce_timeout",
+    "error_signature": "UPSTREAM_DEADLINE_EXCEEDED",
+    "runbook": "RB-031",
+    "metrics": {
+      "summary": "upstream_latency_and_timeout_spike",
+      "latency_p95_ms": 4200,
+      "error_rate": 0.31,
+      "memory_percent": 48,
+      "connection_pool_in_use_percent": 55
+    },
+    "log_entries": [
+      "upstream request deadline exceeded",
+      "retry budget exhausted"
+    ]
+  },
+  {
+    "incident_id": "INC-025",
+    "service": "checkout-web",
+    "window": "2026-07-25T10:00:00Z/2026-07-25T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-026",
+    "service": "orders-web",
+    "window": "2026-07-26T10:00:00Z/2026-07-26T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-027",
+    "service": "admin-api",
+    "window": "2026-07-27T10:00:00Z/2026-07-27T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-028",
+    "service": "edge-router",
+    "window": "2026-07-28T10:00:00Z/2026-07-28T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-029",
+    "service": "config-api",
+    "window": "2026-07-29T10:00:00Z/2026-07-29T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-030",
+    "service": "billing-api",
+    "window": "2026-07-30T10:00:00Z/2026-07-30T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-031",
+    "service": "fulfillment-api",
+    "window": "2026-07-31T10:00:00Z/2026-07-31T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  },
+  {
+    "incident_id": "INC-032",
+    "service": "support-api",
+    "window": "2026-08-01T10:00:00Z/2026-08-01T10:15:00Z",
+    "symptom": "Error rate jumps immediately after a new version reaches production.",
+    "root_cause": "bad_release",
+    "severity": "sev1",
+    "recommended_action": "rollback_release",
+    "error_signature": "NEW_RELEASE_ERROR_SPIKE",
+    "runbook": "RB-042",
+    "metrics": {
+      "summary": "error_spike_correlated_with_deploy",
+      "latency_p95_ms": 760,
+      "error_rate": 0.44,
+      "memory_percent": 52,
+      "connection_pool_in_use_percent": 37
+    },
+    "log_entries": [
+      "new version emitted unknown field error",
+      "errors began at deployment boundary"
+    ]
+  }
+]

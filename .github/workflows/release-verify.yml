@@ -15,11 +15,57 @@ on:
         description: Immutable Result API image reference
         required: true
         type: string
+      chart_version:
+        description: Optional stable Helm chart version to verify (for example 0.6.0)
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  helm-chart-smoke:
+    if: ${{ inputs.chart_version != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - name: Install kind and Helm 4.2.2
+        shell: bash
+        run: |
+          go install sigs.k8s.io/kind@v0.32.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          curl --fail --silent --show-error --location --output /tmp/helm.tgz https://get.helm.sh/helm-v4.2.2-linux-amd64.tar.gz
+          tar -xzf /tmp/helm.tgz -C /tmp
+          mv /tmp/linux-amd64/helm /tmp/helm
+      - name: Pull, install, upgrade, and uninstall published chart
+        shell: bash
+        run: |
+          controller_digest="${{ inputs.controller_image }}"
+          controller_digest="${controller_digest##*@}"
+          if [[ ! "$controller_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "controller_image must be an immutable digest reference" >&2
+            exit 1
+          fi
+          /tmp/helm pull oci://ghcr.io/alphasxd/charts/agentstorm --version "${{ inputs.chart_version }}" --destination /tmp
+          kind create cluster --name agentstorm-chart --wait 120s
+          /tmp/helm install agentstorm oci://ghcr.io/alphasxd/charts/agentstorm \
+            --version "${{ inputs.chart_version }}" --kube-context kind-agentstorm-chart \
+            --namespace agentstorm-system --create-namespace \
+            --set controller.image.repository=ghcr.io/alphasxd/agentstorm-controller \
+            --set-string controller.image.digest="$controller_digest"
+          /tmp/helm upgrade agentstorm oci://ghcr.io/alphasxd/charts/agentstorm \
+            --version "${{ inputs.chart_version }}" --kube-context kind-agentstorm-chart \
+            --namespace agentstorm-system --set controller.leaderElection=true \
+            --set controller.image.repository=ghcr.io/alphasxd/agentstorm-controller \
+            --set-string controller.image.digest="$controller_digest"
+          /tmp/helm uninstall agentstorm --kube-context kind-agentstorm-chart --namespace agentstorm-system
+
   namespace-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

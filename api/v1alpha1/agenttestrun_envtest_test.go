@@ -183,6 +183,23 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 		t.Fatalf("invalid pricing error = %v, want Invalid", err)
 	}
 
+	pluginRun := validEnvtestRun(namespace.Name, "adapter-plugin")
+	pluginRun.Spec.Target.AdapterEntrypoint = "agentstorm_worker.benchmarks.sre:create_adapter"
+	if err := kubernetesClient.Create(ctx, pluginRun); err != nil {
+		t.Fatalf("create Adapter plugin AgentTestRun: %v", err)
+	}
+	pluginRun.Spec.Target.AdapterEntrypoint = "agentstorm_worker.benchmarks.sre:other_adapter"
+	err = kubernetesClient.Update(ctx, pluginRun)
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "target is immutable") {
+		t.Fatalf("immutable Adapter entrypoint error = %v, want target CEL rejection", err)
+	}
+
+	invalidPlugin := validEnvtestRun(namespace.Name, "invalid-adapter-plugin")
+	invalidPlugin.Spec.Target.AdapterEntrypoint = "remote://plugin"
+	if err := kubernetesClient.Create(ctx, invalidPlugin); !apierrors.IsInvalid(err) {
+		t.Fatalf("invalid Adapter entrypoint error = %v, want Invalid", err)
+	}
+
 	redacted := validEnvtestRun(namespace.Name, "redacted")
 	redacted.Spec.Telemetry = agentstormv1alpha1.AgentTelemetrySpec{
 		ContentMode: "redacted",

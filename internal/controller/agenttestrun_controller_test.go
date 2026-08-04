@@ -137,6 +137,7 @@ func TestReconcileWaitsForRequiredSecret(t *testing.T) {
 func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	scheme := testScheme(t)
 	run := testRun()
+	run.Spec.Target.AdapterEntrypoint = "agentstorm_worker.benchmarks.sre:create_adapter"
 	run.Spec.Target.Pricing = &agentstormv1alpha1.AgentPricingSpec{
 		InputUSDPerMillionTokens:  "2.5",
 		OutputUSDPerMillionTokens: "10",
@@ -165,7 +166,8 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 		Client: client, Scheme: scheme, ResultSink: resultSink,
 		ResultWriter: resultWriterStub{register: func(_ context.Context, runID string, token []byte, registration results.Registration) error {
 			registrationCalled = true
-			if runID != "run-1" || string(token) != "result-test-only-value" || registration.Target.Pricing == nil {
+			if runID != "run-1" || string(token) != "result-test-only-value" || registration.Target.Pricing == nil ||
+				registration.Target.AdapterEntrypoint != run.Spec.Target.AdapterEntrypoint {
 				t.Fatalf("unexpected result registration: run=%q registration=%#v", runID, registration)
 			}
 			return nil
@@ -206,6 +208,7 @@ func TestReconcileConfiguresResultSinkWithoutSerializingSecrets(t *testing.T) {
 	pricingConfig := targetConfig["pricing"].(map[string]any)
 	if source["namespace"] != "default" || source["name"] != "demo" ||
 		datasetConfig["name"] != "demo-dataset" || datasetConfig["key"] != "cases.jsonl" ||
+		targetConfig["adapterEntrypoint"] != run.Spec.Target.AdapterEntrypoint ||
 		pricingConfig["inputUSDPerMillionTokens"] != "2.5" ||
 		pricingConfig["outputUSDPerMillionTokens"] != "10" {
 		t.Fatalf("unexpected source/dataset config: %#v", workerConfig)
@@ -883,6 +886,12 @@ func TestValidateAndDefault(t *testing.T) {
 	}
 	if err := validateAndDefault(run); err == nil {
 		t.Fatal("expected invalid pricing to fail validation")
+	}
+
+	run = testRun()
+	run.Spec.Target.AdapterEntrypoint = "not-a-module-function"
+	if err := validateAndDefault(run); err == nil {
+		t.Fatal("expected invalid adapter entrypoint to fail validation")
 	}
 }
 

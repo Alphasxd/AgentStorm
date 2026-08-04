@@ -7,6 +7,15 @@ from ..models import AdapterResponse, TestCase
 
 
 @dataclass(frozen=True)
+class AdapterFactoryContext:
+    """Non-secret immutable context passed to trusted adapter factories."""
+
+    provider: str
+    model: str = ""
+    base_url: str = ""
+
+
+@dataclass(frozen=True)
 class ToolLifecycleEvent:
     """Public lifecycle data for one provider tool invocation."""
 
@@ -36,7 +45,5 @@ class AgentLifecycle(Protocol):
 
 
 class AgentAdapter(Protocol):
-    async def run(
-        self, case: TestCase, lifecycle: AgentLifecycle | None = None
-    ) -> AdapterResponse:
+    async def run(self, case: TestCase, lifecycle: AgentLifecycle | None = None) -> AdapterResponse:
         """Execute one test case."""

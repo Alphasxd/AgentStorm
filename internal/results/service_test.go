@@ -207,6 +207,18 @@ func TestRegisterRunValidatesPriceSnapshot(t *testing.T) {
 	}
 }
 
+func TestRegisterRunValidatesAdapterEntrypoint(t *testing.T) {
+	registration := testRegistration(1)
+	registration.Target.AdapterEntrypoint = "agentstorm_worker.benchmarks.sre:create_adapter"
+	if err := validateRegistration("run-1", "run/run-1", registration); err != nil {
+		t.Fatalf("valid adapter entrypoint failed: %v", err)
+	}
+	registration.Target.AdapterEntrypoint = "remote://plugin"
+	if err := validateRegistration("run-1", "run/run-1", registration); err == nil {
+		t.Fatal("expected invalid adapter entrypoint to fail")
+	}
+}
+
 func TestTerminateRunUsesStableIdempotency(t *testing.T) {
 	called := false
 	service := NewService(repositoryStub{
@@ -465,6 +477,63 @@ func TestValidateShardChecksAttemptTokensAndUsageCompleteness(t *testing.T) {
 	upload.Cases[0].Attempts[0].UsageComplete = &incomplete
 	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
 		t.Fatal("inconsistent attempt usage completeness should fail")
+	}
+}
+
+func TestValidateShardChecksAgentCallAggregationAndLegacyUnknowns(t *testing.T) {
+	upload := testShard("run-1", 0, "case-1", true)
+	modelCalls := int64(3)
+	upload.Cases[0].Attempts = []AttemptResult{{
+		Number: 1, LatencyMS: 2, Outcome: "succeeded", RetryDecision: "not_needed",
+		ModelCallCount: &modelCalls, ToolCallCount: 2,
+	}}
+	upload.Cases[0].ModelCallCount = &modelCalls
+	upload.Cases[0].ToolCallCount = 2
+	upload.Summary.ModelCallCount = &modelCalls
+	upload.Summary.ToolCallCount = 2
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err != nil {
+		t.Fatalf("valid agent call totals failed: %v", err)
+	}
+
+	wrong := int64(4)
+	upload.Summary.ModelCallCount = &wrong
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
+		t.Fatal("mismatched model call total should fail")
+	}
+	upload.Summary.ModelCallCount = &modelCalls
+	upload.Cases[0].ToolCallCount = 1
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err == nil {
+		t.Fatal("mismatched tool call total should fail")
+	}
+
+	legacy := testShard("run-1", 0, "case-1", true)
+	if err := validateShard("run-1", 0, "run/run-1/shard/0", legacy); err != nil {
+		t.Fatalf("legacy payload with unknown model calls must remain valid: %v", err)
+	}
+}
+
+func TestUnknownModelCallCountsEncodeAsNull(t *testing.T) {
+	payload, err := json.Marshal(CaseResult{Attempts: []AttemptResult{{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := string(payload)
+	if !strings.Contains(rendered, `"model_call_count":null`) {
+		t.Fatalf("unknown model call count must be explicit null: %s", rendered)
+	}
+}
+
+func TestEmptyShardAcceptsKnownZeroOrLegacyUnknownModelCalls(t *testing.T) {
+	zero := int64(0)
+	for _, modelCalls := range []*int64{nil, &zero} {
+		upload := ShardUpload{
+			SchemaVersion: SchemaVersion,
+			Summary:       ShardSummary{ModelCallCount: modelCalls},
+			Cases:         []CaseResult{},
+		}
+		if err := validateShard("run-1", 0, "run/run-1/shard/0", upload); err != nil {
+			t.Fatalf("empty shard model count %v failed: %v", modelCalls, err)
+		}
 	}
 }
 

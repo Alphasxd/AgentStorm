@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from typing import Any
 
 from agentstorm_worker.config import (
@@ -177,13 +178,13 @@ class ResultClientTest(unittest.TestCase):
         shard_request, _ = opener.requests[1]
         shard = json.loads(shard_request.data)
         case = shard["cases"][0]
-        self.assertEqual(
-            case["idempotency_key"], "run/run-1/case/case+with+space/iteration/0"
-        )
+        self.assertEqual(case["idempotency_key"], "run/run-1/case/case+with+space/iteration/0")
         self.assertEqual(case["failure_kind"], "assertion")
         self.assertEqual(case["failure_category"], "evaluation")
         self.assertEqual(case["error_code"], "assertion_failed")
         self.assertEqual(case["attempts"][0]["number"], 1)
+        self.assertIsNone(case["model_call_count"])
+        self.assertIsNone(case["attempts"][0]["model_call_count"])
         self.assertEqual(case["tool_path"], ["safe.lookup"])
         self.assertEqual(
             case["assertions"],
@@ -198,6 +199,44 @@ class ResultClientTest(unittest.TestCase):
         )
         self.assertNotIn("output", case)
         self.assertNotIn("error", case)
+
+    def test_uploads_known_agent_call_counts_at_every_level(self) -> None:
+        opener = RecordingOpener()
+        client = ResultClient(
+            ResultSinkConfig(base_url="http://results.example", write_token="test-token"),
+            opener=opener,
+        )
+        result = CaseResult(
+            case_id="case-1",
+            iteration=0,
+            success=True,
+            latency_ms=10,
+            model_call_count=2,
+            tool_call_count=1,
+            attempts=[
+                AttemptResult(
+                    number=1,
+                    latency_ms=10,
+                    outcome="succeeded",
+                    retry_decision="not_needed",
+                    model_call_count=2,
+                    tool_call_count=1,
+                )
+            ],
+        )
+        summary = replace(
+            run_summary(),
+            succeeded=1,
+            failed=0,
+            model_call_count=2,
+            tool_call_count=1,
+        )
+        client.upload_shard("run-1", 0, [result], summary)
+        shard = json.loads(opener.requests[0][0].data)
+        self.assertEqual(shard["summary"]["model_call_count"], 2)
+        self.assertEqual(shard["summary"]["tool_call_count"], 1)
+        self.assertEqual(shard["cases"][0]["model_call_count"], 2)
+        self.assertEqual(shard["cases"][0]["attempts"][0]["tool_call_count"], 1)
 
     def test_sensitive_content_requires_explicit_opt_in(self) -> None:
         opener = RecordingOpener()
@@ -274,6 +313,26 @@ class ResultClientTest(unittest.TestCase):
             },
         )
 
+    def test_registers_trusted_adapter_entrypoint(self) -> None:
+        opener = RecordingOpener()
+        client = ResultClient(
+            ResultSinkConfig(base_url="http://results.example", write_token="test-token"),
+            opener=opener,
+        )
+        config = replace(
+            run_config(),
+            target=TargetConfig(
+                provider="fake",
+                adapter_entrypoint="agentstorm_worker.benchmarks.sre:create_adapter",
+            ),
+        )
+        client.register_run(config, expected_shards=1)
+        registration = json.loads(opener.requests[0][0].data)
+        self.assertEqual(
+            registration["target"]["adapter_entrypoint"],
+            "agentstorm_worker.benchmarks.sre:create_adapter",
+        )
+
     def test_registers_full_reliability_snapshot(self) -> None:
         opener = RecordingOpener()
         client = ResultClient(
@@ -333,9 +392,7 @@ class ResultClientTest(unittest.TestCase):
 
         request, _ = opener.requests[0]
         self.assertTrue(request.full_url.endswith("/v1/runs/run-1/terminal"))
-        self.assertEqual(
-            request.get_header("Idempotency-key"), "run/run-1/terminal/cancelled"
-        )
+        self.assertEqual(request.get_header("Idempotency-key"), "run/run-1/terminal/cancelled")
         self.assertEqual(
             json.loads(request.data),
             {"status": "cancelled", "reason_code": "worker_terminated"},

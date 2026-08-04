@@ -1,0 +1,72 @@
+{{- if .Values.resultApi.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentstorm.resultApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentstorm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: result-api
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: result-api
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentstorm.resultApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentstorm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: result-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: result-api
+  template:
+    metadata:
+      labels:
+        {{- include "agentstorm.labels" . | nindent 8 }}
+        app.kubernetes.io/component: result-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: result-api
+          image: {{ include "agentstorm.image" (list .Values.resultApi.image .) }}
+          imagePullPolicy: {{ .Values.resultApi.image.pullPolicy }}
+          env:
+            - name: AGENTSTORM_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.resultApi.existingStorageSecret }}, key: {{ .Values.resultApi.databaseURLKey }}}}
+            - {name: AGENTSTORM_S3_ENDPOINT, value: {{ .Values.resultApi.s3Endpoint | quote }}}
+            - name: AGENTSTORM_S3_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: {{ .Values.resultApi.existingStorageSecret }}, key: {{ .Values.resultApi.s3AccessKeyKey }}}}
+            - name: AGENTSTORM_S3_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: {{ .Values.resultApi.existingStorageSecret }}, key: {{ .Values.resultApi.s3SecretKeyKey }}}}
+            - {name: AGENTSTORM_S3_BUCKET, value: {{ .Values.resultApi.s3Bucket | quote }}}
+            - {name: AGENTSTORM_S3_REGION, value: {{ .Values.resultApi.s3Region | quote }}}
+            - {name: AGENTSTORM_S3_USE_SSL, value: {{ .Values.resultApi.s3UseSSL | quote }}}
+            - name: AGENTSTORM_RESULT_WRITE_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.resultApi.existingAuthSecret }}, key: {{ .Values.resultApi.writeTokenKey }}}}
+            - name: AGENTSTORM_RESULT_READ_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.resultApi.existingAuthSecret }}, key: {{ .Values.resultApi.readTokenKey }}}}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources:
+            {{- toYaml .Values.resultApi.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+{{- end }}

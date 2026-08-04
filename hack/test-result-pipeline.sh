@@ -6,6 +6,7 @@ database_url="${AGENTSTORM_TEST_DATABASE_URL:?AGENTSTORM_TEST_DATABASE_URL is re
 s3_endpoint="${AGENTSTORM_TEST_S3_ENDPOINT:?AGENTSTORM_TEST_S3_ENDPOINT is required}"
 s3_access_key="${AGENTSTORM_TEST_S3_ACCESS_KEY:?AGENTSTORM_TEST_S3_ACCESS_KEY is required}"
 s3_secret_key="${AGENTSTORM_TEST_S3_SECRET_KEY:?AGENTSTORM_TEST_S3_SECRET_KEY is required}"
+python_bin="${PYTHON:-python3}"
 listen_address="127.0.0.1:18080"
 base_url="http://$listen_address"
 write_token="pipeline-write-test-token"
@@ -71,7 +72,7 @@ run_shard() {
   AGENTSTORM_SHARD_COUNT=2 \
   AGENTSTORM_SHARD_INDEX="$shard_index" \
   PYTHONPATH="$repo_root/worker/src" \
-    python3 -m agentstorm_worker run \
+    "$python_bin" -m agentstorm_worker run \
       --config "$test_dir/run.json" \
       --dataset "$test_dir/cases.jsonl" \
       --output "$test_dir/output-$shard_index"
@@ -81,7 +82,7 @@ run_shard 0
 curl --fail --silent \
   --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$run_id" >"$test_dir/collecting.json"
-python3 - "$test_dir/collecting.json" <<'PY'
+"$python_bin" - "$test_dir/collecting.json" <<'PY'
 import json
 import sys
 
@@ -98,7 +99,7 @@ curl --fail --silent \
 curl --fail --silent \
   --header "Authorization: Bearer $read_token" \
   "$base_url/v1/runs/$run_id/cases?limit=10" >"$test_dir/cases-response.json"
-python3 - "$test_dir/complete.json" "$test_dir/cases-response.json" <<'PY'
+"$python_bin" - "$test_dir/complete.json" "$test_dir/cases-response.json" <<'PY'
 import json
 import sys
 
@@ -110,13 +111,21 @@ assert run["partial"] is False, run
 assert run["summary"]["total"] == 2, run
 assert run["summary"]["succeeded"] == 2, run
 assert run["summary"]["usage_complete"] is True, run
+assert run["summary"]["model_call_count"] == 2, run
+assert run["summary"]["tool_call_count"] == 2, run
+assert run["summary"]["model_calls_per_successful_agent"] == 1, run
+assert run["summary"]["tool_calls_per_successful_agent"] == 1, run
 assert len(page["cases"]) == 2, page
 for case in page["cases"]:
     assert "output" not in case, case
     assert "error" not in case, case
     assert case["usage_complete"] is True, case
+    assert case["model_call_count"] == 1, case
+    assert case["tool_call_count"] == 1, case
     assert len(case["attempts"]) == 1, case
     assert case["attempts"][0]["outcome"] == "succeeded", case
+    assert case["attempts"][0]["model_call_count"] == 1, case
+    assert case["attempts"][0]["tool_call_count"] == 1, case
 PY
 
 echo "Result pipeline integration passed: run_id=$run_id"

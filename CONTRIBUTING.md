@@ -7,6 +7,8 @@ make fmt
 make vet
 make test
 make test-envtest
+make test-benchmark
+HELM3=/path/to/helm-3.21.0 HELM4=/path/to/helm-4.2.2 make helm-test
 ```
 
 `make test-envtest` downloads pinned Kubernetes control-plane binaries into the ignored `.cache/`
@@ -60,6 +62,10 @@ Changes to the CRD must update all of the following in one pull request:
 
 Keep provider integrations behind the worker adapter interface. The controller must not import model
 SDKs or depend on prompt/tool schemas.
+
+See [the Adapter plugin guide](docs/adapter-plugins.md) before adding a Provider or domain Agent.
+Changes are merged with rebase so the main history stays linear; CI runs on the pull request, and a
+successful rebase merge does not trigger a duplicate main-branch pipeline.
 
 Never commit API keys, real prompts, proprietary datasets, raw production traces, or generated result
 files containing sensitive content.

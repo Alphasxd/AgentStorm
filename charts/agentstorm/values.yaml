@@ -1,0 +1,69 @@
+nameOverride: ""
+fullnameOverride: ""
+
+controller:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/alphasxd/agentstorm-controller
+    tag: v0.6.0
+    digest: ""
+    pullPolicy: IfNotPresent
+  leaderElection: false
+  resultSink:
+    enabled: false
+    url: ""
+    existingAuthSecret: ""
+    writeTokenKey: write-token
+    includeSensitiveResults: false
+    distributedLimits: false
+  telemetry:
+    otlpEndpoint: ""
+    allowRedacted: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+serviceAccount:
+  create: true
+  name: ""
+
+resultApi:
+  enabled: false
+  image:
+    repository: ghcr.io/alphasxd/agentstorm-result-api
+    tag: v0.6.0
+    digest: ""
+    pullPolicy: IfNotPresent
+  existingStorageSecret: ""
+  databaseURLKey: database-url
+  s3Endpoint: ""
+  s3AccessKeyKey: s3-access-key
+  s3SecretKeyKey: s3-secret-key
+  s3Bucket: agentstorm-results
+  s3Region: us-east-1
+  s3UseSSL: false
+  existingAuthSecret: ""
+  writeTokenKey: write-token
+  readTokenKey: read-token
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+keda:
+  enabled: false
+  metricsApiUrl: ""
+  maxWorkersPerRun: 100
+  maxInFlightCases: 1000
+  requireRunnerResourceQuota: false
+  pollingInterval: 2
+
+networkPolicy:
+  enabled: false

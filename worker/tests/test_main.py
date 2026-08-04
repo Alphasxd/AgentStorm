@@ -18,18 +18,14 @@ class OrderingAdapter:
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
-    async def run(
-        self, case: object, lifecycle: AgentLifecycle | None = None
-    ) -> AdapterResponse:
+    async def run(self, case: object, lifecycle: AgentLifecycle | None = None) -> AdapterResponse:
         del case, lifecycle
         self.events.append("provider")
         return AdapterResponse(output="hello")
 
 
 class BlockingAdapter:
-    async def run(
-        self, case: object, lifecycle: AgentLifecycle | None = None
-    ) -> AdapterResponse:
+    async def run(self, case: object, lifecycle: AgentLifecycle | None = None) -> AdapterResponse:
         del case, lifecycle
         await asyncio.sleep(60)
         return AdapterResponse(output="unreachable")
@@ -45,6 +41,7 @@ class RecordingResultClient:
         self.events = events
         self.fail_registration = fail_registration
         self.fail_upload = fail_upload
+        self.terminal_reasons: list[tuple[str, str]] = []
 
     def register_run(self, config: object, expected_shards: int) -> None:
         self.events.append("register")
@@ -57,8 +54,9 @@ class RecordingResultClient:
             raise RuntimeError("upload failed")
 
     def mark_terminal(self, run_id: str, status: str, reason_code: str) -> None:
-        del run_id, status, reason_code
+        del run_id
         self.events.append("terminal")
+        self.terminal_reasons.append((status, reason_code))
 
 
 class QueueResultClient(RecordingResultClient):
@@ -106,11 +104,16 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
             )
             dataset_path.write_text('{"id":"case-1","input":"one"}\n', encoding="utf-8")
             args = argparse.Namespace(
-                command="run", config=str(config_path), dataset=str(dataset_path), output=str(root / "out")
+                command="run",
+                config=str(config_path),
+                dataset=str(dataset_path),
+                output=str(root / "out"),
             )
             client = QueueResultClient(events, fail_renew=True)
             with (
-                patch("agentstorm_worker.__main__.ResultClient.from_environment", return_value=client),
+                patch(
+                    "agentstorm_worker.__main__.ResultClient.from_environment", return_value=client
+                ),
                 patch("agentstorm_worker.__main__.create_adapter", return_value=BlockingAdapter()),
                 patch.dict(
                     "os.environ",
@@ -144,12 +147,20 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
             args = argparse.Namespace(
-                command="run", config=str(config_path), dataset=str(dataset_path), output=str(root / "out")
+                command="run",
+                config=str(config_path),
+                dataset=str(dataset_path),
+                output=str(root / "out"),
             )
             client = QueueResultClient(events)
             with (
-                patch("agentstorm_worker.__main__.ResultClient.from_environment", return_value=client),
-                patch("agentstorm_worker.__main__.create_adapter", return_value=OrderingAdapter(events)),
+                patch(
+                    "agentstorm_worker.__main__.ResultClient.from_environment", return_value=client
+                ),
+                patch(
+                    "agentstorm_worker.__main__.create_adapter",
+                    return_value=OrderingAdapter(events),
+                ),
                 patch.dict(
                     "os.environ",
                     {
@@ -177,8 +188,7 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
             dataset_path.write_text(
-                '{"id":"case-0","input":"zero"}\n'
-                '{"id":"case-1","input":"one"}\n',
+                '{"id":"case-0","input":"zero"}\n{"id":"case-1","input":"one"}\n',
                 encoding="utf-8",
             )
             args = argparse.Namespace(
@@ -310,6 +320,52 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exit_code, 3)
         self.assertEqual(events, ["register"])
+
+    async def test_invalid_adapter_plugin_marks_sanitized_harness_terminal(self) -> None:
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "run.json"
+            dataset_path = root / "cases.jsonl"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "target": {
+                            "provider": "fake",
+                            "adapterEntrypoint": "missing_plugin:create_adapter",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dataset_path.write_text('{"id":"case-1","input":"hello"}\n', encoding="utf-8")
+            args = argparse.Namespace(
+                command="run",
+                config=str(config_path),
+                dataset=str(dataset_path),
+                output=str(root / "out"),
+            )
+            client = RecordingResultClient(events)
+            with (
+                patch(
+                    "agentstorm_worker.__main__.ResultClient.from_environment",
+                    return_value=client,
+                ),
+                patch.dict(
+                    "os.environ",
+                    {"AGENTSTORM_SHARD_INDEX": "0", "AGENTSTORM_SHARD_COUNT": "1"},
+                    clear=True,
+                ),
+            ):
+                exit_code = await execute(args)
+
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(events, ["register", "terminal"])
+        self.assertEqual(
+            client.terminal_reasons,
+            [("harness_failed", "adapter_plugin_invalid")],
+        )
 
     async def test_upload_failure_fails_the_worker(self) -> None:
         events: list[str] = []

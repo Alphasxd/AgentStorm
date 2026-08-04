@@ -42,7 +42,10 @@ const (
 	workerConfigKey      = "run.json"
 )
 
-var pricePattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
+var (
+	pricePattern             = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
+	adapterEntrypointPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$`)
+)
 
 type ResultSinkConfig struct {
 	URL                  string
@@ -505,6 +508,10 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 	}
 	if run.Spec.Target.Provider != "fake" && run.Spec.Target.Provider != "openai-agents" {
 		return fmt.Errorf("unsupported provider %q", run.Spec.Target.Provider)
+	}
+	if entrypoint := run.Spec.Target.AdapterEntrypoint; entrypoint != "" &&
+		(len([]byte(entrypoint)) > 256 || !adapterEntrypointPattern.MatchString(entrypoint)) {
+		return fmt.Errorf("target.adapterEntrypoint must be a module:function reference no longer than 256 bytes")
 	}
 	if run.Spec.Target.Provider == "openai-agents" && strings.TrimSpace(run.Spec.Target.Model) == "" {
 		return fmt.Errorf("target.model is required for provider openai-agents")
