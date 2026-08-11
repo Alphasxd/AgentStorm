@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the no-cost canonical-shape SRE benchmark and produce public artifacts."""
+"""Run the no-cost fixed-shape SRE benchmark and produce public artifacts."""
 
 from __future__ import annotations
 
@@ -34,6 +34,18 @@ from agentstorm_worker.config import (
 from agentstorm_worker.runner import WorkloadRunner
 
 CAPACITY_ORDERS = ((1, 4, 16, 32), (32, 16, 4, 1), (4, 1, 32, 16))
+FAKE_PERFORMANCE_FIELDS = {
+    "cost_per_successful_agent_usd",
+    "cost_usd",
+    "duration_ms",
+    "p50_ms",
+    "p95_ms",
+    "p99_ms",
+    "peak_workers",
+    "scale_from_zero_ms",
+    "scale_to_zero_ms",
+    "throughput_agents_per_second",
+}
 
 
 def prepare_output(output_dir: Path) -> None:
@@ -134,6 +146,8 @@ async def execute_fake(output_dir: Path, image_digest: str) -> None:
         and sum(run["total"] for run in runs if run["kind"] == "capacity") == 384
         and len(case_records) == 416
     )
+    runs = [without_fake_performance(item) for item in runs]
+    case_records = [without_fake_case_latency(item) for item in case_records]
     manifest = {
         "schema_version": "agentstorm-benchmark/v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -155,7 +169,7 @@ async def execute_fake(output_dir: Path, image_digest: str) -> None:
         },
         "limitations": [
             "Fake mode validates lifecycle, assertions, aggregation, and artifact generation only.",
-            "It is not a model performance result and contains no KEDA scaling measurements.",
+            "It is not a model performance result and contains no latency, throughput, cost, speedup, efficiency, or KEDA scaling measurements.",
         ],
     }
     write_json(output_dir / "manifest.json", manifest)
@@ -165,9 +179,7 @@ async def execute_fake(output_dir: Path, image_digest: str) -> None:
     (output_dir / "REPORT.md").write_text(report(manifest, runs), encoding="utf-8")
     write_checksums(output_dir)
     if not complete:
-        raise RuntimeError(
-            "fake benchmark did not complete the canonical execution shape"
-        )
+        raise RuntimeError("fake benchmark did not complete the fixed execution shape")
 
 
 def run_record(
@@ -264,6 +276,23 @@ def case_record(run_id: str, result: Any) -> dict[str, Any]:
     }
 
 
+def without_fake_performance(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in FAKE_PERFORMANCE_FIELDS
+    }
+
+
+def without_fake_case_latency(record: dict[str, Any]) -> dict[str, Any]:
+    output = {key: value for key, value in record.items() if key != "latency_ms"}
+    output["attempts"] = [
+        {key: value for key, value in attempt.items() if key != "latency_ms"}
+        for attempt in record["attempts"]
+    ]
+    return output
+
+
 def write_json(path: Path, value: Any) -> None:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -285,44 +314,39 @@ def write_cases(path: Path, records: list[dict[str, Any]]) -> None:
 def write_summary(path: Path, runs: list[dict[str, Any]]) -> None:
     fields = list(runs[0])
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(runs)
 
 
 def report(manifest: dict[str, Any], runs: list[dict[str, Any]]) -> str:
     capacity = [run for run in runs if run["kind"] == "capacity"]
-    grouped: dict[int, list[dict[str, Any]]] = {}
-    for run in capacity:
-        grouped.setdefault(run["max_workers"], []).append(run)
-    baseline = sum(item["duration_ms"] for item in grouped[1]) / len(grouped[1])
+    reliability = next(run for run in runs if run["kind"] == "reliability")
     lines = [
         "# AgentStorm SRE benchmark",
         "",
         "> Fake validation only: this report is not a real-model performance claim.",
         "",
-        f"Complete canonical shape: **{manifest['complete']}**; capacity executions: **384**; reliability executions: **32**.",
+        f"Complete fixed execution shape: **{manifest['complete']}**; capacity executions: **384**; reliability executions: **32**.",
         "",
-        "| Workers | Mean duration (ms) | Mean throughput (agents/s) | Speedup | Efficiency |",
-        "|---:|---:|---:|---:|---:|",
+        "## Capacity execution shape",
+        "",
+        f"All {sum(run['total'] for run in capacity)} executions succeeded across the fixed 12-run concurrency order.",
+        f"They recorded {sum(run['model_call_count'] for run in capacity)} simulated model calls and",
+        f"{sum(run['tool_call_count'] for run in capacity)} deterministic tool calls.",
+        "",
+        "## Reliability execution shape",
+        "",
+        f"The 32-case reliability run recorded {reliability['succeeded']} successes,",
+        f"{reliability['infrastructure_failures']} expected infrastructure failures,",
+        f"{reliability['retry_successes']} safe retry success, and",
+        f"{reliability['injected_faults']} injected faults.",
+        "",
+        "Timing and cost fields are intentionally omitted because in-process fake execution is not a Provider or Kubernetes performance measurement.",
+        "",
+        "A future real-Provider report must be produced from released images and a fixed, separately approved benchmark protocol.",
+        "",
     ]
-    for workers in (1, 4, 16, 32):
-        entries = grouped[workers]
-        duration = sum(item["duration_ms"] for item in entries) / len(entries)
-        throughput = sum(
-            item["throughput_agents_per_second"] for item in entries
-        ) / len(entries)
-        speedup = baseline / duration
-        lines.append(
-            f"| {workers} | {duration:.3f} | {throughput:.3f} | {speedup:.3f} | {speedup / workers:.3f} |"
-        )
-    lines.extend(
-        [
-            "",
-            "The real canonical report is produced only after all released-image KEDA runs complete without changing the dataset, model, or matrix.",
-            "",
-        ]
-    )
     return "\n".join(lines)
 
 

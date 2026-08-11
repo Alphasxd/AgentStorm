@@ -17,9 +17,10 @@ single-prompt benchmark.
 > are implemented in `v0.4.0-alpha.1`. M5 adds an opt-in durable shard queue, KEDA scale-to-zero,
 > resource admission, and distributed Provider limits in `v0.5.0-alpha.1`. M6 adds
 > trusted Adapter plugins, a 32-incident SRE Agent workload, Agent-call accounting, Helm packaging,
-> and reproducible benchmark tooling. The paid canonical performance report and final GitHub Release
-> remain gated on a complete, checksummed real-model benchmark; release smokes are not performance
-> evidence.
+> and reproducible benchmark tooling. M6 is implemented by the stable `v0.6.0` artifacts and a
+> checksummed, no-cost validation of the complete Agent lifecycle. Real-Provider performance work is
+> tracked after v0.6; fake executions never support throughput, latency, cost, speedup, or efficiency
+> claims.
 
 ## Why this project
 
@@ -114,6 +115,10 @@ Validate the complete benchmark shape without a model bill (384 capacity executi
 make benchmark-fake
 ```
 
+The committed [v0.6.0 fake validation evidence](benchmarks/sre/results/v0.6.0-fake-validation/REPORT.md)
+contains 416 case histories. It records execution shape, model/tool-call accounting, assertions,
+retries, and failure categories; performance fields are deliberately omitted.
+
 Results are written to:
 
 ```text
@@ -193,7 +198,9 @@ The published chart digest is
 `sha256:ad20aa4da8f389f21f01ebcfe807090318f51cc4fbb833403ff2e4d2f867b509`.
 The source chart remains available under `charts/agentstorm` for linting and local changes.
 The [v0.6.0 verification record](docs/release-v0.6.0.md) captures the tag, digests, attestations,
-and amd64/arm64 smoke evidence separately from the pending real-model performance report.
+amd64/arm64 smoke evidence, and the limits of the fake validation. The
+[release demo](https://github.com/Alphasxd/AgentStorm/releases/download/v0.6.0/agentstorm-v0.6.gif)
+shows the released Helm/KEDA path without making a real-model performance claim.
 
 ### Released durable result stack
 
@@ -425,8 +432,10 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-1. Run the fixed real SRE capacity/reliability matrix with the published v0.6 digests.
-2. Publish checksummed evidence and the demo asset, close M6, and create the final GitHub Release.
+Milestones M0 through M6 are implemented. The next independent work item is a Provider-neutral
+real-model benchmark, starting with version-pinned OpenAI-compatible domestic cloud models and then
+self-hosted inference APIs. It reuses the fixed SRE protocol but is not part of the v0.6 release
+claim.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

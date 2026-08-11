@@ -70,6 +70,30 @@ class SREBenchmarkArtifactTest(unittest.TestCase):
                 {"timeout", "injected_tool_error"},
             )
             self.assertTrue(reliability_evidence_complete(runs, cases))
+            performance_fields = {
+                "cost_per_successful_agent_usd",
+                "cost_usd",
+                "duration_ms",
+                "p50_ms",
+                "p95_ms",
+                "p99_ms",
+                "peak_workers",
+                "scale_from_zero_ms",
+                "scale_to_zero_ms",
+                "throughput_agents_per_second",
+            }
+            self.assertTrue(all(performance_fields.isdisjoint(run) for run in runs))
+            self.assertTrue(all("latency_ms" not in case for case in cases))
+            self.assertTrue(
+                all(
+                    "latency_ms" not in attempt
+                    for case in cases
+                    for attempt in case["attempts"]
+                )
+            )
+            report = (output / "REPORT.md").read_text(encoding="utf-8").lower()
+            for forbidden in ("agents/s", "latency", "speedup", "efficiency", "cost usd"):
+                self.assertNotIn(forbidden, report)
             self.assertFalse(capacity_evidence_complete(runs))
             for run in runs:
                 if run["kind"] != "capacity":

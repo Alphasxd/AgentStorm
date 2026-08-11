@@ -1,6 +1,6 @@
 # v0.6.0 release verification
 
-This record separates artifact verification from performance evidence. The `v0.6.0` images and
+This record separates artifact and Agent-lifecycle verification from performance evidence. The `v0.6.0` images and
 chart were built from annotated tag commit `5157d2766b4abcb1fd257d4464c0742909733013` on
 2026-08-05. Passing the checks below proves packaging, portability, and no-cost runtime behavior;
 it does not establish real-model throughput or latency.
@@ -33,13 +33,20 @@ The macOS nested-kind run used the repository's explicit
 443 to the API server port is not preserved by that environment's NetworkPolicy implementation.
 The public policies were unchanged and remained enabled in the amd64 GitHub gate.
 
-## Pending canonical evidence
+## No-cost Agent-lifecycle evidence
 
-The fixed real-model matrix is not included in this record. It requires a user-supplied
-`OPENAI_API_KEY`, an isolated OpenAI project with a USD 10 platform hard limit, and the runner's USD
-8 recorded-cost stop. Until all 384 capacity executions and the separate 32-case reliability run
-finish, AgentStorm does not publish throughput, tail-latency, cost, speedup, or efficiency
-conclusions and M6 remains in progress.
+The committed [v0.6.0 fake validation](../benchmarks/sre/results/v0.6.0-fake-validation/REPORT.md)
+contains 12 capacity-shape runs with 384 complete executions and one 32-case reliability run: 416
+case histories in total. It verifies the deterministic SRE tool chain, model/tool-call accounting,
+assertions, a safe 429 retry, timeout handling, tool failure classification, aggregation, gzip
+integrity, and checksums.
 
-See [the SRE benchmark protocol](../benchmarks/sre/README.md) for the immutable workload and
-publishability rules.
+Its manifest is explicitly `canonical=false`. Fake timing, throughput, cost, speedup, efficiency,
+and KEDA timing fields are removed from the evidence, and the artifact set passes a sensitive-value
+scan. These results close M6's portability, platform, and Agent-lifecycle gates; they do not support
+claims about any real model's production throughput, latency, quality, or cost.
+
+Real-Provider benchmarking is a post-v0.6 task. A ChatGPT subscription and API billing are separate,
+so an interactive Codex/ChatGPT session is not a Worker credential or inference endpoint. See the
+[OpenAI billing explanation](https://help.openai.com/en/articles/8156019) and the
+[Provider-neutral SRE protocol](../benchmarks/sre/README.md).
