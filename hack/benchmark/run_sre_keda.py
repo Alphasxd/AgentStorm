@@ -554,14 +554,16 @@ def capacity_evidence_complete(runs: list[dict[str, Any]]) -> bool:
             and run["model_call_count"] is not None
             and run["model_call_count"] > 0
             and run["tool_call_count"] == 128
-            and run["cost_usd"] is not None
-            and run["scale_from_zero_ms"] is not None
+            and run.get("cost_usd") is not None
+            and run.get("scale_from_zero_ms") is not None
+            and run.get("peak_workers") is not None
             and run["peak_workers"] <= run["max_workers"]
-            and run["scale_to_zero_ms"] is not None
+            and run.get("scale_to_zero_ms") is not None
             for run in capacity
         )
         and any(
-            run["max_workers"] == 32 and run["peak_workers"] == 32 for run in capacity
+            run["max_workers"] == 32 and run.get("peak_workers") == 32
+            for run in capacity
         )
     )
 

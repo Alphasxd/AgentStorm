@@ -14,14 +14,20 @@ The fake run executes the same 12-run capacity matrix (384 Agent executions) plu
 reliability run. It validates tool lifecycle, assertions, retry/error reporting, aggregation, and
 artifact checksums, but it is not a model or KEDA performance result.
 
-## Canonical real run
+The committed [`v0.6.0-fake-validation`](results/v0.6.0-fake-validation/) evidence contains all 416
+case histories and is marked `canonical=false`. Timing, throughput, cost, speedup, efficiency, and
+KEDA timing fields are deliberately removed so the artifact cannot be mistaken for performance
+evidence.
 
-The canonical run uses the released Worker digest, `gpt-5.6-luna`, explicit reasoning effort
+## Optional post-release OpenAI run
+
+The optional runner can use the released Worker digest, `gpt-5.6-luna`, explicit reasoning effort
 `none`, parallel tool calls, KEDA worker gradients `1,4,16,32`, and the three fixed orders documented
-in `manifest.json`. Run it only in an isolated
+in `manifest.json`. It is not an M6 release gate. Run it only in an isolated
 OpenAI project with a platform hard spend limit of USD 10. `OPENAI_API_KEY` is read only by the
 manual runner; it must never be put in a manifest, artifact, command argument, or CI secret used by
-default workflows. The runner stops launching new runs once recorded cost reaches USD 8.
+default workflows. The runner stops launching new runs once recorded cost reaches USD 8. A
+ChatGPT Pro subscription is not an API credential.
 
 A result is publishable only when all 384 capacity executions and the separate 32-case reliability
 run are complete. Do not shrink the dataset or change the model to manufacture a complete report.
@@ -48,3 +54,15 @@ partial matrix or a recorded-cost stop. Before spending begins it also starts a 
 pod from the released Worker digest to record the exact Python, Worker, and OpenAI Agents SDK
 versions. A publishable run requires the 32-Worker tier to reach 32 live Workers and all capacity
 cases to pass their schema and dependent-tool assertions.
+
+## Domestic cloud and self-hosted Providers
+
+The next benchmark should prefer an exact, versioned OpenAI-compatible domestic cloud model. Set
+`target.baseURL` for a compatible endpoint; use a trusted image-bundled `adapterEntrypoint` when a
+Provider requires another HTTP/SDK protocol. A self-hosted service may be reached through an SSH
+tunnel, but SSH only transports a stable Worker-accessible inference API and is not itself an
+Adapter.
+
+Every real run must record the exact model version and network topology. Self-hosted evidence must
+also record quantization, GPU, inference server, and cluster configuration. Codex and ChatGPT
+interactive sessions are neither benchmark endpoints nor substitutes for Provider credentials.

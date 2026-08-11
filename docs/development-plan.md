@@ -119,25 +119,39 @@ Release `v0.5.0-alpha.1` passed source-built and published-image KEDA gates on a
 three image-index digests are pinned in public manifests. The contract and safety limitations are
 documented in [event-driven scheduling](scheduling.md).
 
-## M6: Stable open-source release — in progress
+## M6: Stable open-source release — implemented
 
 - [x] Add a trusted image-bundled Adapter entrypoint without inline or remote code.
 - [x] Add a 32-incident SRE diagnostic Agent with deterministic read-only tool fixtures.
 - [x] Persist nullable model-call and exact tool-call counts through attempts, cases, summaries, and comparisons.
 - [x] Add a namespace-scoped Helm chart, changelog, ADRs, contribution guide, and demo script.
-- [x] Add no-cost canonical-shape benchmark validation and a released-image KEDA benchmark runner.
+- [x] Add no-cost fixed-shape benchmark validation and a released-image KEDA benchmark runner.
 - [x] Publish `v0.6.0` multi-architecture images and `oci://ghcr.io/alphasxd/charts/agentstorm:0.6.0`.
-- [ ] Complete the fixed 384-execution real-model capacity benchmark and separate reliability run.
+- [x] Publish a no-cost 384-execution capacity-shape validation plus a 32-case reliability run.
 - [x] Pin the verified v0.6 image-index digests in public manifests.
-- [ ] Publish checksummed benchmark evidence/demo and create the stable GitHub Release.
+- [x] Publish checksummed fake validation evidence/demo and create the stable GitHub Release.
 
 Acceptance criteria:
 
 - A benchmark case starts from an incident ID and correctly chains incident, metrics, logs, and runbook tools.
-- Capacity reports use complete Agent executions and include tail latency, throughput, calls, Tokens, cost,
-  KEDA scaling, speedup, and efficiency.
+- Fake evidence covers the complete execution shape, call accounting, assertions, retries, failures, and
+  artifact integrity while omitting timing, throughput, cost, speedup, and efficiency fields.
 - Helm 3.21.0 and 4.2.2 lint/render the chart; Helm 4 installs, upgrades, and uninstalls it on kind.
-- A canonical report is never emitted for a partial matrix, changed dataset/model, or recorded-cost stop.
+- A real-Provider report is never emitted for a partial matrix, changed dataset/model, or recorded-cost stop.
+
+Release `v0.6.0` is the stable platform distribution. Stability covers immutable multi-architecture
+artifacts, Helm packaging, Kubernetes/KEDA execution, reliability behavior, and durable Agent
+lifecycle evidence. The CRD remains `v1alpha1`; the release does not claim production HA,
+non-trusted multi-tenancy, or real-model performance.
+
+## Post-v0.6: Provider-neutral real-model benchmark — planned
+
+- Select an exact, versioned OpenAI-compatible domestic cloud model or a self-hosted inference API.
+- Record model and price metadata, or hardware, quantization, inference service, cluster, and network
+  topology for self-hosted runs.
+- Re-run the fixed 384-capacity plus 32-reliability SRE protocol without shrinking the matrix.
+- Treat SSH only as transport for a Worker-accessible HTTP/SDK inference endpoint. Use
+  `target.baseURL` for compatible APIs or a trusted `adapterEntrypoint` for another protocol.
 
 ## What not to build yet
 
