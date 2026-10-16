@@ -19,6 +19,13 @@ Do not copy:
 - Provider-specific trace payloads into the CRD.
 - Raw sensitive prompt/tool content into default telemetry.
 
+## OpenAI-compatible HTTP
+
+Domestic model hosts and self-hosted servers publish a chat-completions HTTP shape. AgentStorm uses
+that wire contract for `provider: openai-compatible` and keeps the call in the Worker. It does not
+vendor a cloud SDK, treat one hosted model id as the benchmark model, or copy a provider console
+into the controller.
+
 ## LangGraph
 
 Reference: <https://github.com/langchain-ai/langgraph>

@@ -49,7 +49,7 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: AGENTSTORM_PROVIDER_LIMITS_JSON
-          value: '{"fake":{"max_concurrency":32,"requests_per_minute":600},"openai-agents":{"max_concurrency":8,"requests_per_minute":60}}'
+          value: '{"fake":{"max_concurrency":32,"requests_per_minute":600},"openai-agents":{"max_concurrency":8,"requests_per_minute":60},"openai-compatible":{"max_concurrency":8,"requests_per_minute":60}}'
   - target:
       group: networking.k8s.io
       version: v1

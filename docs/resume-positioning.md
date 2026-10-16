@@ -24,4 +24,6 @@ Additional wording after M2/M3 is actually complete:
 
 Replace generic claims with measured figures only after running reproducible benchmarks. Do not claim
 KEDA, ClickHouse, fault injection, or centralized observability until the corresponding milestone is
-actually implemented.
+actually implemented. Do not cite a domestic-cloud or self-hosted SRE number until a canonical
+OpenAI-compatible Kubernetes manifest is published. The mock harness and the fake validation are not
+that result.

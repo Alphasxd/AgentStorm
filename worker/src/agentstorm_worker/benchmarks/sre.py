@@ -184,7 +184,37 @@ class SREFakeAdapter:
         return result
 
 
-class _SREOpenAIAdapter:
+_COMPATIBLE_INSTRUCTIONS = (
+    "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
+    "and window for both query_metrics and search_logs; those two calls may be made in "
+    "either order or together. Call lookup_runbook with the exact error_signature returned "
+    "by search_logs. Do not repeat tools or call any other tool. Return only a JSON object "
+    "with keys incident_id, root_cause, severity, recommended_action, evidence, and runbook. "
+    "Do not use Markdown."
+)
+
+_OBJECT_SCHEMA = {"type": "object", "additionalProperties": False}
+
+
+def _tool_schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {
+        **_OBJECT_SCHEMA,
+        "properties": properties,
+        "required": required,
+    }
+
+
+def _unwrap_json_fence(output: str) -> str:
+    stripped = output.strip()
+    if not stripped.startswith("```"):
+        return output
+    lines = stripped.splitlines()
+    if len(lines) < 3 or lines[-1].strip() != "```":
+        return output
+    return "\n".join(lines[1:-1]).strip()
+
+
+class _SRERecordingAdapter:
     def __init__(self, adapter: AgentAdapter) -> None:
         self._adapter = adapter
 
@@ -197,7 +227,12 @@ class _SREOpenAIAdapter:
             _TOOL_CALLS.reset(token)
         metadata = dict(response.metadata)
         metadata["agentstorm.sre.tool_calls"] = calls
-        return replace(response, metadata=metadata, tool_call_count=len(calls))
+        return replace(
+            response,
+            output=_unwrap_json_fence(response.output),
+            metadata=metadata,
+            tool_call_count=len(calls),
+        )
 
 
 def _create_openai_adapter(context: AdapterFactoryContext) -> AgentAdapter:
@@ -236,7 +271,49 @@ def _create_openai_adapter(context: AdapterFactoryContext) -> AgentAdapter:
         model_settings=ModelSettings(reasoning=Reasoning(effort="none"), parallel_tool_calls=True),
         serialize_output=lambda value: value.model_dump_json(),
     )
-    return _SREOpenAIAdapter(adapter)
+    return _SRERecordingAdapter(adapter)
+
+
+def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAdapter:
+    from ..adapters.openai_compatible import ChatTool, OpenAICompatibleAdapter
+
+    string = {"type": "string"}
+    tools = [
+        ChatTool(
+            "get_incident",
+            "Read one synthetic incident by id.",
+            _tool_schema({"incident_id": string}, ["incident_id"]),
+            get_incident,
+        ),
+        ChatTool(
+            "query_metrics",
+            "Read synthetic service metrics for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            query_metrics,
+        ),
+        ChatTool(
+            "search_logs",
+            "Read synthetic service logs for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            search_logs,
+        ),
+        ChatTool(
+            "lookup_runbook",
+            "Read the synthetic runbook for an error signature.",
+            _tool_schema({"error_signature": string}, ["error_signature"]),
+            lookup_runbook,
+        ),
+    ]
+    adapter = OpenAICompatibleAdapter(
+        model=context.model,
+        base_url=context.base_url,
+        instructions=_COMPATIBLE_INSTRUCTIONS,
+        tools=tools,
+        max_model_calls=8,
+        request_fields={"temperature": 0, "max_tokens": 512},
+        agent_name="sre-diagnostic-agent",
+    )
+    return _SRERecordingAdapter(adapter)
 
 
 def create_adapter(context: AdapterFactoryContext) -> AgentAdapter:
@@ -244,7 +321,9 @@ def create_adapter(context: AdapterFactoryContext) -> AgentAdapter:
         return SREFakeAdapter()
     if context.provider == "openai-agents":
         return _create_openai_adapter(context)
-    raise ValueError("SRE benchmark supports fake or openai-agents providers")
+    if context.provider == "openai-compatible":
+        return _create_openai_compatible_adapter(context)
+    raise ValueError("SRE benchmark supports fake, openai-agents, or openai-compatible providers")
 
 
 def validate_tool_usage(context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:

@@ -101,6 +101,11 @@ with:
 | `AGENTSTORM_GLOBAL_MAX_CONCURRENCY` | `0` | Maximum live Provider attempts across all runs; zero disables the cap |
 | `AGENTSTORM_GLOBAL_REQUESTS_PER_MINUTE` | `0` | Sliding one-minute global start limit; zero disables it |
 | `AGENTSTORM_PROVIDER_LIMITS_JSON` | `{}` | Provider-specific `max_concurrency` and `requests_per_minute` caps |
+
+Built-in provider keys are `fake`, `openai-agents`, and `openai-compatible`. The development KEDA
+overlay caps `openai-compatible` at 8 concurrent attempts and 60 requests per minute, the same
+permit as `openai-agents`. Limits key off the provider name; adding the compatible provider did not
+change the permit protocol.
 | `AGENTSTORM_PERMIT_LEASE_SECONDS` | `30` | Permit lease duration, from 10 through 300 seconds |
 
 Global and Provider-specific limits are both enforced; the effective admission must satisfy every

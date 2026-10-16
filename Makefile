@@ -6,7 +6,7 @@ RESULT_API_IMAGE ?= agentstorm-result-api:dev
 ENVTEST_K8S_VERSION ?= v1.33.0
 PYTHON ?= python3
 
-.PHONY: fmt vet test test-envtest test-results-integration test-result-pipeline test-promptfoo test-benchmark benchmark-fake helm-test build build-result-api worker-local sre-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local e2e-results-local e2e-keda-local
+.PHONY: fmt vet test test-envtest test-results-integration test-result-pipeline test-promptfoo test-benchmark benchmark-fake benchmark-compatible-mock sre-compatible-mock benchmark-compatible-local benchmark-compatible-keda helm-test build build-result-api worker-local sre-local docker-build docker-build-result-api install deploy deploy-namespace undeploy undeploy-namespace e2e-local e2e-results-local e2e-keda-local
 
 fmt:
 	gofmt -w $$(find api cmd internal -name '*.go')
@@ -32,10 +32,34 @@ test-promptfoo:
 	./hack/test-promptfoo-replay.sh
 
 test-benchmark:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest hack/benchmark/test_sre_benchmark.py -v
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s hack/benchmark -p 'test_*.py' -v
 
 benchmark-fake:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) hack/benchmark/run_sre_benchmark.py --output .out/benchmark-fake
+
+benchmark-compatible-mock:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) hack/benchmark/run_sre_compatible.py --mode mock --shape full --output .out/benchmark-compatible-mock
+
+sre-compatible-mock:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) hack/benchmark/run_sre_compatible.py --mode mock --shape smoke --output .out/sre-compatible-mock
+
+benchmark-compatible-local:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) hack/benchmark/run_sre_compatible.py --mode local \
+		--model "$(MODEL)" --base-url "$(BASE_URL)" --endpoint-class "$(ENDPOINT_CLASS)" \
+		--input-price "$(INPUT_PRICE)" --output-price "$(OUTPUT_PRICE)" \
+		--model-version "$(MODEL_VERSION)" --inference-server "$(INFERENCE_SERVER)" \
+		--quantization "$(QUANTIZATION)" --hardware "$(HARDWARE)" --topology "$(TOPOLOGY)" \
+		--output $(or $(OUTPUT),.out/benchmark-compatible-local)
+
+benchmark-compatible-keda:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) hack/benchmark/run_sre_compatible_keda.py \
+		--worker-image "$(WORKER_IMAGE)" --result-api-url "$(RESULT_API_URL)" \
+		--model "$(MODEL)" --base-url "$(BASE_URL)" --endpoint-class "$(ENDPOINT_CLASS)" \
+		--input-price "$(INPUT_PRICE)" --output-price "$(OUTPUT_PRICE)" \
+		--model-version "$(MODEL_VERSION)" --inference-server "$(INFERENCE_SERVER)" \
+		--quantization "$(QUANTIZATION)" --hardware "$(HARDWARE)" --topology "$(TOPOLOGY)" \
+		--namespace "$(or $(NAMESPACE),agentstorm-system)" --kube-context "$(KUBE_CONTEXT)" \
+		--output $(or $(OUTPUT),.out/benchmark-compatible-keda)
 
 helm-test:
 	$${HELM3:-helm} lint charts/agentstorm

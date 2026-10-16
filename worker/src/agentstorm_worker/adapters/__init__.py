@@ -11,6 +11,7 @@ from .base import (
     ToolLifecycleEvent,
 )
 from .fake import FakeAdapter
+from .openai_compatible import OpenAICompatibleAdapter
 
 
 class AdapterPluginError(RuntimeError):
@@ -30,6 +31,8 @@ def create_adapter(
         )
     if provider == "fake":
         return FakeAdapter()
+    if provider == "openai-compatible":
+        return OpenAICompatibleAdapter(model=model, base_url=base_url)
     if provider == "openai-agents":
         from .openai_agents import OpenAIAgentsAdapter
 
@@ -62,6 +65,7 @@ __all__ = [
     "AgentLifecycle",
     "FakeAdapter",
     "HandoffLifecycleEvent",
+    "OpenAICompatibleAdapter",
     "ToolLifecycleEvent",
     "create_adapter",
 ]

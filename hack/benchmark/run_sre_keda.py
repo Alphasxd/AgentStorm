@@ -373,14 +373,15 @@ def _deployment_image(kube: Kubernetes, name: str) -> str:
 
 
 def worker_runtime_metadata(
-    kube: Kubernetes, image: str, pod_name: str
+    kube: Kubernetes, image: str, pod_name: str, *, code: str | None = None
 ) -> dict[str, str]:
-    code = (
-        "import importlib.metadata,json,platform;"
-        "print(json.dumps({'python':platform.python_version(),"
-        "'agentstorm_worker':importlib.metadata.version('agentstorm-worker'),"
-        "'openai_agents':importlib.metadata.version('openai-agents')}))"
-    )
+    if code is None:
+        code = (
+            "import importlib.metadata,json,platform;"
+            "print(json.dumps({'python':platform.python_version(),"
+            "'agentstorm_worker':importlib.metadata.version('agentstorm-worker'),"
+            "'openai_agents':importlib.metadata.version('openai-agents')}))"
+        )
     try:
         kube.command(
             "run",
@@ -412,7 +413,7 @@ def worker_runtime_metadata(
 
 
 def cluster_metadata(
-    kube: Kubernetes, worker_image: str, prefix: str
+    kube: Kubernetes, worker_image: str, prefix: str, *, runtime_code: str | None = None
 ) -> dict[str, Any]:
     version = json.loads(kube.command("version", "-o", "json"))
     nodes = json.loads(kube.command("get", "nodes", "-o", "json"))
@@ -441,7 +442,7 @@ def cluster_metadata(
             "result_api": _deployment_image(kube, "agentstorm-result-api"),
         },
         "worker_runtime": worker_runtime_metadata(
-            kube, worker_image, prefix + "-runtime"
+            kube, worker_image, prefix + "-runtime", code=runtime_code
         ),
     }
 

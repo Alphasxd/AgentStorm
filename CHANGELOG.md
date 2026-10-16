@@ -5,6 +5,14 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
 
 ## [Unreleased]
 
+### Added
+
+- `openai-compatible` Worker provider for pinned OpenAI-compatible chat and tool-calling endpoints,
+  including domestic cloud APIs and self-hosted servers such as vLLM.
+- SRE benchmark runners for a no-cost local mock, an explicit in-process real endpoint, and a
+  Kubernetes/KEDA real endpoint. Real modes require a spend opt-in, a pinned model, and a price
+  snapshot. No real-model result is included.
+
 ## [0.6.0] - 2026-08-05
 
 ### Added

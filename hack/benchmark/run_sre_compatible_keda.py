@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""Run the fixed SRE protocol on Kubernetes through an OpenAI-compatible endpoint.
+
+The API key is read from OPENAI_API_KEY and installed as a Secret. It is never
+written to a manifest, argument list, or artifact. A run is canonical only when
+the full matrix, price snapshot, pinned endpoint, and KEDA evidence all agree.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "hack/benchmark"))
+
+from run_sre_benchmark import (
+    CAPACITY_ORDERS,
+    prepare_output,
+    write_cases,
+    write_checksums,
+    write_json,
+    write_summary,
+)
+from run_sre_compatible import (
+    ADAPTER,
+    DATASET,
+    BenchmarkError,
+    _revision,
+    claim_policy,
+    limitations,
+    render_report,
+    require_spend_opt_in,
+    validate_endpoint,
+)
+from run_sre_keda import (
+    SPEND_STOP_USD,
+    IMAGE_DIGEST,
+    Kubernetes,
+    ResultReader,
+    capacity_evidence_complete,
+    cluster_metadata,
+    config_map,
+    execute_run,
+    reliability_evidence_complete,
+    scan_secrets,
+    scenario_document,
+)
+
+RUNTIME_CODE = (
+    "import importlib.metadata,json,platform\n"
+    "versions={'python':platform.python_version(),"
+    "'agentstorm_worker':importlib.metadata.version('agentstorm-worker')}\n"
+    "try:\n"
+    "    versions['openai_agents']=importlib.metadata.version('openai-agents')\n"
+    "except importlib.metadata.PackageNotFoundError:\n"
+    "    versions['openai_agents']=None\n"
+    "print(json.dumps(versions))\n"
+)
+
+
+def compatible_run_resource(
+    name: str,
+    namespace: str,
+    dataset_name: str,
+    scenario_name: str,
+    api_secret: str,
+    worker_image: str,
+    workers: int,
+    model: str,
+    base_url: str,
+    input_price: str,
+    output_price: str,
+    reliability: bool,
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "target": {
+            "provider": "openai-compatible",
+            "model": model,
+            "baseURL": base_url,
+            "adapterEntrypoint": ADAPTER,
+            "apiKeySecretRef": {"name": api_secret, "key": "api-key"},
+            "pricing": {
+                "inputUSDPerMillionTokens": input_price,
+                "outputUSDPerMillionTokens": output_price,
+            },
+        },
+        "workload": {
+            "datasetRef": {"name": dataset_name, "key": "cases.jsonl"},
+            "parallelism": 32,
+            "concurrencyPerWorker": 1,
+            "iterations": 1,
+            "timeoutSeconds": 1800,
+        },
+        "evaluation": {} if reliability else {"minSuccessRate": 1, "maxErrorRate": 0},
+        "scheduling": {
+            "strategy": "keda",
+            "maxWorkers": workers,
+            "resourceProfile": "small",
+        },
+        "runner": {"image": worker_image, "imagePullPolicy": "IfNotPresent"},
+    }
+    if reliability:
+        spec["reliability"] = {
+            "seed": 42,
+            "scenarioRef": {"name": scenario_name, "key": "scenario.json"},
+            "retry": {"maxAttempts": 2, "jitterRatio": 0},
+        }
+    return {
+        "apiVersion": "agentstorm.io/v1alpha1",
+        "kind": "AgentTestRun",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": spec,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--namespace", default="agentstorm-system")
+    parser.add_argument("--kube-context", default="")
+    parser.add_argument("--worker-image", required=True)
+    parser.add_argument("--result-api-url", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--endpoint-class", required=True)
+    parser.add_argument("--input-price", required=True)
+    parser.add_argument("--output-price", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--model-version", default="")
+    parser.add_argument("--inference-server", default="")
+    parser.add_argument("--quantization", default="")
+    parser.add_argument("--hardware", default="")
+    parser.add_argument("--topology", default="")
+    parser.add_argument("--timeout-seconds", type=int, default=2400)
+    parser.add_argument("--keep-resources", action="store_true")
+    args = parser.parse_args()
+    try:
+        require_spend_opt_in()
+        endpoint = validate_endpoint(
+            model=args.model,
+            base_url=args.base_url,
+            endpoint_class=args.endpoint_class,
+            input_price=args.input_price,
+            output_price=args.output_price,
+            model_version=args.model_version,
+            inference_server=args.inference_server,
+            quantization=args.quantization,
+            hardware=args.hardware,
+            topology=args.topology,
+            reject_loopback=True,
+        )
+    except BenchmarkError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not IMAGE_DIGEST.fullmatch(args.worker_image):
+        raise SystemExit("--worker-image must be an immutable sha256 digest reference")
+    if not 60 <= args.timeout_seconds <= 7200:
+        raise SystemExit("--timeout-seconds must be between 60 and 7200")
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    read_token = os.environ.get("AGENTSTORM_RESULT_READ_TOKEN", "")
+    if not api_key or not read_token:
+        raise SystemExit("OPENAI_API_KEY and AGENTSTORM_RESULT_READ_TOKEN are required")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    prefix = f"sreoc{timestamp}"
+    dataset_name = prefix + "-dataset"
+    scenario_name = prefix + "-scenario"
+    secret_name = prefix + "-provider"
+    kube = Kubernetes(args.kube_context, args.namespace)
+    reader = ResultReader(args.result_api_url, read_token)
+    try:
+        prepare_output(args.output)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    created_runs: list[str] = []
+    runs: list[dict[str, Any]] = []
+    cases: list[dict[str, Any]] = []
+    stopped_for_budget = False
+    error: str | None = None
+    metadata: dict[str, Any] = {}
+    try:
+        metadata = cluster_metadata(
+            kube, args.worker_image, prefix, runtime_code=RUNTIME_CODE
+        )
+        kube.apply(
+            config_map(dataset_name, args.namespace, "cases.jsonl", DATASET.read_text(encoding="utf-8"))
+        )
+        kube.apply(
+            config_map(
+                scenario_name,
+                args.namespace,
+                "scenario.json",
+                json.dumps(scenario_document(), sort_keys=True, separators=(",", ":")),
+            )
+        )
+        kube.install_api_key(secret_name, api_key)
+        spent = Decimal(0)
+        for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
+            for sequence, workers in enumerate(order, start=1):
+                if spent >= SPEND_STOP_USD:
+                    stopped_for_budget = True
+                    raise BenchmarkError("USD 8 recorded-cost stop reached before the next run")
+                name = f"{prefix}-r{round_index}s{sequence}w{workers}"
+                resource = compatible_run_resource(
+                    name,
+                    args.namespace,
+                    dataset_name,
+                    scenario_name,
+                    secret_name,
+                    args.worker_image,
+                    workers,
+                    args.model,
+                    args.base_url,
+                    args.input_price,
+                    args.output_price,
+                    False,
+                )
+                resource["metadata"]["annotations"] = {"round": str(round_index)}
+                created_runs.append(name)
+                record, result_cases = execute_run(kube, reader, resource, args.timeout_seconds)
+                runs.append(record)
+                cases.extend(result_cases)
+                if record["cost_usd"] is None:
+                    raise BenchmarkError("capacity cost is unknown; refusing to start another run")
+                spent += Decimal(record["cost_usd"])
+        if spent >= SPEND_STOP_USD:
+            stopped_for_budget = True
+            raise BenchmarkError("USD 8 recorded-cost stop reached before the reliability run")
+        reliability_name = prefix + "-reliability"
+        resource = compatible_run_resource(
+            reliability_name,
+            args.namespace,
+            dataset_name,
+            scenario_name,
+            secret_name,
+            args.worker_image,
+            16,
+            args.model,
+            args.base_url,
+            args.input_price,
+            args.output_price,
+            True,
+        )
+        created_runs.append(reliability_name)
+        record, result_cases = execute_run(kube, reader, resource, args.timeout_seconds)
+        runs.append(record)
+        cases.extend(result_cases)
+    except BenchmarkError as exc:
+        error = str(exc)
+    finally:
+        try:
+            kube.delete("secret", secret_name)
+        except BenchmarkError:
+            pass
+        if not args.keep_resources:
+            for name in created_runs:
+                try:
+                    kube.delete("agenttestrun", name)
+                except BenchmarkError:
+                    pass
+            for name in (dataset_name, scenario_name):
+                try:
+                    kube.delete("configmap", name)
+                except BenchmarkError:
+                    pass
+
+    complete = (
+        error is None
+        and len(runs) == 13
+        and sum(run["total"] for run in runs if run["kind"] == "capacity") == 384
+        and len(cases) == 416
+        and capacity_evidence_complete(runs)
+        and reliability_evidence_complete(runs, cases)
+    )
+    if error is None and not complete:
+        error = "canonical evidence validation failed"
+    manifest = {
+        "schema_version": "agentstorm-benchmark/v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "openai-compatible-keda",
+        "canonical": complete,
+        "complete": complete,
+        "error": error,
+        "stopped_for_budget": stopped_for_budget,
+        "spend_stop_usd": str(SPEND_STOP_USD),
+        "provider": "openai-compatible",
+        "protocol": "openai-chat-completions",
+        "model": args.model,
+        "endpoint": endpoint,
+        "worker_image": args.worker_image,
+        "source_revision": _revision(),
+        "adapter_entrypoint": ADAPTER,
+        "dataset_cases": 32,
+        "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+        "capacity_orders": CAPACITY_ORDERS,
+        "capacity_executions": sum(run["total"] for run in runs if run["kind"] == "capacity"),
+        "reliability_executions": sum(
+            run["total"] for run in runs if run["kind"] == "reliability"
+        ),
+        "pricing_usd_per_million_tokens": {
+            "input": args.input_price,
+            "output": args.output_price,
+        },
+        "run_configuration": {
+            "target": {
+                "provider": "openai-compatible",
+                "model": args.model,
+                "base_url": args.base_url,
+                "temperature": 0,
+                "max_tokens": 512,
+                "stream": False,
+                "adapter_entrypoint": ADAPTER,
+            },
+            "scheduling": {"strategy": "keda", "worker_gradients": [1, 4, 16, 32]},
+            "reliability": {"workers": 16, "seed": 42, "scenario": scenario_document()},
+        },
+        "environment": metadata,
+        "claims": claim_policy(
+            "openai-compatible-keda", canonical=complete, complete=complete
+        ),
+        "limitations": limitations("openai-compatible-keda", endpoint),
+    }
+    write_json(args.output / "manifest.json", manifest)
+    write_json(args.output / "runs.json", runs)
+    write_cases(args.output / "cases.jsonl.gz", cases)
+    if runs:
+        write_summary(args.output / "summary.csv", runs)
+    else:
+        (args.output / "summary.csv").write_text("", encoding="utf-8")
+    (args.output / "REPORT.md").write_text(render_report(manifest, runs), encoding="utf-8")
+    scan_secrets(args.output, (api_key, read_token))
+    write_checksums(args.output)
+    if not complete:
+        raise SystemExit(error or "canonical benchmark is incomplete")
+
+
+if __name__ == "__main__":
+    main()

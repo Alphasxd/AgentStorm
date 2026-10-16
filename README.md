@@ -18,9 +18,10 @@ single-prompt benchmark.
 > resource admission, and distributed Provider limits in `v0.5.0-alpha.1`. M6 adds
 > trusted Adapter plugins, a 32-incident SRE Agent workload, Agent-call accounting, Helm packaging,
 > and reproducible benchmark tooling. M6 is implemented by the stable `v0.6.0` artifacts and a
-> checksummed, no-cost validation of the complete Agent lifecycle. Real-Provider performance work is
-> tracked after v0.6; fake executions never support throughput, latency, cost, speedup, or efficiency
-> claims.
+> checksummed, no-cost validation of the complete Agent lifecycle. The post-v0.6 harness can run that
+> same SRE protocol through an OpenAI-compatible endpoint. No domestic-cloud or self-hosted result
+> has been collected, so this repository still supports no throughput, latency, cost, speedup, or
+> efficiency claim.
 
 ## Why this project
 
@@ -42,7 +43,8 @@ engineering questions that appear after a workflow becomes a service:
 - Dataset readiness checks and Secret-based API key injection.
 - Required provider Secret/key readiness gating before worker creation.
 - Python worker with bounded asynchronous concurrency.
-- No-cost deterministic `fake` provider and optional OpenAI Agents SDK adapter.
+- No-cost deterministic `fake` provider, optional OpenAI Agents SDK adapter, and an
+  OpenAI-compatible chat/tool provider configured by pinned model, base URL, and Secret-injected API key.
 - JSONL case results with exact/contains/regex/JSON Schema/tool-path/latency/Python assertions.
 - Explicit immutable Provider price snapshots with fixed-precision case, run, and comparison cost.
 - Threshold-based process exit codes suitable for CI and Kubernetes Job status.
@@ -118,6 +120,19 @@ make benchmark-fake
 The committed [v0.6.0 fake validation evidence](benchmarks/sre/results/v0.6.0-fake-validation/REPORT.md)
 contains 416 case histories. It records execution shape, model/tool-call accounting, assertions,
 retries, and failure categories; performance fields are deliberately omitted.
+
+Exercise the same protocol through the OpenAI-compatible adapter and a local mock server. This path
+spends nothing and is safe for CI:
+
+```bash
+make benchmark-compatible-mock
+```
+
+`make sre-compatible-mock` runs one 32-case smoke pass. Both write checksummed artifacts under
+`.out/` and mark them `canonical=false`. A real endpoint is a separate, explicit command documented
+in [OpenAI-compatible provider](docs/openai-compatible.md) and
+[SRE benchmark](benchmarks/sre/README.md). It requires `AGENTSTORM_ALLOW_PROVIDER_SPEND=1`, a pinned
+model, and a price snapshot. No real result is committed here.
 
 Results are written to:
 
@@ -409,6 +424,11 @@ The factory context contains only provider, model, and base URL. It never receiv
 pricing, or Kubernetes Secret objects through that interface; trusted plugin code still shares the
 Worker process environment and must already exist in the immutable Worker image.
 
+The same SRE factory also accepts `provider: openai-compatible` with a required `model` and
+`baseURL`. See [OpenAI-compatible provider](docs/openai-compatible.md) and
+[`config/samples/openai_compatible_sre.yaml`](config/samples/openai_compatible_sre.yaml). That sample
+uses a placeholder model and an invalid host; it is not a measured run.
+
 Set `spec.cancel: true` to request cancellation. Worker Jobs use `backoffLimit: 0` by default so
 an expensive Agent case is not silently replayed after a pod failure.
 
@@ -432,10 +452,12 @@ docs/               architecture, roadmap, and reference designs
 
 ## Development roadmap
 
-Milestones M0 through M6 are implemented. The next independent work item is a Provider-neutral
-real-model benchmark, starting with version-pinned OpenAI-compatible domestic cloud models and then
-self-hosted inference APIs. It reuses the fixed SRE protocol but is not part of the v0.6 release
-claim.
+Milestones M0 through M6 are implemented. The next item, a Provider-neutral real-model benchmark, has
+its harness in tree: one OpenAI-compatible Worker provider, pinned model and endpoint metadata, a
+required price snapshot, and no-cost mock validation of the fixed SRE protocol. A published
+domestic-cloud matrix and a self-hosted run with operator-attested hardware, quantization, inference
+server, and topology are still outstanding. Until one of those runs is collected, the harness is not
+a performance result and is not part of the v0.6 release claim.
 
 See [development plan](docs/development-plan.md), [architecture](docs/architecture.md), and
 [reference designs](docs/reference-designs.md) for the decision-complete design.

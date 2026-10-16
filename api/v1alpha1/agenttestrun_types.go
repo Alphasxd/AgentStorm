@@ -17,8 +17,8 @@ const (
 )
 
 type AgentTargetSpec struct {
-	// Provider selects a worker adapter. The built-in adapters are fake and openai-agents.
-	// +kubebuilder:validation:Enum=fake;openai-agents
+	// Provider selects a worker adapter. Built-in adapters are fake, openai-agents, and openai-compatible.
+	// +kubebuilder:validation:Enum=fake;openai-agents;openai-compatible
 	Provider string `json:"provider"`
 	// Model is passed to the provider. It may be empty for the fake provider.
 	Model string `json:"model,omitempty"`

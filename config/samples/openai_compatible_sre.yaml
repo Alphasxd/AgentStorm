@@ -1,0 +1,34 @@
+# Example only. Replace model, baseURL, and the price snapshot with the pinned
+# endpoint you will actually call. This manifest contains no credential values.
+# Omit apiKeySecretRef only for an inference server that does not require a bearer token.
+apiVersion: agentstorm.io/v1alpha1
+kind: AgentTestRun
+metadata:
+  name: sre-openai-compatible
+  namespace: agentstorm-system
+spec:
+  target:
+    provider: openai-compatible
+    model: pinned-model-id
+    baseURL: https://example.invalid/compatible-mode/v1
+    adapterEntrypoint: agentstorm_worker.benchmarks.sre:create_adapter
+    apiKeySecretRef:
+      name: provider-credentials
+      key: api-key
+    pricing:
+      inputUSDPerMillionTokens: "1"
+      outputUSDPerMillionTokens: "2"
+  workload:
+    datasetRef:
+      name: sre-incidents
+      key: cases.jsonl
+    parallelism: 1
+    concurrencyPerWorker: 1
+    iterations: 1
+    timeoutSeconds: 1800
+  evaluation:
+    minSuccessRate: 1
+    maxErrorRate: 0
+  runner:
+    image: ghcr.io/alphasxd/agentstorm-worker:dev
+    imagePullPolicy: IfNotPresent
