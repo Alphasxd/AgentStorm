@@ -101,9 +101,11 @@ cap in the Result API when enabling it. See [event-driven scheduling](scheduling
 
 ## Public Kubernetes stack
 
-`config/results` composes the namespace-scoped controller, single-replica PostgreSQL and MinIO,
-the public Result API image, and restrictive NetworkPolicies. All container images are pinned to
-immutable multi-architecture digests. The overlay deliberately contains no credentials; create
+`config/results` composes the namespace-scoped controller, single-replica PostgreSQL, digest-pinned
+Silo object storage, the public Result API image, and restrictive NetworkPolicies. All container
+images are pinned to immutable multi-architecture digests. Silo serves the S3 API on the existing
+`agentstorm-minio:9000` Service, and the StatefulSet keeps the `/minio/health/ready` and
+`/minio/health/live` probes. The overlay deliberately contains no credentials; create
 `agentstorm-result-storage` and `agentstorm-result-auth` in `agentstorm-system` before applying it.
 See the released durable result-stack quickstart in the README for the required Secret keys.
 
@@ -113,7 +115,7 @@ CNI-specific policy extensions for their environment.
 
 ## Local Kubernetes stack
 
-`config/dev/results` is a development-only namespace-scoped overlay. It runs PostgreSQL and MinIO
+`config/dev/results` is a development-only namespace-scoped overlay. It runs PostgreSQL and Silo
 with persistent volumes, starts the Result API from `agentstorm-result-api:dev`, and configures the
 controller to send workers to the in-cluster service. The overlay deliberately does not contain
 credentials; create `agentstorm-result-storage` and `agentstorm-result-auth` Secrets before applying
