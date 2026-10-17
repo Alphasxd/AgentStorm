@@ -189,6 +189,8 @@ class SREFakeAdapter:
 SRE_COMPATIBLE_TEMPERATURE = 0
 SRE_COMPATIBLE_MAX_OUTPUT_TOKENS = 512
 SRE_COMPATIBLE_MAX_MODEL_CALLS = 8
+# Passed to urllib as the timeout for each socket operation. It is not a
+# deadline for the whole HTTP request.
 SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS = 120
 # Same allowance the adapter uses when a call returns no usage. It is not a
 # request cap. See largest_scripted_request_tokens().
@@ -305,11 +307,12 @@ def _tool_message(call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compatible_tool_schemas() -> list[dict[str, Any]]:
+def _compatible_tools() -> list[Any]:
+    """The four read-only SRE tools, shared by the factory and request measurement."""
     from ..adapters.openai_compatible import ChatTool
 
     string = {"type": "string"}
-    tools = [
+    return [
         ChatTool(
             "get_incident",
             "Read one synthetic incident by id.",
@@ -335,7 +338,10 @@ def _compatible_tool_schemas() -> list[dict[str, Any]]:
             lookup_runbook,
         ),
     ]
-    return [tool.schema() for tool in tools]
+
+
+def _compatible_tool_schemas() -> list[dict[str, Any]]:
+    return [tool.schema() for tool in _compatible_tools()]
 
 
 def _unwrap_json_fence(output: str) -> str:
@@ -409,40 +415,13 @@ def _create_openai_adapter(context: AdapterFactoryContext) -> AgentAdapter:
 
 
 def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAdapter:
-    from ..adapters.openai_compatible import ChatTool, OpenAICompatibleAdapter
+    from ..adapters.openai_compatible import OpenAICompatibleAdapter
 
-    string = {"type": "string"}
-    tools = [
-        ChatTool(
-            "get_incident",
-            "Read one synthetic incident by id.",
-            _tool_schema({"incident_id": string}, ["incident_id"]),
-            get_incident,
-        ),
-        ChatTool(
-            "query_metrics",
-            "Read synthetic service metrics for a window.",
-            _tool_schema({"service": string, "window": string}, ["service", "window"]),
-            query_metrics,
-        ),
-        ChatTool(
-            "search_logs",
-            "Read synthetic service logs for a window.",
-            _tool_schema({"service": string, "window": string}, ["service", "window"]),
-            search_logs,
-        ),
-        ChatTool(
-            "lookup_runbook",
-            "Read the synthetic runbook for an error signature.",
-            _tool_schema({"error_signature": string}, ["error_signature"]),
-            lookup_runbook,
-        ),
-    ]
     adapter = OpenAICompatibleAdapter(
         model=context.model,
         base_url=context.base_url,
         instructions=_COMPATIBLE_INSTRUCTIONS,
-        tools=tools,
+        tools=_compatible_tools(),
         max_model_calls=SRE_COMPATIBLE_MAX_MODEL_CALLS,
         request_timeout_seconds=SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
         request_fields={

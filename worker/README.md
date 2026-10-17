@@ -40,7 +40,8 @@ The `openai-compatible` provider is a separate standard-library chat-completions
 `target.model` and `target.baseURL`, appends `/chat/completions`, and sends a bearer token only when
 `OPENAI_API_KEY` is non-empty. It does not import the Agents SDK. The bundled SRE factory accepts
 `fake`, `openai-agents`, and `openai-compatible`; the compatible path pins temperature 0 and
-`max_tokens` 512 for that benchmark only.
+`max_tokens` 512 for that benchmark only. The generic adapter sends no `max_tokens`. A failed
+call on that path is priced at `UNKNOWN_CALL_OUTPUT_TOKENS` (8192 output tokens).
 
 `target.adapterEntrypoint` may select a trusted `module:function` factory already installed in the
 Worker image. Its factory context contains only provider, model, and base URL; no API key, price,
@@ -51,7 +52,10 @@ downloaded plugins are unsupported.
 
 Attempt and case results include `model_call_count` and `tool_call_count`. Model calls remain `null`
 when a public SDK usage object cannot prove the value; tool calls come from the provider-independent
-lifecycle. The bundled `agentstorm_worker.benchmarks.sre:create_adapter` demonstrates a 32-incident
+lifecycle. For `openai-compatible`, `model_call_count` is the number of completed responses. A
+failed call the provider may already have accepted is omitted from that count and recorded on the
+adapter response as `agentstorm.usage.unknown_calls`. The bundled
+`agentstorm_worker.benchmarks.sre:create_adapter` demonstrates a 32-incident
 four-tool Agent with matching fake, OpenAI Agents SDK, and OpenAI-compatible execution paths.
 
 When `AGENTSTORM_RESULT_API_URL` is set, the worker validates the complete dataset, registers the run

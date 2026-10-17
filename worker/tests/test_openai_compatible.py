@@ -17,6 +17,7 @@ from agentstorm_worker.adapters import create_adapter
 from agentstorm_worker.adapters.base import ToolLifecycleEvent
 from agentstorm_worker.adapters.openai_compatible import (
     UNKNOWN_CALL_INPUT_TOKENS,
+    UNKNOWN_CALL_OUTPUT_TOKENS,
     ChatTool,
     OpenAICompatibleAdapter,
     validate_base_url,
@@ -557,6 +558,30 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
         self.assertTrue(raised.exception.usage_complete)
         self.assertEqual(raised.exception.response.input_tokens, UNKNOWN_CALL_INPUT_TOKENS)
         self.assertEqual(raised.exception.response.output_tokens, 32)
+        self.assertEqual(
+            raised.exception.response.metadata["agentstorm.usage.unknown_calls"], 1
+        )
+
+    def test_missing_max_tokens_charges_the_named_output_allowance(self) -> None:
+        self.assertGreater(UNKNOWN_CALL_OUTPUT_TOKENS, 512)
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test",
+            f"http://127.0.0.1:{port}/v1",
+            api_key="",
+            request_timeout_seconds=0.2,
+        )
+        with self.assertRaises(ExecutionError) as raised:
+            asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
+        self.assertEqual(raised.exception.code, "connection_error")
+        self.assertEqual(raised.exception.response.model_call_count, 0)
+        self.assertEqual(raised.exception.response.output_tokens, UNKNOWN_CALL_OUTPUT_TOKENS)
+        self.assertEqual(
+            raised.exception.response.metadata["agentstorm.usage.unknown_calls"], 1
+        )
 
     def test_rejects_credential_and_method_urls(self) -> None:
         with self.assertRaisesRegex(ValueError, "credentials"):

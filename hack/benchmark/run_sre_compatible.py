@@ -73,8 +73,10 @@ DATASET_CASES = 32
 UNPINNED_MODELS = {"latest", "auto", "default"}
 PRICE = re.compile(r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$")
 _FIELD = re.compile(r"^[^\r\n]{1,512}$")
-# Two reliability attempts must finish inside the case timeout, including every
-# per-call HTTP timeout, so a case deadline cannot cancel a paid request.
+# urllib's timeout applies to each socket operation, not the whole HTTP request.
+# The case timeout is still set above two reliability attempts times eight calls
+# times that socket timeout, plus a margin. One request can outlast a single
+# 120 second interval when more than one socket operation uses the timeout.
 REAL_CASE_TIMEOUT_SECONDS = (
     2 * SRE_COMPATIBLE_MAX_MODEL_CALLS * SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS + 180
 )
@@ -160,6 +162,11 @@ def _kubernetes_unreachable(host: str) -> bool:
         address = ipaddress.ip_address(normalized)
     except ValueError:
         return False
+    # Before Python 3.13, IPv6Address.is_loopback is only ::1. An IPv4-mapped
+    # address such as ::ffff:127.0.0.1 is loopback only through ipv4_mapped.
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
     return address.is_loopback or address.is_unspecified
 
 
@@ -195,7 +202,7 @@ def assert_case_timeout_covers_calls(timeout_seconds: int, attempts: int) -> Non
     needed = attempts * SRE_COMPATIBLE_MAX_MODEL_CALLS * SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS
     if needed >= timeout_seconds:
         raise BenchmarkError(
-            "case timeout must exceed max attempts times model calls times the per-call timeout"
+            "case timeout must exceed max attempts times model calls times the per-socket timeout"
         )
 
 

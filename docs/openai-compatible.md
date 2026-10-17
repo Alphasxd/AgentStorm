@@ -58,20 +58,28 @@ the run manifest.
 HTTP status maps onto the existing error taxonomy: `429` is retry-safe and does not count as a
 completed model call; `408`, `5xx`, redirects, timeouts, and connection failures are ambiguous. A
 connection reset while reading a success or error response is the same ambiguous `connection_error`.
-The failed call is not counted as a completion. Tokens from earlier calls in that attempt stay.
-The missing call is priced at an input allowance of 8192 tokens and at `max_tokens` when the
-request sets it, otherwise 512. `usage_complete` stays true, so one transient failure does not
-null the case cost. That price is an estimate for the missing call, not a meter reading, and the
-endpoint does not enforce the input allowance. A `200` that omits usage, or a malformed `200`,
+`model_call_count` is the number of calls that returned a response the adapter finished. A failed
+call is omitted from that count even when the provider may already have accepted it. The adapter
+records those omitted calls on the response as `agentstorm.usage.unknown_calls`. That marker is
+not added to `model_call_count`, and stored attempt and case results keep the completed-call count.
+Tokens from earlier calls in that attempt stay. The missing call is priced at an input allowance
+of 8192 tokens (`UNKNOWN_CALL_INPUT_TOKENS`) and at `max_tokens` when the request sets a positive
+integer. When the request omits `max_tokens`, as the generic adapter does, the output charge is
+the named constant `UNKNOWN_CALL_OUTPUT_TOKENS` (8192). That allowance is larger than the
+512-token SRE benchmark cap because an uncapped completion may already have generated more than
+512 tokens. It is still an estimate, not a meter reading, and it can be below a model's maximum
+output. The endpoint does not enforce either allowance. `usage_complete` stays true, so one
+transient failure does not null the case cost. A `200` that omits usage, or a malformed `200`,
 still leaves the attempt unpriced. Token totals are not stored as zero in those cases.
 
-Cancelling the in-flight task re-raises `CancelledError`. urllib's timeout still bounds each
-socket operation, and cancelling the task does not interrupt a socket call that is already
+Cancelling the in-flight task re-raises `CancelledError`. The urllib timeout, 120 seconds on the
+SRE factory, applies to each socket operation, such as connect, send, or read. It does not bound
+the whole HTTP request. Cancelling the task does not interrupt a socket call that is already
 blocked. The runner records the run as cancelled rather than as a provider timeout. A tool
 `ExecutionError` closes its lifecycle span with the tool error code before it propagates. Real
 benchmark runs set the case timeout to 2100 seconds, above two reliability attempts times eight
-model calls times the 120 second per-call timeout, so those calls finish or time out inside the
-case.
+model calls times that 120 second socket timeout. One request can still outlast a single 120
+second interval when more than one socket operation uses the timeout.
 
 ## Endpoint examples
 
@@ -86,8 +94,10 @@ These are operator-pinned examples, not defaults and not measured results:
 The default worker NetworkPolicy allows egress to TCP 443 and DNS. A self-hosted server on another
 port needs an explicit policy. Do not widen worker egress to arbitrary ports in the default profile.
 The Kubernetes benchmark runner rejects loopback and unspecified addresses, including `localhost`
-with a trailing dot, `0.0.0.0`, and `::`. A Worker pod cannot treat the operator laptop, or an
-address that is not a remote host, as the endpoint.
+with a trailing dot, `0.0.0.0`, `::`, and IPv4-mapped forms such as `::ffff:127.0.0.1` and
+`::ffff:0.0.0.0`. Python before 3.13 does not report those mapped addresses as loopback, so the
+check uses `ipv4_mapped`. A Worker pod cannot treat the operator laptop, or an address that is
+not a remote host, as the endpoint.
 
 ## What this provider is not
 

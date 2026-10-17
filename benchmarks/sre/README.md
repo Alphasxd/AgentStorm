@@ -76,7 +76,7 @@ http://host:8000/v1
 
 The default worker NetworkPolicy allows TCP 443 and DNS. A server on another port needs its own
 policy. The Kubernetes runner rejects loopback and unspecified addresses, including a trailing DNS
-dot, `0.0.0.0`, and `::`.
+dot, `0.0.0.0`, `::`, and IPv4-mapped forms such as `::ffff:127.0.0.1`.
 
 ### No-cost mock
 
@@ -116,9 +116,12 @@ use an allowance of 8192 per call, which is above the largest scripted fixture r
 assistant history those calls can resend. The endpoint does not enforce that allowance. The
 runner refuses to start when recorded spend plus the estimate would pass USD 8. A timeout, `5xx`,
 or connection failure prices that one call at the same allowance and keeps earlier tokens, so the
-case cost stays populated. The case timeout is 2100 seconds,
-above two attempts times eight calls times the 120 second per-call timeout. A completed local
-matrix can report in-process duration and token cost for that pinned endpoint. It is `canonical=false` and is
+case cost stays populated. `model_call_count` in the run artifacts stays at the number of completed
+calls. The adapter response records the failed call as `agentstorm.usage.unknown_calls` because the
+provider may already have accepted it. The case timeout is 2100 seconds, above two attempts times
+eight calls times the 120 second urllib socket timeout. That timeout applies to each socket
+operation, not to the whole HTTP request. A completed local matrix can report in-process duration
+and token cost for that pinned endpoint. It is `canonical=false` and is
 not a KEDA or speedup result. An incomplete matrix writes a report with no performance table and
 exits non-zero.
 
