@@ -21,6 +21,10 @@ directory and verifies CRD defaults, CEL immutability, and the status subresourc
 server. Use `make e2e-local` for the full no-cost local cluster path.
 
 The E2E script builds and loads `agentstorm-controller:dev` and `agentstorm-worker:dev` by default.
+On kind it retries once when the controller log contains `error retrieving resource lock` and
+either `kubectl rollout status` times out or another wait times out while a worker Job is already
+Complete. The first diagnostics stay in the log, then the script deletes and recreates that kind
+cluster. Any other failure stops immediately.
 Set `CONTROLLER_IMAGE` and `WORKER_IMAGE` to test other references. For already-published images, set
 `SKIP_IMAGE_BUILD=true` and `LOAD_LOCAL_IMAGES=false` so kind pulls the requested references instead
 of loading local Docker images.

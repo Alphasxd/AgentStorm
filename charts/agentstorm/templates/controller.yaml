@@ -8,6 +8,16 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: {{ .Values.controller.replicaCount }}
+  {{- if .Values.controller.leaderElection }}
+  # /readyz passes only for the elected process. maxSurge 0 and maxUnavailable 1
+  # remove the current pod before the replacement is created, and stay a
+  # RollingUpdate so a server-side apply upgrade can replace the default surge.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "agentstorm.name" . }}

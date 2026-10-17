@@ -267,6 +267,13 @@ CLUSTER_PROVIDER=kind make e2e-local
 ```
 
 The script refuses arbitrary Kubernetes contexts. Set `KEEP_E2E_RESOURCES=false` for CI cleanup.
+On kind, one failed attempt is retried when the controller log contains
+`error retrieving resource lock` and either `kubectl rollout status` times out or another wait
+times out while a worker Job is already Complete. `rollout status` prints
+`error: timed out waiting for the condition`; other `kubectl wait` timeouts append the resource
+name and still require a Complete Job. The script prints that attempt's diagnostics, deletes the
+kind cluster, creates a new one, reuses the local images when they are already built, and runs the
+E2E once more. A second failure, every other error, and OrbStack clusters stop immediately.
 For a single-namespace runtime with Role/RoleBinding and worker NetworkPolicies, use:
 
 ```bash
