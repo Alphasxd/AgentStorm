@@ -15,6 +15,12 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
 
 ### Fixed
 
+- A successful in-call HTTP 429 retry keeps the last allowlisted provider code and the in-call
+  retry count on the case in `cases.jsonl`. Run `retry_count` and `rate_limited_attempts` still
+  count case restarts only. `in_call_retry_count` counts the HTTP 429 responses retried inside a
+  chat call. The runner warns when `httpRetryAttempts` times `httpRetryMaxWaitSeconds` per chat
+  call, across the case attempts and model calls, can reach the 2100 second case timeout.
+
 - SRE diagnosis fields (`root_cause`, `severity`, `recommended_action`, `evidence`, `runbook`) are
   returned by `lookup_runbook`, and both compatible instructions tell the model to copy them.
   `evidence` is a JSON array of strings. A test requires every schema constant to be an exact

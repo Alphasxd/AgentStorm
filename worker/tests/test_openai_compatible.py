@@ -865,7 +865,61 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
         self.assertEqual(result.tool_path, ["lookup"])
         self.assertEqual(result.attempts[0].provider_error_code, "1302")
         self.assertEqual(result.attempts[0].rate_limit_events, 1)
+        self.assertEqual(result.provider_error_code, "1302")
+        self.assertEqual(result.in_call_retry_count, 1)
         self.assertEqual(calls["n"], 4)
+
+    def test_successful_in_call_429_keeps_the_last_provider_code_on_the_case(self) -> None:
+        calls = {"n": 0}
+
+        def respond(
+            headers: Any, body: dict[str, Any]
+        ) -> tuple[int, dict[str, Any], dict[str, str]]:
+            del headers, body
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return 429, {"error": {"code": 1305, "message": "overloaded"}}, {}
+            if calls["n"] == 2:
+                return 429, {"error": {"code": "1302", "message": "concurrency"}}, {}
+            return 200, _completion("done", {"prompt_tokens": 4, "completion_tokens": 1}), {}
+
+        base_url = _serve_with_headers(self, respond)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": base_url,
+                            "pricing": {
+                                "inputUSDPerMillionTokens": "1",
+                                "outputUSDPerMillionTokens": "2",
+                            },
+                        },
+                        "workload": {"concurrency": 1, "iterations": 1, "timeout_seconds": 30},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(path)
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test", base_url, api_key="", retry_sleep=_no_sleep
+        )
+        result = asyncio.run(
+            WorkloadRunner(config, adapter).execute([TestCase(case_id="INC-001", prompt="hello")])
+        )[0][0]
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.attempts), 1)
+        self.assertEqual(result.attempts[0].error_code, "")
+        self.assertEqual(result.attempts[0].provider_error_code, "1302")
+        self.assertEqual(result.attempts[0].rate_limit_events, 2)
+        self.assertEqual(result.provider_error_code, "1302")
+        self.assertEqual(result.in_call_retry_count, 2)
+        self.assertEqual(calls["n"], 3)
+        self.assertNotIn("overloaded", json.dumps(result.to_dict()))
+        self.assertNotIn("concurrency", json.dumps(result.to_dict()))
 
     def test_malformed_completion_is_ambiguous_and_content_free(self) -> None:
         def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:

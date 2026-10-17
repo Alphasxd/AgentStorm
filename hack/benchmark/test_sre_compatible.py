@@ -9,10 +9,12 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openai_compatible_mock import diagnosis, load_fixtures, scripted_completion, serve
+from agentstorm_worker.models import AttemptResult, CaseResult
 from agentstorm_worker.benchmarks.sre import (
     SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE,
     SRE_COMPATIBLE_MAX_MODEL_CALLS,
@@ -20,10 +22,12 @@ from agentstorm_worker.benchmarks.sre import (
     largest_scripted_request_tokens,
 )
 from agentstorm_worker.config import load_dataset
+from run_sre_benchmark import case_record, run_record
 from run_sre_compatible import (
     REAL_CASE_TIMEOUT_SECONDS,
     SMOKE_CASE_IDS,
     BenchmarkError,
+    case_timeout_retry_warning,
     claim_policy,
     confirm_zero_price,
     execute_local,
@@ -44,6 +48,76 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class EndpointMetadataTest(unittest.TestCase):
+    def test_in_call_retries_are_recorded_apart_from_case_restarts(self) -> None:
+        attempt = AttemptResult(
+            number=1,
+            latency_ms=1,
+            outcome="succeeded",
+            provider_error_code="1305",
+            rate_limit_events=2,
+        )
+        case = CaseResult(
+            case_id="INC-001",
+            iteration=1,
+            success=True,
+            latency_ms=1,
+            attempts=[attempt],
+            provider_error_code="1305",
+            in_call_retry_count=2,
+        )
+        recorded = case_record("run", case)
+        self.assertEqual(recorded["provider_error_code"], "1305")
+        self.assertEqual(recorded["in_call_retry_count"], 2)
+        self.assertEqual(recorded["error_code"], None)
+        self.assertEqual(recorded["attempts"][0]["provider_error_code"], "1305")
+        self.assertEqual(recorded["attempts"][0]["rate_limit_events"], 2)
+        summary = SimpleNamespace(
+            total=1,
+            succeeded=1,
+            failed=0,
+            duration_ms=1,
+            model_call_count=1,
+            tool_call_count=0,
+            model_calls_per_successful_agent=1,
+            tool_calls_per_successful_agent=0,
+            input_tokens=1,
+            output_tokens=1,
+            cost_usd="0",
+        )
+        run = run_record("run", "capacity", 1, 1, [case], summary)
+        self.assertEqual(run["retry_count"], 0)
+        self.assertEqual(run["rate_limited_attempts"], 0)
+        self.assertEqual(run["in_call_retry_count"], 2)
+
+    def test_case_timeout_warns_when_429_waits_can_exceed_it(self) -> None:
+        self.assertIsNone(
+            case_timeout_retry_warning(
+                REAL_CASE_TIMEOUT_SECONDS,
+                1,
+                http_retry_attempts=3,
+                http_retry_max_wait_seconds=8,
+            )
+        )
+        full = case_timeout_retry_warning(
+            REAL_CASE_TIMEOUT_SECONDS,
+            2,
+            http_retry_attempts=3,
+            http_retry_max_wait_seconds=8,
+        )
+        self.assertIsNotNone(full)
+        assert full is not None
+        self.assertIn("3 x 8s", full)
+        free_tier = case_timeout_retry_warning(
+            REAL_CASE_TIMEOUT_SECONDS,
+            1,
+            http_retry_attempts=8,
+            http_retry_max_wait_seconds=120,
+        )
+        self.assertIsNotNone(free_tier)
+        assert free_tier is not None
+        self.assertIn("8 x 120s", free_tier)
+        self.assertIn("2100", free_tier)
+
     def test_domestic_endpoint_requires_https_price_and_pinned_model(self) -> None:
         endpoint = validate_endpoint(
             model="qwen2.5-72b-instruct",

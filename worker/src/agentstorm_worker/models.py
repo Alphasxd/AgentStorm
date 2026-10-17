@@ -98,6 +98,7 @@ class CaseResult:
     output_cost_usd: str | None = None
     cost_usd: str | None = None
     provider_error_code: str = ""
+    in_call_retry_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

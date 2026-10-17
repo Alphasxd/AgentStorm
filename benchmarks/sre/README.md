@@ -130,7 +130,13 @@ case cost stays populated. `model_call_count` in the run artifacts stays at the 
 calls. The adapter response records the failed call as `agentstorm.usage.unknown_calls` because the
 provider may already have accepted it. The case timeout is 2100 seconds, above two attempts times
 eight calls times the 120 second urllib socket timeout. That timeout applies to each socket
-operation, not to the whole HTTP request. A completed local matrix can report in-process duration
+operation, not to the whole HTTP request, and it does not include HTTP 429 sleeps. Each chat call
+can wait `httpRetryAttempts` times `httpRetryMaxWaitSeconds` (8 times 120 seconds is 960 seconds
+per call). The runner warns, and records the warning on the manifest, when that budget plus the
+per-socket time can reach the case timeout. `runs.json` `retry_count` and `rate_limited_attempts`
+count case restarts only. `in_call_retry_count` counts HTTP 429 responses retried inside a chat
+call. `cases.jsonl` stores that count and the last allowlisted provider code, such as `1305`, on
+the case even when the retried call succeeds. A completed local matrix can report in-process duration
 and token cost for that pinned endpoint. It is `canonical=false` and is
 not a KEDA or speedup result. An incomplete matrix writes a report with no performance table and
 exits non-zero.

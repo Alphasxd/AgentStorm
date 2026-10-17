@@ -92,7 +92,12 @@ characters matching `[A-Za-z0-9_.-]`, and it is not the API key, the adapter kee
 `agentstorm.provider.error_code`. Message text is dropped. The Result API `error_code` stays the
 harness reason, such as `rate_limited`, because that field does not accept provider codes such as
 `1305`. Local attempt records also store that provider code, the rate-limit event count, and
-`finish_reason` when it matches the same allowlist.
+`finish_reason` when it matches the same allowlist. A 429 that is retried inside the chat call
+and then succeeds still keeps the last allowlisted code on the attempt and on the case, with
+`in_call_retry_count` equal to the number of those 429 responses. Run records keep
+`rate_limited_attempts` and `retry_count` for case restarts only. `in_call_retry_count` on the
+run is the sum of those in-call 429 responses. The Result API `retry_count` is the case-restart
+count and does not include in-call retries.
 
 `finish_reason=length` with no tool call and empty or whitespace content is
 `provider/output_truncated`. It is not a final answer and it is not retried. A non-empty truncated
@@ -122,8 +127,14 @@ the whole HTTP request. Cancelling the task does not interrupt a socket call tha
 blocked. The runner records the run as cancelled rather than as a provider timeout. A tool
 `ExecutionError` closes its lifecycle span with the tool error code before it propagates. Real
 benchmark runs set the case timeout to 2100 seconds, above two reliability attempts times eight
-model calls times that 120 second socket timeout. One request can still outlast a single 120
-second interval when more than one socket operation uses the timeout.
+model calls times that 120 second socket timeout. That check does not include HTTP 429 sleeps.
+Each chat call can wait up to `httpRetryAttempts` times `httpRetryMaxWaitSeconds` before the
+socket time is added. The real adapter sleeps at most one fewer time than `httpRetryAttempts`.
+When that budget plus the per-socket time can reach the case timeout, the runner prints a warning
+and records it on the manifest. The deadline can then cancel the case before the retry budget is
+spent. Raise `workload.timeoutSeconds` when the configured wait is longer than the 180 second
+margin, as with a free-tier cap of 8 attempts and 120 seconds. One request can still outlast a
+single 120 second interval when more than one socket operation uses the timeout.
 
 ## Endpoint examples
 
