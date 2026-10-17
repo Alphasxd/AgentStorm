@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from typing import Any
 
 from .base import (
     AdapterFactoryContext,
@@ -23,16 +24,29 @@ def create_adapter(
     model: str = "",
     base_url: str = "",
     adapter_entrypoint: str = "",
+    max_output_tokens: int | None = None,
+    request_fields: dict[str, Any] | None = None,
 ) -> AgentAdapter:
+    context = AdapterFactoryContext(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        max_output_tokens=max_output_tokens,
+        request_fields=dict(request_fields or {}),
+    )
     if adapter_entrypoint:
-        return _create_plugin_adapter(
-            adapter_entrypoint,
-            AdapterFactoryContext(provider=provider, model=model, base_url=base_url),
-        )
+        return _create_plugin_adapter(adapter_entrypoint, context)
     if provider == "fake":
         return FakeAdapter()
     if provider == "openai-compatible":
-        return OpenAICompatibleAdapter(model=model, base_url=base_url)
+        from .openai_compatible import validate_max_output_tokens, validate_request_fields
+
+        fields = validate_request_fields(
+            context.request_fields, reject_keys={"temperature", "max_tokens"}
+        )
+        if context.max_output_tokens is not None:
+            fields["max_tokens"] = validate_max_output_tokens(context.max_output_tokens)
+        return OpenAICompatibleAdapter(model=model, base_url=base_url, request_fields=fields)
     if provider == "openai-agents":
         from .openai_agents import OpenAIAgentsAdapter
 

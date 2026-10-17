@@ -181,7 +181,7 @@ class AdapterPluginTest(unittest.TestCase):
         )
         self.assertEqual(
             set(AdapterFactoryContext.__dataclass_fields__),
-            {"provider", "model", "base_url"},
+            {"provider", "model", "base_url", "max_output_tokens", "request_fields"},
         )
 
     def test_rejects_import_factory_and_return_failures_without_details(self) -> None:

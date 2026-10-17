@@ -40,11 +40,16 @@ from run_sre_compatible import (
     _revision,
     assert_case_timeout_covers_calls,
     claim_policy,
+    confirm_zero_price,
     limitations,
     render_report,
     require_spend_opt_in,
     reserve_benchmark_spend,
     validate_endpoint,
+)
+from agentstorm_worker.adapters.openai_compatible import (
+    validate_max_output_tokens,
+    validate_request_fields,
 )
 from run_sre_keda import (
     SPEND_STOP_USD,
@@ -85,19 +90,26 @@ def compatible_run_resource(
     input_price: str,
     output_price: str,
     reliability: bool,
+    max_tokens: int | None = None,
+    request_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    spec: dict[str, Any] = {
-        "target": {
-            "provider": "openai-compatible",
-            "model": model,
-            "baseURL": base_url,
-            "adapterEntrypoint": ADAPTER,
-            "apiKeySecretRef": {"name": api_secret, "key": "api-key"},
-            "pricing": {
-                "inputUSDPerMillionTokens": input_price,
-                "outputUSDPerMillionTokens": output_price,
-            },
+    target: dict[str, Any] = {
+        "provider": "openai-compatible",
+        "model": model,
+        "baseURL": base_url,
+        "adapterEntrypoint": ADAPTER,
+        "apiKeySecretRef": {"name": api_secret, "key": "api-key"},
+        "pricing": {
+            "inputUSDPerMillionTokens": input_price,
+            "outputUSDPerMillionTokens": output_price,
         },
+    }
+    if max_tokens is not None:
+        target["maxTokens"] = max_tokens
+    if request_fields:
+        target["requestFields"] = request_fields
+    spec: dict[str, Any] = {
+        "target": target,
         "workload": {
             "datasetRef": {"name": dataset_name, "key": "cases.jsonl"},
             "parallelism": 32,
@@ -131,6 +143,8 @@ def drive_until_budget(
     input_price: str,
     output_price: str,
     start: Callable[[str, int, int, int], dict[str, Any]],
+    *,
+    max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
     """Start capacity runs, then reliability, until the spend estimate cannot cover the next one.
 
@@ -146,7 +160,13 @@ def drive_until_budget(
         for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
             for sequence, workers in enumerate(order, start=1):
                 try:
-                    reserve_benchmark_spend(spent, input_price, output_price, 1)
+                    reserve_benchmark_spend(
+                        spent,
+                        input_price,
+                        output_price,
+                        1,
+                        max_output_tokens=max_output_tokens,
+                    )
                 except BenchmarkError:
                     stopped = True
                     raise
@@ -156,7 +176,13 @@ def drive_until_budget(
                     raise BenchmarkError("capacity cost is unknown; refusing to start another run")
                 spent += Decimal(record["cost_usd"])
         try:
-            reserve_benchmark_spend(spent, input_price, output_price, 2)
+            reserve_benchmark_spend(
+                spent,
+                input_price,
+                output_price,
+                2,
+                max_output_tokens=max_output_tokens,
+            )
         except BenchmarkError:
             stopped = True
             raise
@@ -185,9 +211,25 @@ def main() -> None:
     parser.add_argument("--topology", default="")
     parser.add_argument("--timeout-seconds", type=int, default=2400)
     parser.add_argument("--keep-resources", action="store_true")
+    parser.add_argument("--max-tokens", type=int, default=0)
+    parser.add_argument("--request-fields", default="")
+    parser.add_argument("--price-is-zero-confirmed", action="store_true")
     args = parser.parse_args()
     try:
         require_spend_opt_in()
+        confirm_zero_price(args.input_price, args.output_price, args.price_is_zero_confirmed)
+        max_tokens = validate_max_output_tokens(
+            args.max_tokens or SRE_COMPATIBLE_MAX_OUTPUT_TOKENS
+        )
+        request_fields: dict[str, Any] = {}
+        if args.request_fields:
+            try:
+                parsed_fields = json.loads(args.request_fields)
+            except json.JSONDecodeError as exc:
+                raise BenchmarkError("--request-fields must be a JSON object") from exc
+            request_fields = validate_request_fields(
+                parsed_fields, reject_keys={"temperature", "max_tokens"}
+            )
         endpoint = validate_endpoint(
             model=args.model,
             base_url=args.base_url,
@@ -270,6 +312,8 @@ def main() -> None:
                 args.input_price,
                 args.output_price,
                 reliability,
+                max_tokens=max_tokens,
+                request_fields=request_fields or None,
             )
             if not reliability:
                 resource["metadata"]["annotations"] = {"round": str(round_index)}
@@ -279,7 +323,10 @@ def main() -> None:
             return record
 
         runs, error, stopped_for_budget = drive_until_budget(
-            args.input_price, args.output_price, start
+            args.input_price,
+            args.output_price,
+            start,
+            max_output_tokens=max_tokens,
         )
     except BenchmarkError as exc:
         error = str(exc)
@@ -319,6 +366,16 @@ def main() -> None:
         "error": error,
         "stopped_for_budget": stopped_for_budget,
         "spend_stop_usd": str(SPEND_STOP_USD),
+        "price_is_zero_confirmed": args.price_is_zero_confirmed
+        and Decimal(args.input_price) == 0
+        and Decimal(args.output_price) == 0,
+        "spend_guard": (
+            "confirmed-zero-price"
+            if args.price_is_zero_confirmed
+            and Decimal(args.input_price) == 0
+            and Decimal(args.output_price) == 0
+            else "recorded-cost-stop"
+        ),
         "provider": "openai-compatible",
         "protocol": "openai-chat-completions",
         "model": args.model,
@@ -343,7 +400,8 @@ def main() -> None:
                 "model": args.model,
                 "base_url": args.base_url,
                 "temperature": SRE_COMPATIBLE_TEMPERATURE,
-                "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+                "max_tokens": max_tokens,
+                "request_fields": request_fields,
                 "stream": False,
                 "adapter_entrypoint": ADAPTER,
             },

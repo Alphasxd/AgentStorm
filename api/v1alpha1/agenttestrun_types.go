@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -32,6 +34,15 @@ type AgentTargetSpec struct {
 	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
 	// Pricing snapshots the USD price used to calculate reproducible run cost.
 	Pricing *AgentPricingSpec `json:"pricing,omitempty"`
+	// MaxTokens overrides the compatible completion cap. Empty keeps the benchmark default of 512.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=131072
+	MaxTokens *int32 `json:"maxTokens,omitempty"`
+	// RequestFields is extra JSON merged into the chat completion body.
+	// Reserved keys, including temperature and max_tokens, are rejected.
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	RequestFields json.RawMessage `json:"requestFields,omitempty"`
 }
 
 type AgentPricingSpec struct {

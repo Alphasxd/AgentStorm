@@ -49,6 +49,11 @@ benchmark-compatible-local:
 		--input-price "$(INPUT_PRICE)" --output-price "$(OUTPUT_PRICE)" \
 		--model-version "$(MODEL_VERSION)" --inference-server "$(INFERENCE_SERVER)" \
 		--quantization "$(QUANTIZATION)" --hardware "$(HARDWARE)" --topology "$(TOPOLOGY)" \
+		$(if $(SHAPE),--shape $(SHAPE),) \
+		$(if $(CASES),--cases $(CASES),) \
+		$(if $(MAX_CONCURRENCY),--max-concurrency $(MAX_CONCURRENCY),) \
+		$(if $(MAX_TOKENS),--max-tokens $(MAX_TOKENS),) \
+		$(if $(filter 1 true TRUE yes YES,$(PRICE_IS_ZERO_CONFIRMED)),--price-is-zero-confirmed,) \
 		--output $(or $(OUTPUT),.out/benchmark-compatible-local)
 
 benchmark-compatible-keda:

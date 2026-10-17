@@ -272,6 +272,23 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	if err := kubernetesClient.Create(ctx, incomplete); !apierrors.IsInvalid(err) {
 		t.Fatalf("openai-compatible without baseURL error = %v, want Invalid", err)
 	}
+
+	sampled := validEnvtestRun(namespace.Name, "sampling")
+	maxTokens := int32(2048)
+	sampled.Spec.Target.Provider = "openai-compatible"
+	sampled.Spec.Target.Model = "glm-4.7-flash"
+	sampled.Spec.Target.BaseURL = "https://example.invalid/v4"
+	sampled.Spec.Target.MaxTokens = &maxTokens
+	sampled.Spec.Target.RequestFields = []byte(`{"thinking":{"type":"disabled"}}`)
+	if err := kubernetesClient.Create(ctx, sampled); err != nil {
+		t.Fatalf("create sampled AgentTestRun: %v", err)
+	}
+	zeroTokens := int32(0)
+	invalidTokens := validEnvtestRun(namespace.Name, "invalid-tokens")
+	invalidTokens.Spec.Target.MaxTokens = &zeroTokens
+	if err := kubernetesClient.Create(ctx, invalidTokens); !apierrors.IsInvalid(err) {
+		t.Fatalf("maxTokens 0 error = %v, want Invalid", err)
+	}
 }
 
 func validEnvtestRun(namespace, name string) *agentstormv1alpha1.AgentTestRun {

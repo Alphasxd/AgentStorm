@@ -79,17 +79,27 @@ async def search_logs(service: str, window: str) -> dict[str, Any]:
     }
 
 
-async def lookup_runbook(error_signature: str) -> dict[str, str]:
+async def lookup_runbook(error_signature: str) -> dict[str, Any]:
     _record("lookup_runbook", {"error_signature": error_signature})
     await _deterministic_delay(error_signature, "lookup_runbook")
     for incident in _INCIDENTS.values():
         if incident["error_signature"] == error_signature:
             return {
                 "error_signature": error_signature,
-                "runbook": incident["runbook"],
+                "root_cause": incident["root_cause"],
+                "severity": incident["severity"],
                 "recommended_action": incident["recommended_action"],
+                "evidence": _evidence(incident),
+                "runbook": incident["runbook"],
             }
     raise ValueError("unknown synthetic error signature")
+
+
+def _evidence(incident: dict[str, Any]) -> list[str]:
+    return [
+        f"metrics:{incident['metrics']['summary']}",
+        f"logs:{incident['error_signature']}",
+    ]
 
 
 def _diagnosis(incident: dict[str, Any]) -> dict[str, Any]:
@@ -98,10 +108,7 @@ def _diagnosis(incident: dict[str, Any]) -> dict[str, Any]:
         "root_cause": incident["root_cause"],
         "severity": incident["severity"],
         "recommended_action": incident["recommended_action"],
-        "evidence": [
-            f"metrics:{incident['metrics']['summary']}",
-            f"logs:{incident['error_signature']}",
-        ],
+        "evidence": _evidence(incident),
         "runbook": incident["runbook"],
     }
 
@@ -196,13 +203,26 @@ SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS = 120
 # request cap. See largest_scripted_request_tokens().
 SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE = UNKNOWN_CALL_INPUT_TOKENS
 
+_DIAGNOSIS_CONTRACT = (
+    "Return only a JSON object with keys incident_id, root_cause, severity, "
+    "recommended_action, evidence, and runbook. Copy incident_id from the user message. "
+    "Copy root_cause, severity, recommended_action, evidence, and runbook verbatim from "
+    "the lookup_runbook result. evidence is a JSON array of strings. Do not paraphrase "
+    "those fields and do not use Markdown."
+)
+
 _COMPATIBLE_INSTRUCTIONS = (
     "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
     "and window for both query_metrics and search_logs; those two calls may be made in "
     "either order or together. Call lookup_runbook with the exact error_signature returned "
-    "by search_logs. Do not repeat tools or call any other tool. Return only a JSON object "
-    "with keys incident_id, root_cause, severity, recommended_action, evidence, and runbook. "
-    "Do not use Markdown."
+    "by search_logs. Do not repeat tools or call any other tool. " + _DIAGNOSIS_CONTRACT
+)
+
+_AGENTS_INSTRUCTIONS = (
+    "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
+    "and window for both query_metrics and search_logs; those two calls may be made in "
+    "either order. Call lookup_runbook with the exact error_signature returned by logs. "
+    "Do not repeat tools or call any other tool. " + _DIAGNOSIS_CONTRACT
 )
 
 _OBJECT_SCHEMA = {"type": "object", "additionalProperties": False}
@@ -400,18 +420,30 @@ def _create_openai_adapter(context: AdapterFactoryContext) -> AgentAdapter:
         model=context.model,
         base_url=context.base_url,
         name="AgentStorm SRE diagnostic agent",
-        instructions=(
-            "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
-            "and window for both query_metrics and search_logs; those two calls may be made in "
-            "either order. Call lookup_runbook with the exact error_signature returned by logs. "
-            "Do not repeat tools or call any other tool. Return only the structured diagnosis."
-        ),
+        instructions=_AGENTS_INSTRUCTIONS,
         tools=tools,
         output_type=SREDiagnosis,
         model_settings=ModelSettings(reasoning=Reasoning(effort="none"), parallel_tool_calls=True),
         serialize_output=lambda value: value.model_dump_json(),
     )
     return _SRERecordingAdapter(adapter)
+
+
+def compatible_request_fields(context: AdapterFactoryContext) -> dict[str, Any]:
+    """Sampling fields for one compatible SRE run, including provider JSON."""
+    from ..adapters.openai_compatible import validate_max_output_tokens, validate_request_fields
+
+    max_tokens = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS
+    if context.max_output_tokens is not None:
+        max_tokens = validate_max_output_tokens(context.max_output_tokens)
+    extra = validate_request_fields(
+        context.request_fields, reject_keys={"temperature", "max_tokens"}
+    )
+    return {
+        "temperature": SRE_COMPATIBLE_TEMPERATURE,
+        "max_tokens": max_tokens,
+        **extra,
+    }
 
 
 def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAdapter:
@@ -424,10 +456,7 @@ def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAd
         tools=_compatible_tools(),
         max_model_calls=SRE_COMPATIBLE_MAX_MODEL_CALLS,
         request_timeout_seconds=SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
-        request_fields={
-            "temperature": SRE_COMPATIBLE_TEMPERATURE,
-            "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
-        },
+        request_fields=compatible_request_fields(context),
         agent_name="sre-diagnostic-agent",
     )
     return _SRERecordingAdapter(adapter)

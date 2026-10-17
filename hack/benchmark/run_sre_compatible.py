@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import hashlib
 import ipaddress
+import json
 import os
 import platform
 import re
@@ -38,6 +39,7 @@ from agentstorm_worker.benchmarks.sre import (
     SRE_COMPATIBLE_TEMPERATURE,
     create_adapter,
 )
+from agentstorm_worker.adapters.openai_compatible import validate_max_output_tokens, validate_request_fields
 from agentstorm_worker.config import (
     PricingConfig,
     ReliabilityConfig,
@@ -70,6 +72,9 @@ MOCK_MODEL = "mock-sre-protocol"
 ADAPTER = "agentstorm_worker.benchmarks.sre:create_adapter"
 DATASET = REPO_ROOT / "examples/datasets/sre-incidents.jsonl"
 DATASET_CASES = 32
+# One incident from each root-cause family. The dataset groups eight cases per family.
+SMOKE_CASE_IDS = ("INC-001", "INC-009", "INC-017", "INC-025")
+ENDPOINT_CLASSES = ("domestic-cloud", "hosted-api", "self-hosted")
 UNPINNED_MODELS = {"latest", "auto", "default"}
 PRICE = re.compile(r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$")
 _FIELD = re.compile(r"^[^\r\n]{1,512}$")
@@ -108,8 +113,10 @@ def validate_endpoint(
     reject_loopback: bool = False,
 ) -> dict[str, Any]:
     """Return pinned endpoint metadata or reject an unpublishable configuration."""
-    if endpoint_class not in {"domestic-cloud", "self-hosted"}:
-        raise BenchmarkError("endpoint class must be domestic-cloud or self-hosted")
+    if endpoint_class not in ENDPOINT_CLASSES:
+        raise BenchmarkError(
+            "endpoint class must be domestic-cloud, hosted-api, or self-hosted"
+        )
     if not model or model.casefold() in UNPINNED_MODELS or any(character.isspace() for character in model):
         raise BenchmarkError("model must be an exact pinned id, not latest, auto, or default")
     try:
@@ -118,8 +125,8 @@ def validate_endpoint(
         raise BenchmarkError(str(exc)) from exc
     parsed = urlsplit(base_url)
     host = parsed.hostname or ""
-    if endpoint_class == "domestic-cloud" and parsed.scheme != "https":
-        raise BenchmarkError("domestic-cloud endpoints must use https")
+    if endpoint_class in {"domestic-cloud", "hosted-api"} and parsed.scheme != "https":
+        raise BenchmarkError(f"{endpoint_class} endpoints must use https")
     if reject_loopback and _kubernetes_unreachable(host):
         raise BenchmarkError(
             "Kubernetes Workers cannot use a loopback or unspecified endpoint"
@@ -170,27 +177,65 @@ def _kubernetes_unreachable(host: str) -> bool:
     return address.is_loopback or address.is_unspecified
 
 
-def worst_case_run_usd(input_price: str, output_price: str, attempts: int) -> Decimal:
-    """Spend estimate for one 32-case run before it is allowed to start.
+def input_token_allowance(max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS) -> int:
+    """Input estimate for one call, including assistant history resent at ``max_tokens``."""
+    history = (SRE_COMPATIBLE_MAX_MODEL_CALLS - 1) * max_output_tokens
+    return max(SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE, history)
 
-    Output tokens follow the SRE ``max_tokens`` limit. Input tokens use
-    ``SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE``, which is larger than the scripted
-    fixture requests and the assistant history those calls resend. The endpoint
-    does not enforce that allowance, so this is an estimate rather than a cap
-    on what a provider can bill.
+
+def worst_case_run_usd(
+    input_price: str,
+    output_price: str,
+    attempts: int,
+    *,
+    cases: int = DATASET_CASES,
+    max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+) -> Decimal:
+    """Spend estimate for one run before it is allowed to start.
+
+    Output tokens follow the configured ``max_tokens`` limit. Input tokens use
+    the larger of ``SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE`` and the assistant
+    history those calls can resend at that limit. The endpoint does not enforce
+    either number, so this is an estimate rather than a cap on what a provider
+    can bill. A confirmed price of zero makes the estimate zero and disables
+    the recorded-cost stop; callers must reject that price unless the operator
+    confirmed it.
     """
-    calls = Decimal(DATASET_CASES * SRE_COMPATIBLE_MAX_MODEL_CALLS * attempts)
+    calls = Decimal(cases * SRE_COMPATIBLE_MAX_MODEL_CALLS * attempts)
     million = Decimal(1_000_000)
-    input_tokens = calls * Decimal(SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE)
-    output_tokens = calls * Decimal(SRE_COMPATIBLE_MAX_OUTPUT_TOKENS)
+    input_tokens = calls * Decimal(input_token_allowance(max_output_tokens))
+    output_tokens = calls * Decimal(max_output_tokens)
     return (input_tokens * Decimal(input_price) + output_tokens * Decimal(output_price)) / million
 
 
+def confirm_zero_price(input_price: str, output_price: str, confirmed: bool) -> bool:
+    """Reject an unconfirmed zero price, which would disable the spend stop."""
+    zero = Decimal(input_price) == 0 and Decimal(output_price) == 0
+    if zero and not confirmed:
+        raise BenchmarkError(
+            "a price of 0 disables the USD 8 recorded-cost stop; "
+            "pass --price-is-zero-confirmed after checking the provider bill"
+        )
+    return zero and confirmed
+
+
 def reserve_benchmark_spend(
-    spent: Decimal, input_price: str, output_price: str, attempts: int
+    spent: Decimal,
+    input_price: str,
+    output_price: str,
+    attempts: int,
+    *,
+    cases: int = DATASET_CASES,
+    max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
 ) -> None:
     """Refuse to start a run that could finish above the recorded-cost stop."""
-    estimate = worst_case_run_usd(input_price, output_price, attempts)
+    estimate = worst_case_run_usd(
+        input_price,
+        output_price,
+        attempts,
+        cases=cases,
+        max_output_tokens=max_output_tokens,
+    )
     if spent + estimate > SPEND_STOP_USD:
         raise BenchmarkError(
             "USD 8 recorded-cost stop: spent "
@@ -223,6 +268,14 @@ def claim_policy(mode: str, *, canonical: bool, complete: bool) -> dict[str, Any
             "performance": False,
             "kubernetes_scaling": False,
             "allowed": ["one no-cost pass of the 32 SRE incidents through the compatible adapter"],
+        }
+    if mode == "openai-compatible-local-smoke":
+        return {
+            "performance": False,
+            "kubernetes_scaling": False,
+            "allowed": [
+                "a non-publishable subset of the SRE incidents against one pinned endpoint"
+            ],
         }
     if mode == "openai-compatible-local" and complete:
         return {
@@ -259,6 +312,12 @@ def limitations(mode: str, endpoint: dict[str, Any] | None = None) -> list[str]:
             "Local mode measures one in-process Worker against the pinned endpoint.",
             "It does not measure Kubernetes scheduling or KEDA scale events.",
             "A publishable scaling claim requires the Kubernetes runner and canonical=true.",
+        ]
+    if mode == "openai-compatible-local-smoke":
+        return [
+            "Smoke mode runs a subset at a capped concurrency and is not publishable.",
+            "It does not measure Kubernetes scheduling, KEDA scale events, or the fixed 416-execution protocol.",
+            "A zero price is accepted only when --price-is-zero-confirmed is set, and that confirmation disables the USD 8 stop.",
         ]
     notes = [
         "A publishable result requires the full 384-capacity plus 32-reliability protocol.",
@@ -376,18 +435,81 @@ async def _execute_mock(
         raise BenchmarkError("mock smoke did not pass all 32 incidents")
 
 
-async def execute_local(output_dir: Path, endpoint: dict[str, Any], image_digest: str = "") -> None:
+def select_local_cases(cases: list[Any], shape: str, case_limit: int | None) -> list[Any]:
+    """Return the fixed dataset, or a non-publishable local subset."""
+    if shape == "full":
+        if case_limit is not None:
+            raise BenchmarkError("--cases is only valid with --shape smoke")
+        return list(cases)
+    if shape != "smoke":
+        raise BenchmarkError("local shape must be full or smoke")
+    if case_limit is not None:
+        if not 1 <= case_limit <= len(cases):
+            raise BenchmarkError("--cases must be between 1 and the dataset size")
+        return list(cases[:case_limit])
+    selected = [case for case in cases if case.case_id in SMOKE_CASE_IDS]
+    if [case.case_id for case in selected] != list(SMOKE_CASE_IDS):
+        raise BenchmarkError("smoke cases are missing from the dataset")
+    return selected
+
+
+def resolve_concurrency(requested: int, shape: str, cap: int | None) -> int:
+    """Cap workers. Smoke defaults to one worker so a free tier can be called safely."""
+    if shape == "smoke" and cap is None:
+        cap = 1
+    if cap is None:
+        return requested
+    if not 1 <= cap <= 32:
+        raise BenchmarkError("--max-concurrency must be between 1 and 32")
+    return min(requested, cap)
+
+
+def local_matrix_publishable(
+    shape: str, case_limit: int | None, max_concurrency: int | None
+) -> bool:
+    """The fixed 416-execution matrix is the only publishable local protocol."""
+    return (
+        shape == "full"
+        and case_limit is None
+        and (max_concurrency is None or max_concurrency >= 32)
+    )
+
+
+async def execute_local(
+    output_dir: Path,
+    endpoint: dict[str, Any],
+    image_digest: str = "",
+    *,
+    shape: str = "full",
+    case_limit: int | None = None,
+    max_concurrency: int | None = None,
+    max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+    request_fields: dict[str, Any] | None = None,
+    price_is_zero_confirmed: bool = False,
+) -> None:
     require_spend_opt_in()
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise BenchmarkError("OPENAI_API_KEY is required")
-    cases = load_dataset(DATASET)
+    fields = validate_request_fields(
+        request_fields or {}, reject_keys={"temperature", "max_tokens"}
+    )
+    max_output_tokens = validate_max_output_tokens(max_output_tokens)
+    prices = endpoint["pricing"]
+    zero_confirmed = confirm_zero_price(
+        str(prices["input"]), str(prices["output"]), price_is_zero_confirmed
+    )
+    loaded = load_dataset(DATASET)
+    cases = select_local_cases(loaded, shape, case_limit)
+    publishable = local_matrix_publishable(shape, case_limit, max_concurrency)
     base = load_run_config(REPO_ROOT / "examples/run.sre.local.json")
     adapter = create_adapter(
         AdapterFactoryContext(
             provider="openai-compatible",
             model=str(endpoint["model"]),
             base_url=str(endpoint["base_url"]),
+            max_output_tokens=max_output_tokens,
+            request_fields=fields,
         )
     )
     prepare_output(output_dir)
@@ -396,56 +518,99 @@ async def execute_local(output_dir: Path, endpoint: dict[str, Any], image_digest
     error: str | None = None
     stopped = False
     spent = Decimal(0)
-    prices = endpoint["pricing"]
     assert_case_timeout_covers_calls(REAL_CASE_TIMEOUT_SECONDS, 2)
     try:
-        for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
-            for sequence, workers in enumerate(order, start=1):
-                try:
-                    reserve_benchmark_spend(spent, prices["input"], prices["output"], 1)
-                except BenchmarkError:
-                    stopped = True
-                    raise
-                record = await _append_run(
-                    runs,
-                    case_records,
-                    base,
-                    adapter,
-                    cases,
-                    f"local-capacity-r{round_index}-s{sequence}-w{workers}",
-                    "capacity",
-                    workers,
-                    round_index,
-                    str(endpoint["base_url"]),
-                    endpoint=endpoint,
+        if shape == "smoke":
+            workers = resolve_concurrency(1, shape, max_concurrency)
+            reserve_benchmark_spend(
+                spent,
+                prices["input"],
+                prices["output"],
+                1,
+                cases=len(cases),
+                max_output_tokens=max_output_tokens,
+            )
+            await _append_run(
+                runs,
+                case_records,
+                base,
+                adapter,
+                cases,
+                f"local-smoke-w{workers}",
+                "capacity",
+                workers,
+                1,
+                str(endpoint["base_url"]),
+                endpoint=endpoint,
+            )
+        else:
+            for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
+                for sequence, requested in enumerate(order, start=1):
+                    workers = resolve_concurrency(requested, shape, max_concurrency)
+                    try:
+                        reserve_benchmark_spend(
+                            spent,
+                            prices["input"],
+                            prices["output"],
+                            1,
+                            cases=len(cases),
+                            max_output_tokens=max_output_tokens,
+                        )
+                    except BenchmarkError:
+                        stopped = True
+                        raise
+                    record = await _append_run(
+                        runs,
+                        case_records,
+                        base,
+                        adapter,
+                        cases,
+                        f"local-capacity-r{round_index}-s{sequence}-w{workers}",
+                        "capacity",
+                        workers,
+                        round_index,
+                        str(endpoint["base_url"]),
+                        endpoint=endpoint,
+                    )
+                    if record["cost_usd"] is None:
+                        raise BenchmarkError(
+                            "capacity cost is unknown; refusing to start another run"
+                        )
+                    spent += Decimal(record["cost_usd"])
+            try:
+                reserve_benchmark_spend(
+                    spent,
+                    prices["input"],
+                    prices["output"],
+                    2,
+                    cases=len(cases),
+                    max_output_tokens=max_output_tokens,
                 )
-                if record["cost_usd"] is None:
-                    raise BenchmarkError("capacity cost is unknown; refusing to start another run")
-                spent += Decimal(record["cost_usd"])
-        try:
-            reserve_benchmark_spend(spent, prices["input"], prices["output"], 2)
-        except BenchmarkError:
-            stopped = True
-            raise
-        await _append_run(
-            runs,
-            case_records,
-            base,
-            adapter,
-            cases,
-            "local-reliability-w16",
-            "reliability",
-            16,
-            1,
-            str(endpoint["base_url"]),
-            endpoint=endpoint,
-            reliability=True,
-        )
+            except BenchmarkError:
+                stopped = True
+                raise
+            await _append_run(
+                runs,
+                case_records,
+                base,
+                adapter,
+                cases,
+                "local-reliability-w16",
+                "reliability",
+                resolve_concurrency(16, shape, max_concurrency),
+                1,
+                str(endpoint["base_url"]),
+                endpoint=endpoint,
+                reliability=True,
+            )
     except BenchmarkError as exc:
         error = str(exc)
-    complete = error is None and len(runs) == 13 and len(case_records) == 416
+    complete = (
+        publishable and error is None and len(runs) == 13 and len(case_records) == 416
+    )
+    mode = "openai-compatible-local-smoke" if shape == "smoke" else "openai-compatible-local"
     manifest = _manifest(
-        mode="openai-compatible-local",
+        mode=mode,
         complete=complete,
         canonical=False,
         model=str(endpoint["model"]),
@@ -457,10 +622,21 @@ async def execute_local(output_dir: Path, endpoint: dict[str, Any], image_digest
         image_digest=image_digest,
         error=error,
         stopped_for_budget=stopped,
+        max_output_tokens=max_output_tokens,
+        request_fields=fields,
+        price_is_zero_confirmed=zero_confirmed,
     )
+    if shape == "full" and not publishable:
+        manifest["limitations"] = [
+            *manifest["limitations"],
+            "max concurrency is below 32, so this is not the fixed protocol and is not publishable.",
+        ]
+        manifest["claims"] = claim_policy(mode, canonical=False, complete=False)
     _write_artifacts(output_dir, manifest, runs, case_records, (api_key,))
-    if not complete:
+    if publishable and not complete:
         raise BenchmarkError(error or "local compatible benchmark is incomplete")
+    if error is not None:
+        raise BenchmarkError(error)
 
 
 async def _append_run(
@@ -559,6 +735,9 @@ def _manifest(
     image_digest: str,
     error: str | None,
     stopped_for_budget: bool,
+    max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+    request_fields: dict[str, Any] | None = None,
+    price_is_zero_confirmed: bool = False,
 ) -> dict[str, Any]:
     endpoint = dict(endpoint)
     endpoint.pop("pricing", None)
@@ -571,6 +750,10 @@ def _manifest(
         "error": error,
         "stopped_for_budget": stopped_for_budget,
         "spend_stop_usd": str(SPEND_STOP_USD),
+        "price_is_zero_confirmed": price_is_zero_confirmed,
+        "spend_guard": (
+            "confirmed-zero-price" if price_is_zero_confirmed else "recorded-cost-stop"
+        ),
         "provider": "openai-compatible",
         "protocol": "openai-chat-completions",
         "model": model,
@@ -578,7 +761,7 @@ def _manifest(
         "adapter_entrypoint": ADAPTER,
         "dataset_cases": 32,
         "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
-        "capacity_orders": CAPACITY_ORDERS if mode != "openai-compatible-mock-smoke" else [],
+        "capacity_orders": [] if mode.endswith("-smoke") else CAPACITY_ORDERS,
         "capacity_executions": sum(run["total"] for run in runs if run["kind"] == "capacity"),
         "reliability_executions": sum(run["total"] for run in runs if run["kind"] == "reliability"),
         "recorded_cases": case_count,
@@ -588,7 +771,8 @@ def _manifest(
                 "provider": "openai-compatible",
                 "model": model,
                 "temperature": SRE_COMPATIBLE_TEMPERATURE,
-                "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+                "max_tokens": max_output_tokens,
+                "request_fields": request_fields or {},
                 "stream": False,
                 "adapter_entrypoint": ADAPTER,
             }
@@ -752,11 +936,35 @@ def main() -> None:
     parser.add_argument("--quantization", default="")
     parser.add_argument("--hardware", default="")
     parser.add_argument("--topology", default="")
+    parser.add_argument("--cases", type=int, default=0)
+    parser.add_argument("--max-concurrency", type=int, default=0)
+    parser.add_argument("--max-tokens", type=int, default=0)
+    parser.add_argument("--request-fields", default="")
+    parser.add_argument("--price-is-zero-confirmed", action="store_true")
     args = parser.parse_args()
     try:
         if args.mode == "mock":
+            if (
+                args.cases
+                or args.max_concurrency
+                or args.max_tokens
+                or args.request_fields
+                or args.price_is_zero_confirmed
+            ):
+                raise BenchmarkError(
+                    "subset, concurrency, sampling, and zero-price flags are local-mode options"
+                )
             asyncio.run(execute_mock(args.output, args.shape, args.image_digest))
             return
+        request_fields = {}
+        if args.request_fields:
+            try:
+                parsed_fields = json.loads(args.request_fields)
+            except json.JSONDecodeError as exc:
+                raise BenchmarkError("--request-fields must be a JSON object") from exc
+            request_fields = validate_request_fields(
+                parsed_fields, reject_keys={"temperature", "max_tokens"}
+            )
         endpoint = validate_endpoint(
             model=args.model,
             base_url=args.base_url,
@@ -774,6 +982,12 @@ def main() -> None:
                 args.output,
                 _with_pricing(endpoint, args.input_price, args.output_price),
                 args.image_digest,
+                shape=args.shape,
+                case_limit=args.cases or None,
+                max_concurrency=args.max_concurrency or None,
+                max_output_tokens=args.max_tokens or SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+                request_fields=request_fields,
+                price_is_zero_confirmed=args.price_is_zero_confirmed,
             )
         )
     except (BenchmarkError, ValueError) as exc:

@@ -208,11 +208,15 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def serve(fixtures: dict[str, dict[str, Any]] | None = None) -> Iterator[str]:
+def serve(
+    fixtures: dict[str, dict[str, Any]] | None = None,
+    *,
+    reject_authorization: bool = True,
+) -> Iterator[str]:
     """Serve the scripted model on loopback and yield its `/v1` base URL."""
     server = _MockServer(("127.0.0.1", 0), _Handler)
     server.fixtures = fixtures or load_fixtures()
-    server.reject_authorization = True
+    server.reject_authorization = reject_authorization
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

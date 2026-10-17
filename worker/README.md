@@ -38,17 +38,23 @@ directly from `spec.target.apiKeySecretRef` without writing it to a ConfigMap.
 
 The `openai-compatible` provider is a separate standard-library chat-completions client. It requires
 `target.model` and `target.baseURL`, appends `/chat/completions`, and sends a bearer token only when
-`OPENAI_API_KEY` is non-empty. It does not import the Agents SDK. The bundled SRE factory accepts
-`fake`, `openai-agents`, and `openai-compatible`; the compatible path pins temperature 0 and
-`max_tokens` 512 for that benchmark only. The generic adapter sends no `max_tokens`. A failed
-call on that path is priced at `UNKNOWN_CALL_OUTPUT_TOKENS` (8192 output tokens).
+`OPENAI_API_KEY` is non-empty. It does not import the Agents SDK. `run` calls `openai-compatible`
+and `openai-agents` only when `AGENTSTORM_ALLOW_PROVIDER_SPEND=1`. The controller sets that
+variable for Workers it starts for those providers. `validate` and the `fake` provider do not need
+it. The worker has no USD budget; benchmark runners do. The bundled SRE factory accepts `fake`,
+`openai-agents`, and `openai-compatible`. The compatible path pins temperature 0 and sends
+`target.maxTokens`, or 512 when that field is empty. `target.requestFields` is merged into the
+chat body after reserved keys are rejected. The generic adapter sends `max_tokens` only when
+`target.maxTokens` is set. A failed call that omits `max_tokens` is priced at
+`UNKNOWN_CALL_OUTPUT_TOKENS` (8192 output tokens). One chat call retries HTTP 429, 502, 503, and
+504, honoring `Retry-After`, before the runner can retry the whole case.
 
 `target.adapterEntrypoint` may select a trusted `module:function` factory already installed in the
-Worker image. Its factory context contains only provider, model, and base URL; no API key, price,
-or Kubernetes Secret object is passed through that interface. Because plugin code is trusted and
-runs in the Worker process, it can still read process environment variables such as Provider
-credentials. Import/factory/return failures stop before the first model call. Inline and remotely
-downloaded plugins are unsupported.
+Worker image. Its factory context contains provider, model, base URL, the optional completion cap,
+and request fields. It does not contain an API key, a price, or a Kubernetes Secret object.
+Because plugin code is trusted and runs in the Worker process, it can still read process
+environment variables such as Provider credentials. Import/factory/return failures stop before the
+first model call. Inline and remotely downloaded plugins are unsupported.
 
 Attempt and case results include `model_call_count` and `tool_call_count`. Model calls remain `null`
 when a public SDK usage object cannot prove the value; tool calls come from the provider-independent
@@ -64,6 +70,7 @@ failure exits non-zero. Duplicate case IDs are rejected before any provider call
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `AGENTSTORM_ALLOW_PROVIDER_SPEND` | unset | Must be `1` before `run` calls `openai-compatible` or `openai-agents` |
 | `AGENTSTORM_RESULT_API_URL` | disabled | Result API base URL |
 | `AGENTSTORM_RESULT_WRITE_TOKEN` | required when enabled | Writer bearer token injected from a Secret |
 | `AGENTSTORM_RESULT_TIMEOUT_SECONDS` | `30` | Timeout for each registration or upload request |

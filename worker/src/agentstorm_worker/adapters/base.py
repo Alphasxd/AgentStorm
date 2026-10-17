@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..models import AdapterResponse, TestCase
@@ -8,11 +8,18 @@ from ..models import AdapterResponse, TestCase
 
 @dataclass(frozen=True)
 class AdapterFactoryContext:
-    """Non-secret immutable context passed to trusted adapter factories."""
+    """Non-secret immutable context passed to trusted adapter factories.
+
+    ``max_output_tokens`` and ``request_fields`` are optional sampling and
+    provider JSON. Credentials, prices, and Secret objects stay out of this
+    context.
+    """
 
     provider: str
     model: str = ""
     base_url: str = ""
+    max_output_tokens: int | None = None
+    request_fields: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

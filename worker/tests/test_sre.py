@@ -6,12 +6,21 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 from agentstorm_worker.adapters import AdapterFactoryContext
 from agentstorm_worker.benchmarks.sre import (
     SREFakeAdapter,
+    _AGENTS_INSTRUCTIONS,
+    _COMPATIBLE_INSTRUCTIONS,
     _compatible_tool_schemas,
     _create_openai_compatible_adapter,
+    compatible_request_fields,
     create_adapter,
+    get_incident,
+    lookup_runbook,
+    query_metrics,
+    search_logs,
     validate_tool_usage,
 )
 from agentstorm_worker.config import load_dataset, load_run_config
@@ -137,3 +146,96 @@ class SREBenchmarkTest(unittest.TestCase):
             [schema["function"]["name"] for schema in schemas],
             ["get_incident", "query_metrics", "search_logs", "lookup_runbook"],
         )
+
+    def test_required_diagnosis_values_come_from_that_cases_tools(self) -> None:
+        for instructions in (_COMPATIBLE_INSTRUCTIONS, _AGENTS_INSTRUCTIONS):
+            self.assertIn("verbatim", instructions)
+            self.assertIn("JSON array of strings", instructions)
+        cases = load_dataset(ROOT / "examples/datasets/sre-incidents.jsonl")
+        for case in cases:
+            schema = next(
+                assertion.schema
+                for assertion in case.assertions
+                if assertion.type == "json_schema" and isinstance(assertion.schema, dict)
+            )
+            incident, metrics, logs, runbook = asyncio.run(_tool_chain(case.case_id))
+            # Exact JSON string values from this case's tool results. The shared
+            # instruction text is not a source, so listing every enum there would fail.
+            values = _string_values([incident, metrics, logs, runbook])
+            answer = {
+                "incident_id": incident["incident_id"],
+                "root_cause": runbook["root_cause"],
+                "severity": runbook["severity"],
+                "recommended_action": runbook["recommended_action"],
+                "evidence": runbook["evidence"],
+                "runbook": runbook["runbook"],
+            }
+            Draft202012Validator(schema).validate(answer)
+            self.assertEqual(answer["evidence"], runbook["evidence"])
+            self.assertGreaterEqual(len(answer["evidence"]), 2)
+            self.assertTrue(all(isinstance(item, str) for item in answer["evidence"]))
+            for name, const in _schema_consts(schema).items():
+                self.assertEqual(answer[name], const)
+                self.assertIn(const, values)
+                if name == "incident_id":
+                    self.assertIn(const, case.prompt)
+                else:
+                    self.assertNotIn(const, case.prompt)
+
+    def test_compatible_sampling_accepts_provider_fields_and_keeps_the_pin(self) -> None:
+        fields = compatible_request_fields(
+            AdapterFactoryContext(
+                provider="openai-compatible",
+                model="glm-4.7-flash",
+                base_url="https://example.invalid/v4",
+                max_output_tokens=2048,
+                request_fields={"thinking": {"type": "disabled"}},
+            )
+        )
+        self.assertEqual(fields["temperature"], 0)
+        self.assertEqual(fields["max_tokens"], 2048)
+        self.assertEqual(fields["thinking"], {"type": "disabled"})
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            compatible_request_fields(
+                AdapterFactoryContext(
+                    provider="openai-compatible",
+                    model="glm-4.7-flash",
+                    base_url="https://example.invalid/v4",
+                    request_fields={"max_tokens": 9},
+                )
+            )
+
+
+async def _tool_chain(case_id: str) -> tuple[dict, dict, dict, dict]:
+    incident = await get_incident(case_id)
+    metrics = await query_metrics(incident["service"], incident["window"])
+    logs = await search_logs(incident["service"], incident["window"])
+    runbook = await lookup_runbook(str(logs["error_signature"]))
+    return incident, metrics, logs, runbook
+
+
+def _string_values(value: object) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, str):
+        found.add(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.update(_string_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_string_values(item))
+    return found
+
+
+def _schema_consts(schema: dict) -> dict[str, str]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return {}
+    consts: dict[str, str] = {}
+    for name, definition in properties.items():
+        if isinstance(definition, dict) and "const" in definition:
+            const = definition["const"]
+            if not isinstance(const, str):
+                raise AssertionError(f"{name} const must be a string")
+            consts[name] = const
+    return consts

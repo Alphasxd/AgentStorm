@@ -18,6 +18,11 @@ spec:
     pricing:
       inputUSDPerMillionTokens: "1"
       outputUSDPerMillionTokens: "2"
+    # maxTokens overrides the SRE completion cap of 512. requestFields is extra chat JSON.
+    # maxTokens: 2048
+    # requestFields:
+    #   thinking:
+    #     type: disabled
   workload:
     datasetRef:
       name: sre-incidents

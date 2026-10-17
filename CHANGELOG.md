@@ -15,6 +15,23 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
 
 ### Fixed
 
+- SRE diagnosis fields (`root_cause`, `severity`, `recommended_action`, `evidence`, `runbook`) are
+  returned by `lookup_runbook`, and both compatible instructions tell the model to copy them.
+  `evidence` is a JSON array of strings. A test requires every schema constant to be an exact
+  string in that case's tool results.
+- The OpenAI-compatible adapter retries one chat call on HTTP 429, 502, 503, and 504, up to 3
+  attempts, and honors `Retry-After` with backoff capped at 8 seconds. Completed tool turns are
+  kept. A 429 is unpriced. A terminal 5xx is priced once. Allowlisted `error.code` values are
+  stored as `agentstorm.provider.error_code` without response bodies. `finish_reason=length` with
+  empty content is `output_truncated`.
+- `target.maxTokens` and `target.requestFields` configure the completion cap and provider JSON,
+  including `thinking`. The benchmark spend estimate uses the configured cap. Local real-endpoint
+  runs accept `--shape smoke`, `--cases`, and `--max-concurrency`. Smoke and a concurrency cap
+  below 32 are not publishable. `hosted-api` is an endpoint class and requires `https`.
+- `python -m agentstorm_worker run` requires `AGENTSTORM_ALLOW_PROVIDER_SPEND=1` before
+  `openai-compatible` or `openai-agents` calls. The controller sets it for those Workers. A
+  benchmark price of `0` requires `--price-is-zero-confirmed`, which disables the USD 8 stop and
+  is recorded on the manifest.
 - OpenAI-compatible benchmark runners estimate the next run's token spend before starting it and
   refuse when recorded spend plus that estimate would pass USD 8. Input uses an allowance of 8192
   tokens per call, above the scripted fixture requests and the assistant history those calls

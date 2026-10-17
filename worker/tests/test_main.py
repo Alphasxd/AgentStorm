@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -288,6 +291,56 @@ class MainTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(events, ["register", "provider", "upload"])
+
+    async def test_real_provider_requires_spend_opt_in_before_the_adapter(self) -> None:
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "run.json"
+            dataset_path = root / "cases.jsonl"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": "https://example.invalid/v1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dataset_path.write_text('{"id":"case-1","input":"hello"}\n', encoding="utf-8")
+            args = argparse.Namespace(
+                command="run",
+                config=str(config_path),
+                dataset=str(dataset_path),
+                output=str(root / "out"),
+            )
+            stderr = io.StringIO()
+            with (
+                patch(
+                    "agentstorm_worker.__main__.create_adapter",
+                    side_effect=lambda *args, **kwargs: events.append("provider"),
+                ),
+                patch.dict("os.environ", {}, clear=False),
+                redirect_stderr(stderr),
+            ):
+                os.environ.pop("AGENTSTORM_ALLOW_PROVIDER_SPEND", None)
+                exit_code = await execute(args)
+            self.assertEqual(exit_code, 3)
+            self.assertEqual(events, [])
+            self.assertIn("AGENTSTORM_ALLOW_PROVIDER_SPEND=1", stderr.getvalue())
+
+            validate = argparse.Namespace(
+                command="validate",
+                config=str(config_path),
+                dataset=str(dataset_path),
+                output=str(root / "out"),
+            )
+            self.assertEqual(await execute(validate), 0)
+            self.assertEqual(events, [])
 
     async def test_registration_failure_prevents_provider_calls(self) -> None:
         events: list[str] = []
