@@ -13,6 +13,12 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
   Kubernetes/KEDA real endpoint. Real modes require a spend opt-in, a pinned model, and a price
   snapshot. No real-model result is included.
 
+### Changed
+
+- Bundled result-stack object storage uses digest-pinned distroless `pgsty/silo`
+  `RELEASE.2026-10-15T00-00-00Z`. The `agentstorm-minio` Service, S3 API, and `/minio/health/*`
+  probes stay in place.
+
 ## [0.6.0] - 2026-08-05
 
 ### Added

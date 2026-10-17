@@ -134,15 +134,22 @@ jobs:
           python-version: '3.13'
       - name: Install worker dependencies
         run: python -m pip install -e worker
-      - name: Start MinIO
+      - name: Start object storage
         run: >-
-          docker run --detach --name agentstorm-minio-ci
+          docker run --detach --name agentstorm-object-ci
           --publish 9000:9000
+          --user 1000:1000
+          --read-only
+          --tmpfs /tmp:rw,nosuid,size=128m
+          --cap-drop ALL
+          --security-opt no-new-privileges
           --env MINIO_ROOT_USER=agentstorm
           --env MINIO_ROOT_PASSWORD=integration-only-secret
-          minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          --env MINIO_BROWSER=off
+          --entrypoint /usr/bin/silo
+          pgsty/silo:RELEASE.2026-10-15T00-00-00Z-distroless@sha256:70cac541c5a928be5cd16d6b8732d85ac06e891a0e3d9956a745381330692fc6
           server /data
-      - name: Wait for MinIO
+      - name: Wait for object storage
         run: |
           for attempt in {1..30}; do
             if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
@@ -150,7 +157,7 @@ jobs:
             fi
             sleep 1
           done
-          docker logs agentstorm-minio-ci
+          docker logs agentstorm-object-ci
           exit 1
       - name: Test durable result storage
         env:
@@ -166,9 +173,9 @@ jobs:
           AGENTSTORM_TEST_S3_ACCESS_KEY: agentstorm
           AGENTSTORM_TEST_S3_SECRET_KEY: integration-only-secret
         run: make test-result-pipeline
-      - name: Stop MinIO
+      - name: Stop object storage
         if: always()
-        run: docker rm --force agentstorm-minio-ci || true
+        run: docker rm --force agentstorm-object-ci || true
 
   e2e:
     runs-on: ubuntu-latest

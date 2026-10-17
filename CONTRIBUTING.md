@@ -30,9 +30,11 @@ When a macOS host proxy points at `127.0.0.1` or `localhost`, the E2E script tra
 used for kind creation. An existing cluster whose node has a loopback proxy is rejected with a
 recreation command; the script never changes the host-wide proxy configuration.
 
-The Result API uses PostgreSQL for run metadata and MinIO-compatible S3 storage for gzipped raw shard
-payloads. Its integration tests are opt-in and require `AGENTSTORM_TEST_DATABASE_URL` plus the
-`AGENTSTORM_TEST_S3_*` variables before running `make test-results-integration`.
+The Result API uses PostgreSQL for run metadata and S3-compatible object storage for gzipped raw shard
+payloads. The bundled server is digest-pinned distroless Silo (`pgsty/silo`), reached through the
+existing `agentstorm-minio` Service. Its integration tests are opt-in and require
+`AGENTSTORM_TEST_DATABASE_URL` plus the `AGENTSTORM_TEST_S3_*` variables before running
+`make test-results-integration`.
 
 Run the complete development result stack on kind or OrbStack with:
 
@@ -41,7 +43,7 @@ CLUSTER_PROVIDER=kind make e2e-results-local
 ```
 
 This command first runs the ordinary namespace-scoped controller E2E, then builds and loads the
-current Result API, deploys the development-only PostgreSQL/MinIO overlay, checks Result API Secret
+current Result API, deploys the development-only PostgreSQL/Silo overlay, checks Result API Secret
 gating, runs two concurrent two-shard workloads, and verifies durable run, case, and comparison
 queries. Source-image runs also deploy a development-only OpenTelemetry Collector, verify worker
 run/case/provider/evaluator spans, persist them in Tempo, scrape Result API metrics into Prometheus,

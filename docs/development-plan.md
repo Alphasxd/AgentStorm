@@ -55,7 +55,7 @@ Acceptance criteria:
 
 Release `v0.2.0-alpha.1` publishes the controller, worker, and Result API as immutable
 multi-architecture images. `config/results` is the namespace-scoped public reference stack; its
-single-replica PostgreSQL and MinIO workloads are intended for alpha evaluation, not production HA.
+single-replica PostgreSQL and Silo object-storage workloads are intended for alpha evaluation, not production HA.
 
 ## M3: Agent observability and evaluation — implemented
 

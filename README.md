@@ -246,7 +246,7 @@ kubectl wait -n agentstorm-system --for=jsonpath='{.status.phase}'=Succeeded \
   agenttestrun/agentstorm-demo --timeout=180s
 ```
 
-`config/results` is an alpha reference deployment with single-replica PostgreSQL and MinIO, two
+`config/results` is an alpha reference deployment with single-replica PostgreSQL and Silo, two
 1 GiB persistent-volume claims, and restrictive NetworkPolicies. It is not a high-availability
 production storage design; adapt storage classes, backups, CNI rules, and credentials before using
 it beyond evaluation.
@@ -273,7 +273,7 @@ For a single-namespace runtime with Role/RoleBinding and worker NetworkPolicies,
 DEPLOYMENT_PROFILE=namespace make e2e-local
 ```
 
-Run the full source-built M2 development stack, including PostgreSQL, MinIO, Result API Secret
+Run the full source-built M2 development stack, including PostgreSQL, Silo, Result API Secret
 gating, two durable runs, case reads, and a baseline comparison:
 
 ```bash
