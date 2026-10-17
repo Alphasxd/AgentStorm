@@ -46,12 +46,16 @@ it. The worker has no USD budget; benchmark runners do. The bundled SRE factory 
 `target.maxTokens`, or 512 when that field is empty. `target.requestFields` is merged into the
 chat body after reserved keys are rejected. The generic adapter sends `max_tokens` only when
 `target.maxTokens` is set. A failed call that omits `max_tokens` is priced at
-`UNKNOWN_CALL_OUTPUT_TOKENS` (8192 output tokens). One chat call retries HTTP 429, 502, 503, and
-504, honoring `Retry-After`, before the runner can retry the whole case.
+`UNKNOWN_CALL_OUTPUT_TOKENS` (8192 output tokens). One chat call retries HTTP 429, honoring
+`Retry-After`, before the runner can retry the whole case. `target.httpRetryAttempts` defaults to
+3 and can be raised to 16. `target.httpRetryMaxWaitSeconds` defaults to 8 and can be raised to 300.
+HTTP 5xx is not retried inside the call. Each 5xx is priced at the unknown-call allowance. The
+runner retries it only when `allowAmbiguousRetries` is true, and token totals include every attempt.
 
 `target.adapterEntrypoint` may select a trusted `module:function` factory already installed in the
 Worker image. Its factory context contains provider, model, base URL, the optional completion cap,
-and request fields. It does not contain an API key, a price, or a Kubernetes Secret object.
+request fields, and the optional HTTP 429 retry attempts and max wait. It does not contain an API
+key, a price, or a Kubernetes Secret object.
 Because plugin code is trusted and runs in the Worker process, it can still read process
 environment variables such as Provider credentials. Import/factory/return failures stop before the
 first model call. Inline and remotely downloaded plugins are unsupported.

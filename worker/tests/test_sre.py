@@ -195,6 +195,17 @@ class SREBenchmarkTest(unittest.TestCase):
         self.assertEqual(fields["temperature"], 0)
         self.assertEqual(fields["max_tokens"], 2048)
         self.assertEqual(fields["thinking"], {"type": "disabled"})
+        recording = create_adapter(
+            AdapterFactoryContext(
+                provider="openai-compatible",
+                model="glm-4.7-flash",
+                base_url="https://example.invalid/v4",
+                http_retry_attempts=5,
+                http_retry_max_wait_seconds=45,
+            )
+        )
+        self.assertEqual(recording._adapter._max_http_attempts, 5)
+        self.assertEqual(recording._adapter._retry_max, 45.0)
         with self.assertRaisesRegex(ValueError, "reserved"):
             compatible_request_fields(
                 AdapterFactoryContext(

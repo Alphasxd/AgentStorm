@@ -53,6 +53,8 @@ benchmark-compatible-local:
 		$(if $(CASES),--cases $(CASES),) \
 		$(if $(MAX_CONCURRENCY),--max-concurrency $(MAX_CONCURRENCY),) \
 		$(if $(MAX_TOKENS),--max-tokens $(MAX_TOKENS),) \
+		$(if $(HTTP_RETRY_ATTEMPTS),--http-retry-attempts $(HTTP_RETRY_ATTEMPTS),) \
+		$(if $(HTTP_RETRY_MAX_WAIT),--http-retry-max-wait $(HTTP_RETRY_MAX_WAIT),) \
 		$(if $(filter 1 true TRUE yes YES,$(PRICE_IS_ZERO_CONFIRMED)),--price-is-zero-confirmed,) \
 		--output $(or $(OUTPUT),.out/benchmark-compatible-local)
 
@@ -64,6 +66,8 @@ benchmark-compatible-keda:
 		--model-version "$(MODEL_VERSION)" --inference-server "$(INFERENCE_SERVER)" \
 		--quantization "$(QUANTIZATION)" --hardware "$(HARDWARE)" --topology "$(TOPOLOGY)" \
 		--namespace "$(or $(NAMESPACE),agentstorm-system)" --kube-context "$(KUBE_CONTEXT)" \
+		$(if $(HTTP_RETRY_ATTEMPTS),--http-retry-attempts $(HTTP_RETRY_ATTEMPTS),) \
+		$(if $(HTTP_RETRY_MAX_WAIT),--http-retry-max-wait $(HTTP_RETRY_MAX_WAIT),) \
 		--output $(or $(OUTPUT),.out/benchmark-compatible-keda)
 
 helm-test:

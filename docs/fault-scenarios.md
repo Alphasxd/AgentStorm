@@ -28,7 +28,7 @@ The document is limited to 64 KiB and 100 uniquely named rules. Unknown fields, 
 
 ## Retry safety
 
-`maxAttempts` includes the initial full Agent execution and defaults to `1`; existing Runs never gain a hidden retry. A retry repeats the entire Agent and can therefore repeat model charges and tool side effects. By default, AgentStorm retries only rate limits, explicitly safe pre-submit failures, and safe injected failures. Timeout, HTTP 5xx, malformed responses, and unknown connection failures require `allowAmbiguousRetries: true`. Evaluation, harness, tool, circuit-open, and cancellation outcomes are never retried.
+`maxAttempts` includes the initial full Agent execution and defaults to `1`; existing Runs never gain a hidden retry. A retry repeats the entire Agent and can therefore repeat model charges and tool side effects. By default, AgentStorm retries only rate limits, explicitly safe pre-submit failures, and safe injected failures. Timeout, HTTP 5xx, malformed responses, and unknown connection failures require `allowAmbiguousRetries: true`. Evaluation, harness, tool, circuit-open, and cancellation outcomes are never retried. The OpenAI-compatible adapter retries only HTTP 429 inside one chat call. HTTP 5xx stays a single adapter attempt and is priced at the unknown-call allowance. A case-level retry of that 5xx happens only when `allowAmbiguousRetries` is true, and the case token total includes every attempt.
 
 Backoff is exponential, capped by `maxBackoffMs` and `maxCumulativeBackoffMs`, and bounded by the case timeout. Jitter is deterministically derived from the configured seed, case ID, iteration, and attempt. If no seed is configured because no scenario is referenced, the deterministic retry seed is zero.
 

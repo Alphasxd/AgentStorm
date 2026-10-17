@@ -4,9 +4,10 @@ The adapter speaks the portable subset used by OpenAI-compatible hosted APIs
 and self-hosted servers such as vLLM and SGLang: ``POST {baseURL}/chat/completions``
 with bearer auth, function tools, and non-streaming JSON. It does not import a
 vendor SDK. Case retry, faults, price snapshots, and traces stay in the Worker
-middleware. This module retries one chat call on a retryable HTTP status so a
-429 in the middle of a tool loop does not discard completed turns, and it turns
-HTTP into ``AdapterResponse`` or ``ExecutionError``.
+middleware. This module retries one chat call on HTTP 429 so a rate limit in
+the middle of a tool loop does not discard completed turns. HTTP 5xx stays
+single-shot and is priced at the unknown-call allowance. It turns HTTP into
+``AdapterResponse`` or ``ExecutionError``.
 """
 
 from __future__ import annotations
@@ -43,12 +44,16 @@ _MAX_REQUEST_FIELDS = 16
 _MAX_REQUEST_FIELD_BYTES = 1024
 _MAX_REQUEST_FIELD_DEPTH = 6
 _MAX_OUTPUT_TOKENS = 131072
-# 429 is rate limiting. 502, 503, and 504 are the retryable gateway statuses.
-# Other 5xx responses stay single-shot so a deterministic fault is not retried.
-RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
+# Only HTTP 429 is retried inside one chat call. A 429 was not executed.
+# 5xx responses, including 502, 503, and 504, may already have been executed
+# and billed, so they stay single-shot. The runner retries them only when
+# allowAmbiguousRetries is true, and each attempt is priced.
+RETRYABLE_HTTP_STATUSES = frozenset({429})
 DEFAULT_HTTP_RETRY_ATTEMPTS = 3
 DEFAULT_HTTP_RETRY_INITIAL_SECONDS = 0.5
 DEFAULT_HTTP_RETRY_MAX_SECONDS = 8.0
+MAX_HTTP_RETRY_ATTEMPTS = 16
+MAX_HTTP_RETRY_WAIT_SECONDS = 300
 PROVIDER_ERROR_CODE_KEY = "agentstorm.provider.error_code"
 FINISH_REASON_KEY = "agentstorm.provider.finish_reason"
 RATE_LIMIT_EVENTS_KEY = "agentstorm.provider.rate_limit_events"
@@ -149,6 +154,38 @@ def validate_max_output_tokens(value: Any) -> int:
     if not 1 <= value <= _MAX_OUTPUT_TOKENS:
         raise ValueError("target.maxTokens must be between 1 and 131072")
     return value
+
+
+def validate_http_retry_attempts(value: Any) -> int:
+    """Return the number of tries for one HTTP 429 chat call."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("target.httpRetryAttempts must be an integer")
+    if not 1 <= value <= MAX_HTTP_RETRY_ATTEMPTS:
+        raise ValueError("target.httpRetryAttempts must be between 1 and 16")
+    return value
+
+
+def validate_http_retry_max_wait_seconds(value: Any) -> int:
+    """Return the cap, in seconds, for one 429 sleep."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("target.httpRetryMaxWaitSeconds must be an integer")
+    if not 1 <= value <= MAX_HTTP_RETRY_WAIT_SECONDS:
+        raise ValueError("target.httpRetryMaxWaitSeconds must be between 1 and 300")
+    return value
+
+
+def http_retry_adapter_kwargs(
+    attempts: int | None, max_wait_seconds: int | None
+) -> dict[str, Any]:
+    """Adapter constructor kwargs for the configured 429 retry, or none."""
+    kwargs: dict[str, Any] = {}
+    if attempts is not None:
+        kwargs["max_http_attempts"] = validate_http_retry_attempts(attempts)
+    if max_wait_seconds is not None:
+        kwargs["retry_max_backoff_seconds"] = float(
+            validate_http_retry_max_wait_seconds(max_wait_seconds)
+        )
+    return kwargs
 
 
 def validate_request_fields(
@@ -294,9 +331,9 @@ class _Ledger:
     already have accepted that request. ``unknown_calls`` is the marker for
     those omitted calls. ``response()`` copies it to
     ``metadata["agentstorm.usage.unknown_calls"]`` and does not add it to
-    ``model_call_count``. Retryable HTTP responses are recorded and are not
-    model calls. A 429 adds no tokens. A terminal ``5xx`` is priced once by
-    the caller, not once per retry.
+    ``model_call_count``. A retried 429 is recorded and is not a model call.
+    It adds no tokens. A ``5xx`` is not retried here. The caller prices that
+    one response.
     """
 
     model_calls: int = 0
@@ -384,9 +421,9 @@ class OpenAICompatibleAdapter:
         if (
             isinstance(max_http_attempts, bool)
             or not isinstance(max_http_attempts, int)
-            or not 1 <= max_http_attempts <= 8
+            or not 1 <= max_http_attempts <= MAX_HTTP_RETRY_ATTEMPTS
         ):
-            raise ValueError("max_http_attempts must be between 1 and 8")
+            raise ValueError("max_http_attempts must be between 1 and 16")
         if (
             not isinstance(retry_initial_backoff_seconds, (int, float))
             or isinstance(retry_initial_backoff_seconds, bool)
@@ -394,6 +431,7 @@ class OpenAICompatibleAdapter:
             or isinstance(retry_max_backoff_seconds, bool)
             or retry_initial_backoff_seconds < 0
             or retry_max_backoff_seconds < retry_initial_backoff_seconds
+            or retry_max_backoff_seconds > MAX_HTTP_RETRY_WAIT_SECONDS
         ):
             raise ValueError("retry backoff must be non-negative and capped")
         extra = validate_request_fields(request_fields)

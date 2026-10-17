@@ -73,15 +73,19 @@ bytes, and at most six levels deep. `model`, `messages`, `stream`, `tools`, `too
 `temperature`, and `max_tokens` are reserved so they cannot diverge from the recorded request.
 Benchmark manifests record `max_tokens` and `request_fields`.
 
-One chat call retries HTTP 429, 502, 503, and 504 inside the adapter. The default is 3 attempts,
-with backoff starting at 0.5 seconds, doubling, and capped at 8 seconds. A `Retry-After`
-delta-seconds or HTTP-date value replaces that backoff and is still capped at 8 seconds. There is
-no jitter. Completed tool turns stay in the message list, so a 429 does not rerun earlier tools.
-Other 5xx statuses, timeouts, and connection errors stay single-shot. A 429 adds no tokens and is
-not a model call. Intermediate 502, 503, and 504 responses are not charged. A terminal 5xx is
-priced once, at the same unknown-call allowance as a single failure, so retries do not multiply
-that allowance. That can undercount a 5xx the provider billed. Case-level retry still applies when
-the adapter gives up on a retry-safe 429.
+One chat call retries HTTP 429 inside the adapter. HTTP 5xx, including 502, 503, and 504, is
+single-shot: those responses may already have been executed and billed. The runner retries that
+ambiguous error only when `reliability.retry.allowAmbiguousRetries` is true, and token totals
+include every attempt. A 429 adds no tokens and is not a model call. Each 5xx is priced once, at
+the unknown-call allowance, when it happens.
+
+`target.httpRetryAttempts` (1 through 16, default 3) is the number of tries for one 429.
+`target.httpRetryMaxWaitSeconds` (1 through 300, default 8) caps one sleep. Backoff starts at 0.5
+seconds and doubles until that cap. A `Retry-After` delta-seconds or HTTP-date value replaces the
+backoff and is still capped. There is no jitter. Completed tool turns stay in the message list, so
+a 429 does not rerun earlier tools. Timeouts and connection errors stay single-shot. Exhausted 429
+retries remain retry-safe, so the runner can still retry the case. Benchmark manifests record both
+retry settings.
 
 Response bodies stay out of error strings. When `error.code` is an integer or string of at most 32
 characters matching `[A-Za-z0-9_.-]`, and it is not the API key, the adapter keeps it as

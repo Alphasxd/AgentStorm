@@ -181,7 +181,15 @@ class AdapterPluginTest(unittest.TestCase):
         )
         self.assertEqual(
             set(AdapterFactoryContext.__dataclass_fields__),
-            {"provider", "model", "base_url", "max_output_tokens", "request_fields"},
+            {
+                "provider",
+                "model",
+                "base_url",
+                "max_output_tokens",
+                "request_fields",
+                "http_retry_attempts",
+                "http_retry_max_wait_seconds",
+            },
         )
 
     def test_rejects_import_factory_and_return_failures_without_details(self) -> None:

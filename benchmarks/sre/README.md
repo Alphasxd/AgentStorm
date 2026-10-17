@@ -1,8 +1,14 @@
 # SRE Agent benchmark
 
-This benchmark measures a complete Agent execution, not a single prompt completion. Each of the
-32 synthetic incidents requires a four-tool evidence chain and a structured diagnosis. The tools
-are deterministic, read-only fixtures shipped in the Worker image.
+This benchmark measures tool use and instruction following along a fixed path. It does not measure
+diagnostic reasoning. Each of the 32 synthetic incidents requires the model to call `get_incident`,
+then `query_metrics` and `search_logs`, then `lookup_runbook` with the `error_signature` that only
+`search_logs` returns. The diagnosis values (`root_cause`, `severity`, `recommended_action`,
+`evidence`, and `runbook`) come from `lookup_runbook`. The instructions tell the model to copy them
+verbatim, and `evidence` is a JSON array of strings. `query_metrics` is required by the path
+assertion even though those diagnosis values do not depend on its numbers. A wrong path or a skipped
+tool cannot pass `validate_tool_usage`. The tools are deterministic, read-only fixtures shipped in
+the Worker image.
 
 ## No-cost validation
 
@@ -135,8 +141,11 @@ root-cause family. `--cases N` with smoke keeps the first N incidents instead. S
 protocol. Smoke and a capped full run set `complete=false`, omit performance claims, and exit 0
 when the harness itself finishes. Pass provider JSON with `--request-fields`, for example
 `'{"thinking":{"type":"disabled"}}'`. `make benchmark-compatible-local` forwards `SHAPE`, `CASES`,
-`MAX_CONCURRENCY`, `MAX_TOKENS`, and `PRICE_IS_ZERO_CONFIRMED=1`. Pass `--request-fields` on the
-Python command; Make does not quote that JSON.
+`MAX_CONCURRENCY`, `MAX_TOKENS`, `HTTP_RETRY_ATTEMPTS`, `HTTP_RETRY_MAX_WAIT`, and
+`PRICE_IS_ZERO_CONFIRMED=1`. Pass `--request-fields` on the Python command; Make does not quote
+that JSON. `--http-retry-attempts` (1 through 16, default 3) and `--http-retry-max-wait` (1
+through 300 seconds, default 8) set the in-call HTTP 429 retry. HTTP 5xx is not retried inside
+that call.
 
 ```bash
 AGENTSTORM_ALLOW_PROVIDER_SPEND=1 \
@@ -173,15 +182,18 @@ python3 hack/benchmark/run_sre_compatible.py --mode local --shape smoke \
   --input-price '0' --output-price '0' --price-is-zero-confirmed \
   --max-concurrency 1 --max-tokens 2048 \
   --request-fields '{"thinking":{"type":"disabled"}}' \
+  --http-retry-attempts 8 --http-retry-max-wait 120 \
   --output .out/benchmark-zai-smoke
 ```
 
 Check the Z.ai bill before `--price-is-zero-confirmed`. A confirmed zero price disables the USD 8
 stop. `python -m agentstorm_worker run` also requires `AGENTSTORM_ALLOW_PROVIDER_SPEND=1` and has
 no USD stop of its own. HTTP 429 responses may carry Z.ai code `1305` (overloaded) or `1302`
-(concurrency). The adapter keeps that code on the local attempt and retries the single chat call,
-honoring `Retry-After`, before the runner can restart the case. `1305` is overload, including at
-concurrency 1. This smoke is `complete=false` and is not a publishable benchmark.
+(concurrency). The adapter keeps that code on the local attempt and retries only that 429,
+honoring `Retry-After` up to `httpRetryMaxWaitSeconds`, before the runner can restart the case.
+`1305` is overload, including at concurrency 1, and a free-tier overload can last minutes, so the
+default of 3 attempts with an 8 second cap is too short. HTTP 5xx stays single-shot and is priced
+at the unknown-call allowance. This smoke is `complete=false` and is not a publishable benchmark.
 
 ### Kubernetes real endpoint
 

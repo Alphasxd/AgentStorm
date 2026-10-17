@@ -26,6 +26,8 @@ def create_adapter(
     adapter_entrypoint: str = "",
     max_output_tokens: int | None = None,
     request_fields: dict[str, Any] | None = None,
+    http_retry_attempts: int | None = None,
+    http_retry_max_wait_seconds: int | None = None,
 ) -> AgentAdapter:
     context = AdapterFactoryContext(
         provider=provider,
@@ -33,20 +35,33 @@ def create_adapter(
         base_url=base_url,
         max_output_tokens=max_output_tokens,
         request_fields=dict(request_fields or {}),
+        http_retry_attempts=http_retry_attempts,
+        http_retry_max_wait_seconds=http_retry_max_wait_seconds,
     )
     if adapter_entrypoint:
         return _create_plugin_adapter(adapter_entrypoint, context)
     if provider == "fake":
         return FakeAdapter()
     if provider == "openai-compatible":
-        from .openai_compatible import validate_max_output_tokens, validate_request_fields
+        from .openai_compatible import (
+            http_retry_adapter_kwargs,
+            validate_max_output_tokens,
+            validate_request_fields,
+        )
 
         fields = validate_request_fields(
             context.request_fields, reject_keys={"temperature", "max_tokens"}
         )
         if context.max_output_tokens is not None:
             fields["max_tokens"] = validate_max_output_tokens(context.max_output_tokens)
-        return OpenAICompatibleAdapter(model=model, base_url=base_url, request_fields=fields)
+        return OpenAICompatibleAdapter(
+            model=model,
+            base_url=base_url,
+            request_fields=fields,
+            **http_retry_adapter_kwargs(
+                context.http_retry_attempts, context.http_retry_max_wait_seconds
+            ),
+        )
     if provider == "openai-agents":
         from .openai_agents import OpenAIAgentsAdapter
 

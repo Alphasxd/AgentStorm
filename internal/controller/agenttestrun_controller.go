@@ -539,6 +539,12 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 	if run.Spec.Target.MaxTokens != nil && (*run.Spec.Target.MaxTokens < 1 || *run.Spec.Target.MaxTokens > 131072) {
 		return fmt.Errorf("target.maxTokens must be between 1 and 131072")
 	}
+	if run.Spec.Target.HTTPRetryAttempts != nil && (*run.Spec.Target.HTTPRetryAttempts < 1 || *run.Spec.Target.HTTPRetryAttempts > 16) {
+		return fmt.Errorf("target.httpRetryAttempts must be between 1 and 16")
+	}
+	if run.Spec.Target.HTTPRetryMaxWaitSeconds != nil && (*run.Spec.Target.HTTPRetryMaxWaitSeconds < 1 || *run.Spec.Target.HTTPRetryMaxWaitSeconds > 300) {
+		return fmt.Errorf("target.httpRetryMaxWaitSeconds must be between 1 and 300")
+	}
 	if err := validateRequestFields(run.Spec.Target.RequestFields); err != nil {
 		return err
 	}

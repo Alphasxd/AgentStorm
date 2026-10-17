@@ -167,7 +167,27 @@ class EndpointMetadataTest(unittest.TestCase):
         )
         self.assertEqual(sampled["spec"]["target"]["maxTokens"], 2048)
         self.assertEqual(sampled["spec"]["target"]["requestFields"]["thinking"]["type"], "disabled")
+        self.assertNotIn("httpRetryAttempts", sampled["spec"]["target"])
+        retried = compatible_run_resource(
+            "sreoc-run",
+            "agentstorm-system",
+            "dataset",
+            "scenario",
+            "provider-secret",
+            "ghcr.io/alphasxd/agentstorm-worker@sha256:" + "a" * 64,
+            1,
+            "glm-4.7-flash",
+            "https://api.z.ai/api/paas/v4",
+            "0",
+            "0",
+            False,
+            http_retry_attempts=8,
+            http_retry_max_wait_seconds=120,
+        )
+        self.assertEqual(retried["spec"]["target"]["httpRetryAttempts"], 8)
+        self.assertEqual(retried["spec"]["target"]["httpRetryMaxWaitSeconds"], 120)
         self.assertNotIn(secret, json.dumps(sampled))
+        self.assertNotIn(secret, json.dumps(retried))
 
     def test_unreachable_worker_endpoints_are_rejected_and_routable_ones_pass(self) -> None:
         attested = {
@@ -395,6 +415,10 @@ class MockProtocolTest(unittest.TestCase):
                 self.assertEqual(manifest["price_is_zero_confirmed"], True)
                 self.assertEqual(manifest["spend_guard"], "confirmed-zero-price")
                 self.assertEqual(manifest["run_configuration"]["target"]["max_tokens"], 2048)
+                self.assertEqual(manifest["run_configuration"]["target"]["http_retry_attempts"], 3)
+                self.assertEqual(
+                    manifest["run_configuration"]["target"]["http_retry_max_wait_seconds"], 8
+                )
                 self.assertEqual(
                     manifest["run_configuration"]["target"]["request_fields"]["thinking"]["type"],
                     "disabled",

@@ -107,11 +107,15 @@ func TestReconcileOpenAICompatibleSetsSpendOptInAndSampling(t *testing.T) {
 	scheme := testScheme(t)
 	run := testRun()
 	tokens := int32(2048)
+	retryAttempts := int32(8)
+	retryWait := int32(120)
 	run.Spec.Target.Provider = "openai-compatible"
 	run.Spec.Target.Model = "glm-4.7-flash"
 	run.Spec.Target.BaseURL = "https://example.invalid/v4"
 	run.Spec.Target.MaxTokens = &tokens
 	run.Spec.Target.RequestFields = []byte(`{"thinking":{"type":"disabled"}}`)
+	run.Spec.Target.HTTPRetryAttempts = &retryAttempts
+	run.Spec.Target.HTTPRetryMaxWaitSeconds = &retryWait
 	run.Spec.Target.APIKeySecretRef = &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "provider-credentials"},
 		Key:                  "api-key",
@@ -151,6 +155,9 @@ func TestReconcileOpenAICompatibleSetsSpendOptInAndSampling(t *testing.T) {
 	thinking := fields["thinking"].(map[string]any)
 	if targetConfig["maxTokens"] != float64(2048) || thinking["type"] != "disabled" {
 		t.Fatalf("unexpected sampling config: %#v", targetConfig)
+	}
+	if targetConfig["httpRetryAttempts"] != float64(8) || targetConfig["httpRetryMaxWaitSeconds"] != float64(120) {
+		t.Fatalf("unexpected retry config: %#v", targetConfig)
 	}
 }
 
@@ -1003,14 +1010,31 @@ func TestValidateAndDefault(t *testing.T) {
 	}
 
 	accepted := int32(2048)
+	retryAttempts := int32(8)
+	retryWait := int32(120)
 	run = testRun()
 	run.Spec.Target.Provider = "openai-compatible"
 	run.Spec.Target.Model = "glm-4.7-flash"
 	run.Spec.Target.BaseURL = "https://example.invalid/v4"
 	run.Spec.Target.MaxTokens = &accepted
 	run.Spec.Target.RequestFields = []byte(`{"thinking":{"type":"disabled"}}`)
+	run.Spec.Target.HTTPRetryAttempts = &retryAttempts
+	run.Spec.Target.HTTPRetryMaxWaitSeconds = &retryWait
 	if err := validateAndDefault(run); err != nil {
 		t.Fatalf("validate sampling fields: %v", err)
+	}
+
+	zeroAttempts := int32(0)
+	run = testRun()
+	run.Spec.Target.HTTPRetryAttempts = &zeroAttempts
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "httpRetryAttempts") {
+		t.Fatalf("expected httpRetryAttempts 0 to fail, got %v", err)
+	}
+	tooLongWait := int32(301)
+	run = testRun()
+	run.Spec.Target.HTTPRetryMaxWaitSeconds = &tooLongWait
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "httpRetryMaxWaitSeconds") {
+		t.Fatalf("expected httpRetryMaxWaitSeconds 301 to fail, got %v", err)
 	}
 }
 

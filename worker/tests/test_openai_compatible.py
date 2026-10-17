@@ -365,7 +365,7 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
         self.assertEqual(result.cost_usd, "0.000040000000")
         self.assertEqual(state["calls"], 2)
 
-    def test_retryable_status_retries_one_call_and_keeps_completed_tools(self) -> None:
+    def test_rate_limit_retries_one_call_and_keeps_completed_tools(self) -> None:
         calls: list[dict[str, Any]] = []
         tool_runs = {"n": 0}
         slept: list[float] = []
@@ -405,9 +405,6 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
             if len(calls) == 2:
                 self.assertEqual(body["messages"][-1]["role"], "tool")
                 return 429, {"error": {"code": 1305, "message": "overloaded"}}, {"Retry-After": "2"}
-            if len(calls) == 3:
-                self.assertEqual(body["messages"][-1]["role"], "tool")
-                return 502, {"error": {"code": "bad_gateway", "message": "later"}}, {}
             self.assertIn("thinking", body)
             self.assertEqual(body["max_tokens"], 64)
             return 200, _completion("done", {"prompt_tokens": 6, "completion_tokens": 1}), {}
@@ -431,24 +428,163 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
         response = asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
         self.assertEqual(response.output, "done")
         self.assertEqual(tool_runs["n"], 1)
-        self.assertEqual(len(calls), 4)
-        self.assertEqual(slept, [2.0, 1.0])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(slept, [2.0])
         self.assertEqual((response.input_tokens, response.output_tokens), (16, 5))
         self.assertEqual(response.model_call_count, 2)
-        self.assertEqual(response.metadata[RATE_LIMIT_EVENTS_KEY], 2)
-        self.assertEqual(response.metadata[RATE_LIMIT_CODES_KEY], ["1305", "bad_gateway"])
+        self.assertEqual(response.metadata[RATE_LIMIT_EVENTS_KEY], 1)
+        self.assertEqual(response.metadata[RATE_LIMIT_CODES_KEY], ["1305"])
         self.assertNotIn("agentstorm.usage.unknown_calls", response.metadata)
         self.assertNotIn("overloaded", json.dumps(response.metadata))
 
-    def test_exhausted_retryable_5xx_is_priced_once(self) -> None:
+    def test_ambiguous_5xx_after_a_tool_call_is_priced_and_not_retried(self) -> None:
+        calls = {"n": 0}
+        tool_runs = {"n": 0}
+        slept: list[float] = []
+
+        async def lookup() -> dict[str, str]:
+            tool_runs["n"] += 1
+            return {"ok": "yes"}
+
+        async def record_sleep(delay: float) -> None:
+            slept.append(delay)
+
+        def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return 200, {
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": {}},
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+                }
+            return 502, {"error": {"code": "bad_gateway", "message": "later"}}
+
+        base_url = _serve(self, respond)
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test",
+            base_url,
+            api_key="",
+            request_fields={"max_tokens": 64},
+            retry_sleep=record_sleep,
+            tools=[
+                ChatTool(
+                    "lookup",
+                    "Lookup.",
+                    {"type": "object", "properties": {}},
+                    lookup,
+                )
+            ],
+        )
+        with self.assertRaises(ExecutionError) as raised:
+            asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(tool_runs["n"], 1)
+        self.assertEqual(slept, [])
+        self.assertEqual(raised.exception.code, "http_5xx")
+        self.assertTrue(raised.exception.ambiguous)
+        self.assertFalse(raised.exception.safe_to_retry)
+        response = raised.exception.response
+        self.assertEqual(response.metadata[PROVIDER_ERROR_CODE_KEY], "bad_gateway")
+        self.assertNotIn(RATE_LIMIT_EVENTS_KEY, response.metadata)
+        self.assertEqual(response.model_call_count, 1)
+        self.assertEqual(response.input_tokens, 10 + UNKNOWN_CALL_INPUT_TOKENS)
+        self.assertEqual(response.output_tokens, 4 + 64)
+        self.assertEqual(response.metadata["agentstorm.usage.unknown_calls"], 1)
+        self.assertNotIn("later", str(raised.exception))
+
+    def test_ambiguous_5xx_is_single_shot_and_priced_once(self) -> None:
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                calls = {"n": 0}
+
+                def respond(
+                    headers: Any, body: dict[str, Any], status: int = status
+                ) -> tuple[int, dict[str, Any]]:
+                    del headers, body
+                    calls["n"] += 1
+                    return status, {"error": {"code": 1305, "message": "overloaded body"}}
+
+                base_url = _serve(self, respond)
+                adapter = OpenAICompatibleAdapter(
+                    "pinned-test",
+                    base_url,
+                    api_key="",
+                    request_fields={"max_tokens": 32},
+                    retry_sleep=_no_sleep,
+                )
+                with self.assertRaises(ExecutionError) as raised:
+                    asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
+                self.assertEqual(calls["n"], 1)
+                self.assertEqual(raised.exception.code, "http_5xx")
+                self.assertTrue(raised.exception.ambiguous)
+                self.assertEqual(
+                    raised.exception.response.metadata[PROVIDER_ERROR_CODE_KEY], "1305"
+                )
+                self.assertNotIn(RATE_LIMIT_EVENTS_KEY, raised.exception.response.metadata)
+                self.assertEqual(raised.exception.response.model_call_count, 0)
+                self.assertEqual(
+                    raised.exception.response.input_tokens, UNKNOWN_CALL_INPUT_TOKENS
+                )
+                self.assertEqual(raised.exception.response.output_tokens, 32)
+                self.assertEqual(
+                    raised.exception.response.metadata["agentstorm.usage.unknown_calls"], 1
+                )
+                self.assertNotIn("overloaded body", str(raised.exception))
+
+    def test_ambiguous_case_retry_prices_every_attempt(self) -> None:
         calls = {"n": 0}
 
         def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
             del headers, body
             calls["n"] += 1
-            return 503, {"error": {"code": 1305, "message": "overloaded body"}}
+            if calls["n"] == 1:
+                return 502, {"error": {"code": "bad_gateway", "message": "hidden"}}
+            return 200, _completion("done", {"prompt_tokens": 10, "completion_tokens": 5})
 
         base_url = _serve(self, respond)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": base_url,
+                            "pricing": {
+                                "inputUSDPerMillionTokens": "1",
+                                "outputUSDPerMillionTokens": "2",
+                            },
+                        },
+                        "workload": {"concurrency": 1, "iterations": 1, "timeout_seconds": 30},
+                        "reliability": {
+                            "retry": {
+                                "maxAttempts": 2,
+                                "initialBackoffMs": 1,
+                                "jitterRatio": 0,
+                                "allowAmbiguousRetries": True,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(path)
         adapter = OpenAICompatibleAdapter(
             "pinned-test",
             base_url,
@@ -456,17 +592,148 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
             request_fields={"max_tokens": 32},
             retry_sleep=_no_sleep,
         )
-        with self.assertRaises(ExecutionError) as raised:
-            asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
-        self.assertEqual(calls["n"], 3)
-        self.assertEqual(raised.exception.code, "http_5xx")
-        self.assertEqual(raised.exception.response.metadata[PROVIDER_ERROR_CODE_KEY], "1305")
-        self.assertEqual(raised.exception.response.metadata[RATE_LIMIT_EVENTS_KEY], 3)
-        self.assertEqual(raised.exception.response.model_call_count, 0)
-        self.assertEqual(raised.exception.response.input_tokens, UNKNOWN_CALL_INPUT_TOKENS)
-        self.assertEqual(raised.exception.response.output_tokens, 32)
-        self.assertEqual(raised.exception.response.metadata["agentstorm.usage.unknown_calls"], 1)
-        self.assertNotIn("overloaded body", str(raised.exception))
+        result = asyncio.run(
+            WorkloadRunner(config, adapter).execute([TestCase(case_id="1", prompt="hello")])
+        )[0][0]
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.attempts), 2)
+        self.assertEqual(result.attempts[0].error_code, "http_5xx")
+        self.assertEqual(result.attempts[0].retry_decision, "retry_ambiguous")
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(result.input_tokens, UNKNOWN_CALL_INPUT_TOKENS + 10)
+        self.assertEqual(result.output_tokens, 32 + 5)
+        self.assertEqual(result.cost_usd, "0.008276000000")
+
+        blocked_calls = {"n": 0}
+
+        def blocked(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            blocked_calls["n"] += 1
+            return 503, {"error": {"code": 1305, "message": "hidden"}}
+
+        blocked_url = _serve(self, blocked)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": blocked_url,
+                            "pricing": {
+                                "inputUSDPerMillionTokens": "1",
+                                "outputUSDPerMillionTokens": "2",
+                            },
+                        },
+                        "workload": {"concurrency": 1, "iterations": 1, "timeout_seconds": 30},
+                        "reliability": {
+                            "retry": {
+                                "maxAttempts": 2,
+                                "initialBackoffMs": 1,
+                                "jitterRatio": 0,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            blocked_config = load_run_config(path)
+        blocked_adapter = OpenAICompatibleAdapter(
+            "pinned-test",
+            blocked_url,
+            api_key="",
+            request_fields={"max_tokens": 32},
+            retry_sleep=_no_sleep,
+        )
+        blocked_result = asyncio.run(
+            WorkloadRunner(blocked_config, blocked_adapter).execute(
+                [TestCase(case_id="1", prompt="hello")]
+            )
+        )[0][0]
+        self.assertFalse(blocked_result.success)
+        self.assertEqual(len(blocked_result.attempts), 1)
+        self.assertEqual(blocked_result.attempts[0].retry_decision, "ambiguous_blocked")
+        self.assertEqual(blocked_calls["n"], 1)
+        self.assertEqual(blocked_result.input_tokens, UNKNOWN_CALL_INPUT_TOKENS)
+        self.assertEqual(blocked_result.output_tokens, 32)
+        self.assertEqual(blocked_result.cost_usd, "0.008256000000")
+
+    def test_http_retry_attempts_and_max_wait_come_from_target_config(self) -> None:
+        calls = {"n": 0}
+        slept: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            slept.append(delay)
+
+        def respond(
+            headers: Any, body: dict[str, Any]
+        ) -> tuple[int, dict[str, Any], dict[str, str]]:
+            del headers, body
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return 429, {"error": {"code": 1305, "message": "overloaded"}}, {"Retry-After": "1000"}
+            return 200, _completion("done", {"prompt_tokens": 4, "completion_tokens": 1}), {}
+
+        base_url = _serve_with_headers(self, respond)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": base_url,
+                            "httpRetryAttempts": 2,
+                            "httpRetryMaxWaitSeconds": 30,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(path)
+        self.assertEqual(config.target.http_retry_attempts, 2)
+        self.assertEqual(config.target.http_retry_max_wait_seconds, 30)
+        adapter = create_adapter(
+            config.target.provider,
+            model=config.target.model,
+            base_url=config.target.base_url,
+            http_retry_attempts=config.target.http_retry_attempts,
+            http_retry_max_wait_seconds=config.target.http_retry_max_wait_seconds,
+        )
+        adapter._sleep = record_sleep
+        response = asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
+        self.assertEqual(response.output, "done")
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(slept, [30.0])
+        self.assertNotIn("agentstorm.usage.unknown_calls", response.metadata)
+
+        for overrides in (
+            {"httpRetryAttempts": 0},
+            {"httpRetryAttempts": 17},
+            {"httpRetryAttempts": True},
+            {"httpRetryMaxWaitSeconds": 0},
+            {"httpRetryMaxWaitSeconds": 301},
+        ):
+            with self.subTest(overrides=overrides):
+                with TemporaryDirectory() as directory:
+                    path = Path(directory) / "run.json"
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "target": {
+                                    "provider": "openai-compatible",
+                                    "model": "pinned-test",
+                                    "baseURL": base_url,
+                                    **overrides,
+                                }
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "httpRetry"):
+                        load_run_config(path)
 
     def test_length_with_empty_content_is_truncated_output(self) -> None:
         def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:

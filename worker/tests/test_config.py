@@ -153,6 +153,8 @@ class ConfigTest(unittest.TestCase):
                             "baseURL": "http://127.0.0.1:9/v1",
                             "maxTokens": 2048,
                             "requestFields": {"thinking": {"type": "disabled"}},
+                            "httpRetryAttempts": 8,
+                            "httpRetryMaxWaitSeconds": 120,
                         }
                     }
                 ),
@@ -163,6 +165,8 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(
                 sampled.target.request_fields, {"thinking": {"type": "disabled"}}
             )
+            self.assertEqual(sampled.target.http_retry_attempts, 8)
+            self.assertEqual(sampled.target.http_retry_max_wait_seconds, 120)
             for target, error in (
                 (
                     {

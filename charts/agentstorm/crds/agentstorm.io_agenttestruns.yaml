@@ -89,6 +89,14 @@ spec:
                       type: object
                       maxProperties: 16
                       x-kubernetes-preserve-unknown-fields: true
+                    httpRetryAttempts:
+                      type: integer
+                      minimum: 1
+                      maximum: 16
+                    httpRetryMaxWaitSeconds:
+                      type: integer
+                      minimum: 1
+                      maximum: 300
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: target is immutable; create a new AgentTestRun

@@ -447,7 +447,7 @@ def compatible_request_fields(context: AdapterFactoryContext) -> dict[str, Any]:
 
 
 def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAdapter:
-    from ..adapters.openai_compatible import OpenAICompatibleAdapter
+    from ..adapters.openai_compatible import OpenAICompatibleAdapter, http_retry_adapter_kwargs
 
     adapter = OpenAICompatibleAdapter(
         model=context.model,
@@ -458,6 +458,9 @@ def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAd
         request_timeout_seconds=SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
         request_fields=compatible_request_fields(context),
         agent_name="sre-diagnostic-agent",
+        **http_retry_adapter_kwargs(
+            context.http_retry_attempts, context.http_retry_max_wait_seconds
+        ),
     )
     return _SRERecordingAdapter(adapter)
 

@@ -48,6 +48,10 @@ from run_sre_compatible import (
     validate_endpoint,
 )
 from agentstorm_worker.adapters.openai_compatible import (
+    DEFAULT_HTTP_RETRY_ATTEMPTS,
+    DEFAULT_HTTP_RETRY_MAX_SECONDS,
+    validate_http_retry_attempts,
+    validate_http_retry_max_wait_seconds,
     validate_max_output_tokens,
     validate_request_fields,
 )
@@ -92,6 +96,8 @@ def compatible_run_resource(
     reliability: bool,
     max_tokens: int | None = None,
     request_fields: dict[str, Any] | None = None,
+    http_retry_attempts: int | None = None,
+    http_retry_max_wait_seconds: int | None = None,
 ) -> dict[str, Any]:
     target: dict[str, Any] = {
         "provider": "openai-compatible",
@@ -108,6 +114,10 @@ def compatible_run_resource(
         target["maxTokens"] = max_tokens
     if request_fields:
         target["requestFields"] = request_fields
+    if http_retry_attempts is not None:
+        target["httpRetryAttempts"] = http_retry_attempts
+    if http_retry_max_wait_seconds is not None:
+        target["httpRetryMaxWaitSeconds"] = http_retry_max_wait_seconds
     spec: dict[str, Any] = {
         "target": target,
         "workload": {
@@ -214,6 +224,8 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=0)
     parser.add_argument("--request-fields", default="")
     parser.add_argument("--price-is-zero-confirmed", action="store_true")
+    parser.add_argument("--http-retry-attempts", type=int, default=0)
+    parser.add_argument("--http-retry-max-wait", type=int, default=0)
     args = parser.parse_args()
     try:
         require_spend_opt_in()
@@ -230,6 +242,16 @@ def main() -> None:
             request_fields = validate_request_fields(
                 parsed_fields, reject_keys={"temperature", "max_tokens"}
             )
+        http_retry_attempts = (
+            validate_http_retry_attempts(args.http_retry_attempts)
+            if args.http_retry_attempts
+            else DEFAULT_HTTP_RETRY_ATTEMPTS
+        )
+        http_retry_max_wait_seconds = (
+            validate_http_retry_max_wait_seconds(args.http_retry_max_wait)
+            if args.http_retry_max_wait
+            else int(DEFAULT_HTTP_RETRY_MAX_SECONDS)
+        )
         endpoint = validate_endpoint(
             model=args.model,
             base_url=args.base_url,
@@ -314,6 +336,8 @@ def main() -> None:
                 reliability,
                 max_tokens=max_tokens,
                 request_fields=request_fields or None,
+                http_retry_attempts=http_retry_attempts,
+                http_retry_max_wait_seconds=http_retry_max_wait_seconds,
             )
             if not reliability:
                 resource["metadata"]["annotations"] = {"round": str(round_index)}
@@ -402,6 +426,8 @@ def main() -> None:
                 "temperature": SRE_COMPATIBLE_TEMPERATURE,
                 "max_tokens": max_tokens,
                 "request_fields": request_fields,
+                "http_retry_attempts": http_retry_attempts,
+                "http_retry_max_wait_seconds": http_retry_max_wait_seconds,
                 "stream": False,
                 "adapter_entrypoint": ADAPTER,
             },

@@ -30,7 +30,15 @@ sys.path.insert(0, str(REPO_ROOT / "worker/src"))
 sys.path.insert(0, str(REPO_ROOT / "hack/benchmark"))
 
 from agentstorm_worker.adapters import AdapterFactoryContext
-from agentstorm_worker.adapters.openai_compatible import validate_base_url
+from agentstorm_worker.adapters.openai_compatible import (
+    DEFAULT_HTTP_RETRY_ATTEMPTS,
+    DEFAULT_HTTP_RETRY_MAX_SECONDS,
+    validate_base_url,
+    validate_http_retry_attempts,
+    validate_http_retry_max_wait_seconds,
+    validate_max_output_tokens,
+    validate_request_fields,
+)
 from agentstorm_worker.benchmarks.sre import (
     SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE,
     SRE_COMPATIBLE_MAX_MODEL_CALLS,
@@ -39,7 +47,6 @@ from agentstorm_worker.benchmarks.sre import (
     SRE_COMPATIBLE_TEMPERATURE,
     create_adapter,
 )
-from agentstorm_worker.adapters.openai_compatible import validate_max_output_tokens, validate_request_fields
 from agentstorm_worker.config import (
     PricingConfig,
     ReliabilityConfig,
@@ -486,6 +493,8 @@ async def execute_local(
     max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
     request_fields: dict[str, Any] | None = None,
     price_is_zero_confirmed: bool = False,
+    http_retry_attempts: int | None = None,
+    http_retry_max_wait_seconds: int | None = None,
 ) -> None:
     require_spend_opt_in()
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -495,6 +504,16 @@ async def execute_local(
         request_fields or {}, reject_keys={"temperature", "max_tokens"}
     )
     max_output_tokens = validate_max_output_tokens(max_output_tokens)
+    http_retry_attempts = (
+        DEFAULT_HTTP_RETRY_ATTEMPTS
+        if http_retry_attempts is None
+        else validate_http_retry_attempts(http_retry_attempts)
+    )
+    http_retry_max_wait_seconds = (
+        int(DEFAULT_HTTP_RETRY_MAX_SECONDS)
+        if http_retry_max_wait_seconds is None
+        else validate_http_retry_max_wait_seconds(http_retry_max_wait_seconds)
+    )
     prices = endpoint["pricing"]
     zero_confirmed = confirm_zero_price(
         str(prices["input"]), str(prices["output"]), price_is_zero_confirmed
@@ -510,6 +529,8 @@ async def execute_local(
             base_url=str(endpoint["base_url"]),
             max_output_tokens=max_output_tokens,
             request_fields=fields,
+            http_retry_attempts=http_retry_attempts,
+            http_retry_max_wait_seconds=http_retry_max_wait_seconds,
         )
     )
     prepare_output(output_dir)
@@ -625,6 +646,8 @@ async def execute_local(
         max_output_tokens=max_output_tokens,
         request_fields=fields,
         price_is_zero_confirmed=zero_confirmed,
+        http_retry_attempts=http_retry_attempts,
+        http_retry_max_wait_seconds=http_retry_max_wait_seconds,
     )
     if shape == "full" and not publishable:
         manifest["limitations"] = [
@@ -738,6 +761,8 @@ def _manifest(
     max_output_tokens: int = SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
     request_fields: dict[str, Any] | None = None,
     price_is_zero_confirmed: bool = False,
+    http_retry_attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
+    http_retry_max_wait_seconds: int = int(DEFAULT_HTTP_RETRY_MAX_SECONDS),
 ) -> dict[str, Any]:
     endpoint = dict(endpoint)
     endpoint.pop("pricing", None)
@@ -773,6 +798,8 @@ def _manifest(
                 "temperature": SRE_COMPATIBLE_TEMPERATURE,
                 "max_tokens": max_output_tokens,
                 "request_fields": request_fields or {},
+                "http_retry_attempts": http_retry_attempts,
+                "http_retry_max_wait_seconds": http_retry_max_wait_seconds,
                 "stream": False,
                 "adapter_entrypoint": ADAPTER,
             }
@@ -941,6 +968,8 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=0)
     parser.add_argument("--request-fields", default="")
     parser.add_argument("--price-is-zero-confirmed", action="store_true")
+    parser.add_argument("--http-retry-attempts", type=int, default=0)
+    parser.add_argument("--http-retry-max-wait", type=int, default=0)
     args = parser.parse_args()
     try:
         if args.mode == "mock":
@@ -950,6 +979,8 @@ def main() -> None:
                 or args.max_tokens
                 or args.request_fields
                 or args.price_is_zero_confirmed
+                or args.http_retry_attempts
+                or args.http_retry_max_wait
             ):
                 raise BenchmarkError(
                     "subset, concurrency, sampling, and zero-price flags are local-mode options"
@@ -988,6 +1019,8 @@ def main() -> None:
                 max_output_tokens=args.max_tokens or SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
                 request_fields=request_fields,
                 price_is_zero_confirmed=args.price_is_zero_confirmed,
+                http_retry_attempts=args.http_retry_attempts or None,
+                http_retry_max_wait_seconds=args.http_retry_max_wait or None,
             )
         )
     except (BenchmarkError, ValueError) as exc:

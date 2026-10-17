@@ -43,6 +43,14 @@ type AgentTargetSpec struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	RequestFields json.RawMessage `json:"requestFields,omitempty"`
+	// HTTPRetryAttempts is the per-call retry count for HTTP 429. Empty keeps the default of 3.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=16
+	HTTPRetryAttempts *int32 `json:"httpRetryAttempts,omitempty"`
+	// HTTPRetryMaxWaitSeconds caps one 429 Retry-After or backoff sleep. Empty keeps the default of 8.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=300
+	HTTPRetryMaxWaitSeconds *int32 `json:"httpRetryMaxWaitSeconds,omitempty"`
 }
 
 type AgentPricingSpec struct {

@@ -126,6 +126,8 @@ async def execute(args: argparse.Namespace) -> int:
                     adapter_entrypoint=config.target.adapter_entrypoint,
                     max_output_tokens=config.target.max_output_tokens,
                     request_fields=config.target.request_fields,
+                    http_retry_attempts=config.target.http_retry_attempts,
+                    http_retry_max_wait_seconds=config.target.http_retry_max_wait_seconds,
                 )
                 distributed_limiter = (
                     DistributedLimiter(

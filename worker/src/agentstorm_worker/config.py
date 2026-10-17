@@ -8,6 +8,8 @@ from typing import Any
 
 from .adapters.openai_compatible import (
     validate_base_url,
+    validate_http_retry_attempts,
+    validate_http_retry_max_wait_seconds,
     validate_max_output_tokens,
     validate_pinned_model,
     validate_request_fields,
@@ -30,6 +32,8 @@ class TargetConfig:
     pricing: PricingConfig | None = None
     max_output_tokens: int | None = None
     request_fields: dict[str, Any] = field(default_factory=dict)
+    http_retry_attempts: int | None = None
+    http_retry_max_wait_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,8 @@ def load_run_config(path: str | Path) -> RunConfig:
             pricing=_pricing(target.get("pricing")),
             max_output_tokens=_max_output_tokens(target),
             request_fields=_request_fields(target),
+            http_retry_attempts=_http_retry_attempts(target),
+            http_retry_max_wait_seconds=_http_retry_max_wait_seconds(target),
         ),
         workload=WorkloadConfig(
             concurrency=int(workload.get("concurrency") or 1),
@@ -492,6 +498,26 @@ def _max_output_tokens(target: dict[str, Any]) -> int | None:
     else:
         return None
     return validate_max_output_tokens(value)
+
+
+def _http_retry_attempts(target: dict[str, Any]) -> int | None:
+    if "httpRetryAttempts" in target:
+        value = target.get("httpRetryAttempts")
+    elif "http_retry_attempts" in target:
+        value = target.get("http_retry_attempts")
+    else:
+        return None
+    return validate_http_retry_attempts(value)
+
+
+def _http_retry_max_wait_seconds(target: dict[str, Any]) -> int | None:
+    if "httpRetryMaxWaitSeconds" in target:
+        value = target.get("httpRetryMaxWaitSeconds")
+    elif "http_retry_max_wait_seconds" in target:
+        value = target.get("http_retry_max_wait_seconds")
+    else:
+        return None
+    return validate_http_retry_max_wait_seconds(value)
 
 
 def _request_fields(target: dict[str, Any]) -> dict[str, Any]:

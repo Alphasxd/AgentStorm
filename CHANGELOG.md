@@ -19,11 +19,13 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
   returned by `lookup_runbook`, and both compatible instructions tell the model to copy them.
   `evidence` is a JSON array of strings. A test requires every schema constant to be an exact
   string in that case's tool results.
-- The OpenAI-compatible adapter retries one chat call on HTTP 429, 502, 503, and 504, up to 3
-  attempts, and honors `Retry-After` with backoff capped at 8 seconds. Completed tool turns are
-  kept. A 429 is unpriced. A terminal 5xx is priced once. Allowlisted `error.code` values are
-  stored as `agentstorm.provider.error_code` without response bodies. `finish_reason=length` with
-  empty content is `output_truncated`.
+- The OpenAI-compatible adapter retries one chat call only on HTTP 429. HTTP 5xx, including 502,
+  503, and 504, is single-shot and priced at the unknown-call allowance, including when a later
+  attempt succeeds. The runner retries that ambiguous error only when `allowAmbiguousRetries` is
+  true, and token totals include every attempt. `target.httpRetryAttempts` (default 3, maximum 16)
+  and `target.httpRetryMaxWaitSeconds` (default 8, maximum 300) configure the 429 retry.
+  Allowlisted `error.code` values are stored as `agentstorm.provider.error_code` without response
+  bodies. `finish_reason=length` with empty content is `output_truncated`.
 - `target.maxTokens` and `target.requestFields` configure the completion cap and provider JSON,
   including `thinking`. The benchmark spend estimate uses the configured cap. Local real-endpoint
   runs accept `--shape smoke`, `--cases`, and `--max-concurrency`. Smoke and a concurrency cap

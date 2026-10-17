@@ -11,8 +11,9 @@ class AdapterFactoryContext:
     """Non-secret immutable context passed to trusted adapter factories.
 
     ``max_output_tokens`` and ``request_fields`` are optional sampling and
-    provider JSON. Credentials, prices, and Secret objects stay out of this
-    context.
+    provider JSON. ``http_retry_attempts`` and ``http_retry_max_wait_seconds``
+    configure the in-call HTTP 429 retry. Credentials, prices, and Secret
+    objects stay out of this context.
     """
 
     provider: str
@@ -20,6 +21,8 @@ class AdapterFactoryContext:
     base_url: str = ""
     max_output_tokens: int | None = None
     request_fields: dict[str, Any] = field(default_factory=dict)
+    http_retry_attempts: int | None = None
+    http_retry_max_wait_seconds: int | None = None
 
 
 @dataclass(frozen=True)
