@@ -6,7 +6,14 @@ metadata:
   labels:
     app.kubernetes.io/name: agentstorm-controller
 spec:
+  # /readyz passes only after this process holds the leader lease. Recreate
+  # removes the current pod before the replacement has to become Ready, and
+  # LeaderElectionReleaseOnCancel frees the Lease during that shutdown.
+  # Additional replicas would stay Running but unready, so rollout status
+  # completes only for this single replica.
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: agentstorm-controller

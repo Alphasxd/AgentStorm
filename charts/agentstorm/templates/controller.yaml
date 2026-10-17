@@ -8,6 +8,12 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: {{ .Values.controller.replicaCount }}
+  {{- if .Values.controller.leaderElection }}
+  # /readyz passes only for the elected process. Recreate removes the current
+  # leader before the replacement has to become Ready.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "agentstorm.name" . }}

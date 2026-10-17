@@ -1,4 +1,10 @@
 AgentStorm is watching namespace {{ .Release.Namespace }}.
+{{- if and .Values.controller.leaderElection (gt (int .Values.controller.replicaCount) 1) }}
+
+controller.leaderElection is enabled with replicaCount {{ .Values.controller.replicaCount }}.
+Only the elected pod becomes Ready. Keep replicaCount at 1 so rollout status can finish.
+Followers stay Running and pass /healthz; they pass /readyz after they win the lease.
+{{- end }}
 
 Create a dataset ConfigMap, then submit an AgentTestRun whose runner.image is an immutable
 AgentStorm Worker reference. The v0.6 SRE example uses:

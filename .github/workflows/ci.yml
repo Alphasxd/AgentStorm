@@ -191,6 +191,8 @@ jobs:
           go install sigs.k8s.io/kind@v0.32.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Run namespace-scoped cluster E2E
+        # hack/e2e-local.sh retries once when a wait times out, the controller log
+        # contains "error retrieving resource lock", and a worker Job is Complete.
         env:
           CLUSTER_PROVIDER: kind
           DEPLOYMENT_PROFILE: namespace

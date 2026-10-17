@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=hack/e2e-kind-retry.sh
+source "$repo_root/hack/e2e-kind-retry.sh"
 cluster_provider="${CLUSTER_PROVIDER:-auto}"
 kind_cluster_name="${KIND_CLUSTER_NAME:-agentstorm}"
 kind_proxy_url="${KIND_PROXY_URL:-}"
@@ -16,6 +18,7 @@ expect_redaction="${EXPECT_REDACTION:-}"
 controller_image="${CONTROLLER_IMAGE:-agentstorm-controller:dev}"
 worker_image="${WORKER_IMAGE:-agentstorm-worker:dev}"
 wait_timeout="${E2E_TIMEOUT:-120s}"
+e2e_attempt=1
 kubectl_bin="${KUBECTL:-kubectl}"
 docker_bin="${DOCKER:-docker}"
 kind_bin="${KIND:-kind}"
@@ -187,16 +190,25 @@ diagnostics() {
   echo "AgentStorm E2E failed; collecting non-secret diagnostics" >&2
   "${kubectl_cmd[@]}" get deployment,pods -n agentstorm-system -o wide >&2 || true
   "${kubectl_cmd[@]}" get agenttestruns,jobs,pods -n "$e2e_namespace" -o wide >&2 || true
-  "${kubectl_cmd[@]}" logs -n agentstorm-system deployment/agentstorm-controller --tail=200 >&2 || true
+  "${kubectl_cmd[@]}" logs -n agentstorm-system deployment/agentstorm-controller --tail=400 >&2 || true
   exit "$exit_code"
 }
-trap diagnostics ERR
+execute_e2e() (
+  set -Eeuo pipefail
+  trap diagnostics ERR
 
-"${kubectl_cmd[@]}" cluster-info >/dev/null
+  "${kubectl_cmd[@]}" cluster-info >/dev/null
 
-if [[ "$skip_image_build" == "false" ]]; then
-  make -C "$repo_root" docker-build CONTROLLER_IMAGE="$controller_image" WORKER_IMAGE="$worker_image"
-fi
+  if [[ "$e2e_attempt" -gt 1 && "$skip_image_build" == "false" ]]; then
+    if "$docker_bin" image inspect "$controller_image" >/dev/null 2>&1 && "$docker_bin" image inspect "$worker_image" >/dev/null 2>&1; then
+      echo "reusing local controller and worker images for the kind retry" >&2
+      skip_image_build=true
+    fi
+  fi
+
+  if [[ "$skip_image_build" == "false" ]]; then
+    make -C "$repo_root" docker-build CONTROLLER_IMAGE="$controller_image" WORKER_IMAGE="$worker_image"
+  fi
 
 if [[ "$cluster_provider" == "kind" && "$load_local_images" == "true" ]]; then
   "$kind_bin" load docker-image "$controller_image" "$worker_image" --name "$kind_cluster_name"
@@ -453,4 +465,57 @@ else
   "${kubectl_cmd[@]}" delete configmap agentstorm-demo-dataset -n "$e2e_namespace" --ignore-not-found
 fi
 
-echo "AgentStorm E2E passed: context=$kube_context profile=$deployment_profile namespace=$e2e_namespace controller_image=$controller_image worker_image=$worker_image"
+  echo "AgentStorm E2E passed: context=$kube_context profile=$deployment_profile namespace=$e2e_namespace controller_image=$controller_image worker_image=$worker_image"
+)
+
+attempt_log="$(mktemp)"
+controller_log="$(mktemp)"
+job_status_file="$(mktemp)"
+trap 'rm -f "$attempt_log" "$controller_log" "$job_status_file"' EXIT
+
+run_and_capture() {
+  local status
+  set +e
+  set +o pipefail
+  execute_e2e 2>&1 | tee "$attempt_log" >&2
+  status=${PIPESTATUS[0]}
+  set -o pipefail
+  set -e
+  return "$status"
+}
+
+write_controller_log() {
+  {
+    cat "$attempt_log"
+    echo
+    "${kubectl_cmd[@]}" logs -n agentstorm-system deployment/agentstorm-controller --tail=400 2>/dev/null || true
+  } >"$controller_log"
+}
+
+write_job_status() {
+  if ! "${kubectl_cmd[@]}" get jobs -n "$e2e_namespace" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" Complete="}{.status.conditions[?(@.type=="Complete")].status}{"\n"}{end}' \
+    >"$job_status_file" 2>/dev/null; then
+    : >"$job_status_file"
+  fi
+}
+
+attempt_status=0
+run_and_capture || attempt_status=$?
+if [[ "$attempt_status" -eq 0 ]]; then
+  exit 0
+fi
+
+write_controller_log
+write_job_status
+if e2e_should_retry_kind_lock_flake "$cluster_provider" "$e2e_attempt" "$attempt_log" "$controller_log" "$job_status_file"; then
+  echo "AgentStorm E2E hit the kind API lock flake: a wait timed out, the controller log contains \"error retrieving resource lock\", and a worker Job is already Complete." >&2
+  echo "The diagnostics above are from the first attempt. Deleting kind cluster ${kind_cluster_name} and retrying once." >&2
+  "$kind_bin" delete cluster --name "$kind_cluster_name"
+  kind_create_cluster
+  e2e_attempt=2
+  execute_e2e
+  exit 0
+fi
+
+exit "$attempt_status"

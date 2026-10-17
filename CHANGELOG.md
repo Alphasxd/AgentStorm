@@ -5,6 +5,18 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
 
 ## [Unreleased]
 
+### Fixed
+
+- Controller `/readyz` stays unsuccessful until the process is elected leader, so
+  `kubectl rollout status` does not succeed while the manager cannot reach the API.
+  `/healthz` remains a ping. Electing Deployments use one replica and `Recreate`, and
+  the process releases its Lease on shutdown, so a replacement can become leader.
+  Extra electing replicas stay Running and become Ready only if they win the lease.
+- The kind E2E retries once when a wait times out, the controller log contains
+  `error retrieving resource lock`, and a worker Job is already Complete. The retry
+  keeps the first attempt's diagnostics, deletes that kind cluster, and runs again.
+  Any other failure stops immediately.
+
 ### Changed
 
 - Bundled result-stack object storage uses digest-pinned distroless `pgsty/silo`

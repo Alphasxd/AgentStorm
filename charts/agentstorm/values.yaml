@@ -2,12 +2,19 @@ nameOverride: ""
 fullnameOverride: ""
 
 controller:
+  # Keep this at 1 when leaderElection is true. Only the elected process passes
+  # /readyz, so extra replicas stay Running but unready and rollout status does
+  # not finish. /healthz remains a ping, so those replicas are not restarted
+  # and can win the lease after the leader stops renewing it.
   replicaCount: 1
   image:
     repository: ghcr.io/alphasxd/agentstorm-controller
     tag: v0.6.0
     digest: ""
     pullPolicy: IfNotPresent
+  # When true, the Deployment uses Recreate and /readyz stays false until this
+  # process wins the lease. When false, controller-runtime closes the elected
+  # channel after controllers start and the Deployment keeps RollingUpdate.
   leaderElection: false
   resultSink:
     enabled: false
