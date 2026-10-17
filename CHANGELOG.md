@@ -11,6 +11,8 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
   `kubectl rollout status` does not succeed while the manager cannot reach the API.
   `/healthz` remains a ping. Electing Deployments use one replica and `Recreate`, and
   the process releases its Lease on shutdown, so a replacement can become leader.
+  The Helm strategy sets `rollingUpdate` to null so a server-side apply upgrade from
+  the default RollingUpdate strategy is accepted.
   Extra electing replicas stay Running and become Ready only if they win the lease.
 - The kind E2E retries once when a wait times out, the controller log contains
   `error retrieving resource lock`, and a worker Job is already Complete. The retry
