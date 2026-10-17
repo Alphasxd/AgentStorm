@@ -144,14 +144,26 @@ artifacts, Helm packaging, Kubernetes/KEDA execution, reliability behavior, and 
 lifecycle evidence. The CRD remains `v1alpha1`; the release does not claim production HA,
 non-trusted multi-tenancy, or real-model performance.
 
-## Post-v0.6: Provider-neutral real-model benchmark — planned
+## Post-v0.6: Provider-neutral real-model benchmark — harness implemented, evidence not collected
 
-- Select an exact, versioned OpenAI-compatible domestic cloud model or a self-hosted inference API.
-- Record model and price metadata, or hardware, quantization, inference service, cluster, and network
-  topology for self-hosted runs.
-- Re-run the fixed 384-capacity plus 32-reliability SRE protocol without shrinking the matrix.
-- Treat SSH only as transport for a Worker-accessible HTTP/SDK inference endpoint. Use
-  `target.baseURL` for compatible APIs or a trusted `adapterEntrypoint` for another protocol.
+The execution harness is in tree. No domestic-cloud or self-hosted matrix has been run, and this
+repository commits no real-model performance numbers.
+
+- [x] Add one `openai-compatible` chat/tool provider, configured by base URL, pinned model id, and the
+  existing Secret-injected `OPENAI_API_KEY`.
+- [x] Reuse Worker retry, rate-limit, fault, accounting, price-snapshot, and telemetry machinery.
+- [x] Record pinned model, endpoint class, and price snapshot in the benchmark manifest, with the same
+  checksummed artifact shape as the fake validation.
+- [x] State, in the manifest, which claims mock, in-process, and Kubernetes evidence can support.
+- [x] Add local and Kubernetes runners that refuse to start without `AGENTSTORM_ALLOW_PROVIDER_SPEND=1`.
+- [x] Add a no-cost mock OpenAI-compatible server so CI never calls a billed endpoint.
+- [ ] Publish one complete domestic-cloud run of the unchanged 384-capacity plus 32-reliability protocol.
+- [ ] Publish one self-hosted run whose hardware, quantization, inference server, and topology are
+  operator-attested in the manifest.
+
+Domestic cloud and self-hosted servers share the provider. SSH remains transport for a
+Worker-reachable HTTP endpoint and is not an adapter. A partial matrix, a budget stop, a changed
+dataset or model, or a missing price snapshot stays non-publishable.
 
 ## What not to build yet
 

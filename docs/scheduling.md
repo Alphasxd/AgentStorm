@@ -103,6 +103,11 @@ with:
 | `AGENTSTORM_PROVIDER_LIMITS_JSON` | `{}` | Provider-specific `max_concurrency` and `requests_per_minute` caps |
 | `AGENTSTORM_PERMIT_LEASE_SECONDS` | `30` | Permit lease duration, from 10 through 300 seconds |
 
+Built-in provider keys are `fake`, `openai-agents`, and `openai-compatible`. The development KEDA
+overlay in `config/dev/keda` caps `openai-compatible` at 8 concurrent attempts and 60 requests per
+minute, the same permit as `openai-agents`. That cap is not a Helm chart default. Limits key off
+the provider name; adding the compatible provider did not change the permit protocol.
+
 Global and Provider-specific limits are both enforced; the effective admission must satisfy every
 configured cap. A saturated cap returns `429` with a bounded retry delay, and the Worker waits within
 the existing case timeout without consuming an M4 retry attempt. Permit expiry is fail-closed: the

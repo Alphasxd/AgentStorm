@@ -55,14 +55,103 @@ pod from the released Worker digest to record the exact Python, Worker, and Open
 versions. A publishable run requires the 32-Worker tier to reach 32 live Workers and all capacity
 cases to pass their schema and dependent-tool assertions.
 
-## Domestic cloud and self-hosted Providers
+## OpenAI-compatible real-model protocol
 
-The next benchmark should prefer an exact, versioned OpenAI-compatible domestic cloud model. Set
-`target.baseURL` for a compatible endpoint; use a trusted image-bundled `adapterEntrypoint` when a
-Provider requires another HTTP/SDK protocol. A self-hosted service may be reached through an SSH
-tunnel, but SSH only transports a stable Worker-accessible inference API and is not itself an
-Adapter.
+Domestic cloud endpoints and self-hosted OpenAI-compatible servers (vLLM, SGLang, and others) use
+`provider: openai-compatible` and `agentstorm_worker.benchmarks.sre:create_adapter`. The optional
+Agents SDK runner above is unchanged. SSH only transports a Worker-reachable HTTP server and is not
+an adapter. Codex and ChatGPT sessions are neither endpoints nor credentials.
 
-Every real run must record the exact model version and network topology. Self-hosted evidence must
-also record quantization, GPU, inference server, and cluster configuration. Codex and ChatGPT
-interactive sessions are neither benchmark endpoints nor substitutes for Provider credentials.
+The contract is [OpenAI-compatible provider](../../docs/openai-compatible.md). The SRE factory pins
+`temperature` 0 and `max_tokens` 512 and records both in the manifest. Real modes also require a
+decimal price snapshot and reject model ids `latest`, `auto`, and `default`. Domestic-cloud base
+URLs must be `https`. Example roots an operator may pin, none of which are defaults or measured
+results:
+
+```text
+https://dashscope.aliyuncs.com/compatible-mode/v1
+https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1
+http://host:8000/v1
+```
+
+The default worker NetworkPolicy allows TCP 443 and DNS. A server on another port needs its own
+policy. The Kubernetes runner rejects loopback and unspecified addresses, including a trailing DNS
+dot, `0.0.0.0`, and `::`.
+
+### No-cost mock
+
+```bash
+make benchmark-compatible-mock
+make sre-compatible-mock
+```
+
+`benchmark-compatible-mock` replays the 12-run capacity matrix and the 32-case reliability run
+against a local mock server. `sre-compatible-mock` is one 32-case smoke pass. Both pop
+`OPENAI_API_KEY` for the duration of the run, and the mock rejects an `Authorization` header. The
+mock still applies a price snapshot so cost plumbing is exercised, then strips timing, throughput,
+cost, speedup, and efficiency from the artifacts. `canonical` is false. These commands are the CI
+path. They support no domestic-cloud, self-hosted, or Kubernetes claim.
+
+### In-process real endpoint
+
+This calls a billed or self-hosted server. It does not start unless spend is explicitly allowed:
+
+```bash
+AGENTSTORM_ALLOW_PROVIDER_SPEND=1 \
+OPENAI_API_KEY='...' \
+MODEL='exact-model-id' \
+BASE_URL='https://example.invalid/compatible-mode/v1' \
+ENDPOINT_CLASS=domestic-cloud \
+INPUT_PRICE='<decimal USD per million input tokens>' \
+OUTPUT_PRICE='<decimal USD per million output tokens>' \
+make benchmark-compatible-local
+```
+
+Replace the model, base URL, and prices with the endpoint you will call. `INPUT_PRICE` and
+`OUTPUT_PRICE` are decimal USD per million tokens. For `ENDPOINT_CLASS=self-hosted`, also set
+`INFERENCE_SERVER`, `QUANTIZATION`, `HARDWARE`, and `TOPOLOGY`. `MODEL_VERSION` defaults to `MODEL`.
+Before each run the runner estimates spend for 32 cases, 8 model calls, and the attempt count
+(1 for capacity, 2 for reliability). Output tokens use the 512 `max_tokens` limit. Input tokens
+use an allowance of 8192 per call, which is above the largest scripted fixture request and the
+assistant history those calls can resend. The endpoint does not enforce that allowance. The
+runner refuses to start when recorded spend plus the estimate would pass USD 8. A timeout, `5xx`,
+or connection failure prices that one call at the same allowance and keeps earlier tokens, so the
+case cost stays populated. The case timeout is 2100 seconds,
+above two attempts times eight calls times the 120 second per-call timeout. A completed local
+matrix can report in-process duration and token cost for that pinned endpoint. It is `canonical=false` and is
+not a KEDA or speedup result. An incomplete matrix writes a report with no performance table and
+exits non-zero.
+
+### Kubernetes real endpoint
+
+Requires a KEDA-enabled AgentStorm install, a local Result API, and a digest-pinned Worker image
+built from a revision that contains this provider. The published `v0.6.0` Worker digest does not.
+The runner installs the API key as a Secret, deletes that Secret when it finishes, and scans
+artifacts for the key and the read token.
+
+```bash
+AGENTSTORM_ALLOW_PROVIDER_SPEND=1 \
+OPENAI_API_KEY='...' \
+AGENTSTORM_RESULT_READ_TOKEN='...' \
+WORKER_IMAGE='ghcr.io/alphasxd/agentstorm-worker@sha256:...' \
+RESULT_API_URL='http://127.0.0.1:8080' \
+MODEL='exact-model-id' \
+BASE_URL='https://example.invalid/compatible-mode/v1' \
+ENDPOINT_CLASS=domestic-cloud \
+INPUT_PRICE='<decimal USD per million input tokens>' \
+OUTPUT_PRICE='<decimal USD per million output tokens>' \
+KUBE_CONTEXT=kind-agentstorm \
+make benchmark-compatible-keda
+```
+
+Self-hosted runs add the same attested metadata as the local command. `canonical=true` only when all
+384 capacity executions and the 32-case reliability run finish, the price snapshot is present, the
+endpoint stayed pinned, and the KEDA evidence checks pass. The Kubernetes runner uses the same
+spend estimate and the same 2100 second case timeout. Its wait must be longer than that
+case timeout. A partial matrix, a budget stop, or a changed dataset or model exits non-zero and
+omits the performance table. Hardware, quantization,
+inference server, and topology in a self-hosted manifest are operator-supplied; AgentStorm does not
+probe GPUs.
+
+No real result is stored in this directory. Do not commit one until the manifest says `canonical=true`
+and the report's claims match that manifest.

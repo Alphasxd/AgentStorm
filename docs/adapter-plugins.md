@@ -41,6 +41,15 @@ Import errors, factory exceptions, and invalid return objects fail before the fi
 `harness/adapter_plugin_invalid`. Error messages are sanitized. Plugin code is trusted code in the
 Worker image: there is no process sandbox, so review it like any other dependency.
 
+## Built-in OpenAI-compatible provider
+
+`provider: openai-compatible` is a Worker adapter, not a plugin download. It posts to
+`{baseURL}/chat/completions` with the standard library and reads `OPENAI_API_KEY` from the process
+environment. Domain tools, including the SRE incident tools, stay in an image-bundled
+`adapterEntrypoint` such as `agentstorm_worker.benchmarks.sre:create_adapter`. A run with no
+entrypoint is plain chat and sends no tools. The optional `openai-agents` provider remains a
+separate SDK path. See [OpenAI-compatible provider](openai-compatible.md).
+
 ## Contribution checklist
 
 - Keep the Controller free of Provider imports and domain prompts.

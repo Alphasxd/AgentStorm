@@ -60,7 +60,7 @@ spec:
                   properties:
                     provider:
                       type: string
-                      enum: [fake, openai-agents]
+                      enum: [fake, openai-agents, openai-compatible]
                     model:
                       type: string
                     baseURL:
@@ -92,6 +92,8 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: target is immutable; create a new AgentTestRun
+                    - rule: "self.provider != 'openai-compatible' || (has(self.model) && self.model != '' && has(self.baseURL) && self.baseURL != '')"
+                      message: openai-compatible requires target.model and target.baseURL
                 workload:
                   type: object
                   required:

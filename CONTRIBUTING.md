@@ -8,8 +8,13 @@ make vet
 make test
 make test-envtest
 make test-benchmark
+make benchmark-compatible-mock
 HELM3=/path/to/helm-3.21.0 HELM4=/path/to/helm-4.2.2 make helm-test
 ```
+
+`make benchmark-compatible-mock` runs the fixed SRE matrix against a local mock server and must stay
+free of provider credentials. `make benchmark-compatible-local` and `make benchmark-compatible-keda`
+call a real endpoint and are not part of CI.
 
 `make test-envtest` downloads pinned Kubernetes control-plane binaries into the ignored `.cache/`
 directory and verifies CRD defaults, CEL immutability, and the status subresource against a real API

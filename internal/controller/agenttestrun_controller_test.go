@@ -893,6 +893,45 @@ func TestValidateAndDefault(t *testing.T) {
 	if err := validateAndDefault(run); err == nil {
 		t.Fatal("expected invalid adapter entrypoint to fail validation")
 	}
+
+	run = testRun()
+	run.Spec.Target.Provider = "openai-compatible"
+	run.Spec.Target.Model = "qwen2.5-72b-instruct"
+	if err := validateAndDefault(run); err == nil {
+		t.Fatal("expected openai-compatible without a base URL to fail validation")
+	}
+
+	run = testRun()
+	run.Spec.Target.Provider = "openai-compatible"
+	run.Spec.Target.Model = "pinned-model-id"
+	run.Spec.Target.BaseURL = "https://user:secret@example.invalid/v1"
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("expected credential-bearing base URL to fail, got %v", err)
+	}
+
+	run = testRun()
+	run.Spec.Target.Provider = "openai-agents"
+	run.Spec.Target.Model = "gpt-5.6-luna"
+	run.Spec.Target.BaseURL = "https://example.invalid/v1/chat/completions?api-version=2024"
+	if err := validateAndDefault(run); err != nil {
+		t.Fatalf("openai-agents should keep a query and chat completions path, got %v", err)
+	}
+
+	run = testRun()
+	run.Spec.Target.Provider = "openai-compatible"
+	run.Spec.Target.Model = "qwen2.5-72b-instruct"
+	run.Spec.Target.BaseURL = "https://example.invalid/v1/chat/completions"
+	if err := validateAndDefault(run); err == nil {
+		t.Fatal("expected chat completions path to fail validation")
+	}
+
+	run = testRun()
+	run.Spec.Target.Provider = "openai-compatible"
+	run.Spec.Target.Model = "qwen2.5-72b-instruct"
+	run.Spec.Target.BaseURL = "https://example.invalid/v1"
+	if err := validateAndDefault(run); err != nil {
+		t.Fatalf("validate openai-compatible target: %v", err)
+	}
 }
 
 func TestBuildScaledJobUsesDurableQueueAndBoundedPlacement(t *testing.T) {

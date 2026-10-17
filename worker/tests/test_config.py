@@ -107,6 +107,67 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-negative decimal"):
                 load_run_config(config_path)
 
+    def test_openai_compatible_requires_pinned_model_and_secret_free_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "run.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": "http://127.0.0.1:9/v1",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(config_path)
+            self.assertEqual(config.target.provider, "openai-compatible")
+            self.assertEqual(config.target.base_url, "http://127.0.0.1:9/v1")
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-agents",
+                            "model": "gpt-5.6-luna",
+                            "baseURL": "https://example.invalid/v1/chat/completions?api-version=2024",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            agents = load_run_config(config_path)
+            self.assertEqual(
+                agents.target.base_url,
+                "https://example.invalid/v1/chat/completions?api-version=2024",
+            )
+
+            for target, error in (
+                ({"provider": "openai-compatible", "model": "pinned-test"}, "baseURL is required"),
+                (
+                    {
+                        "provider": "openai-compatible",
+                        "model": "pinned test",
+                        "baseURL": "http://127.0.0.1:9/v1",
+                    },
+                    "pinned model",
+                ),
+                (
+                    {
+                        "provider": "openai-compatible",
+                        "model": "pinned-test",
+                        "baseURL": "https://user:secret@example.invalid/v1",
+                    },
+                    "credentials",
+                ),
+            ):
+                config_path.write_text(json.dumps({"target": target}), encoding="utf-8")
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(ValueError, error):
+                        load_run_config(config_path)
+
     def test_loads_and_validates_telemetry_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "run.json"

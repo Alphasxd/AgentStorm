@@ -14,6 +14,7 @@ from ..adapters.base import (
     AgentLifecycle,
     ToolLifecycleEvent,
 )
+from ..adapters.openai_compatible import UNKNOWN_CALL_INPUT_TOKENS
 from ..models import AdapterResponse, TestCase
 
 _FIXTURES = json.loads(
@@ -184,7 +185,170 @@ class SREFakeAdapter:
         return result
 
 
-class _SREOpenAIAdapter:
+# Pinned on the compatible SRE factory and copied into benchmark manifests.
+SRE_COMPATIBLE_TEMPERATURE = 0
+SRE_COMPATIBLE_MAX_OUTPUT_TOKENS = 512
+SRE_COMPATIBLE_MAX_MODEL_CALLS = 8
+SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS = 120
+# Same allowance the adapter uses when a call returns no usage. It is not a
+# request cap. See largest_scripted_request_tokens().
+SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE = UNKNOWN_CALL_INPUT_TOKENS
+
+_COMPATIBLE_INSTRUCTIONS = (
+    "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
+    "and window for both query_metrics and search_logs; those two calls may be made in "
+    "either order or together. Call lookup_runbook with the exact error_signature returned "
+    "by search_logs. Do not repeat tools or call any other tool. Return only a JSON object "
+    "with keys incident_id, root_cause, severity, recommended_action, evidence, and runbook. "
+    "Do not use Markdown."
+)
+
+_OBJECT_SCHEMA = {"type": "object", "additionalProperties": False}
+
+
+def _tool_schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {
+        **_OBJECT_SCHEMA,
+        "properties": properties,
+        "required": required,
+    }
+
+
+def approximate_token_count(text: str) -> int:
+    """Estimate tokens at about four characters each. This is not a model tokenizer."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def largest_scripted_request_tokens() -> int:
+    """Approximate tokens in the largest scripted SRE request, including tools and history."""
+
+    async def measure() -> int:
+        worst = 0
+        for incident_id in _INCIDENTS:
+            fetched = await get_incident(incident_id)
+            metrics = await query_metrics(fetched["service"], fetched["window"])
+            logs = await search_logs(fetched["service"], fetched["window"])
+            runbook = await lookup_runbook(str(logs["error_signature"]))
+            messages = _scripted_history(incident_id, fetched, metrics, logs, runbook)
+            payload = {
+                "model": "pinned-model-id",
+                "messages": messages,
+                "stream": False,
+                "tools": _compatible_tool_schemas(),
+                "tool_choice": "auto",
+                "temperature": SRE_COMPATIBLE_TEMPERATURE,
+                "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+            }
+            worst = max(worst, approximate_token_count(json.dumps(payload, ensure_ascii=False)))
+        return worst
+
+    return asyncio.run(measure())
+
+
+def _scripted_history(
+    incident_id: str,
+    fetched: dict[str, Any],
+    metrics: dict[str, Any],
+    logs: dict[str, Any],
+    runbook: dict[str, Any],
+) -> list[dict[str, Any]]:
+    service_window = {"service": fetched["service"], "window": fetched["window"]}
+    signature = {"error_signature": logs["error_signature"]}
+    return [
+        {"role": "system", "content": _COMPATIBLE_INSTRUCTIONS},
+        {
+            "role": "user",
+            "content": (
+                f"Investigate incident {incident_id}. Use the available read-only tools "
+                "and return the required diagnosis."
+            ),
+        },
+        _assistant_call("c1", "get_incident", {"incident_id": incident_id}),
+        _tool_message("c1", fetched),
+        _assistant_calls(
+            [("c2", "query_metrics", service_window), ("c3", "search_logs", service_window)]
+        ),
+        _tool_message("c2", metrics),
+        _tool_message("c3", logs),
+        _assistant_call("c4", "lookup_runbook", signature),
+        _tool_message("c4", runbook),
+    ]
+
+
+def _assistant_call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return _assistant_calls([(call_id, name, arguments)])
+
+
+def _assistant_calls(calls: list[tuple[str, str, dict[str, Any]]]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, sort_keys=True, separators=(",", ":")),
+                },
+            }
+            for call_id, name, arguments in calls
+        ],
+    }
+
+
+def _tool_message(call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    }
+
+
+def _compatible_tool_schemas() -> list[dict[str, Any]]:
+    from ..adapters.openai_compatible import ChatTool
+
+    string = {"type": "string"}
+    tools = [
+        ChatTool(
+            "get_incident",
+            "Read one synthetic incident by id.",
+            _tool_schema({"incident_id": string}, ["incident_id"]),
+            get_incident,
+        ),
+        ChatTool(
+            "query_metrics",
+            "Read synthetic service metrics for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            query_metrics,
+        ),
+        ChatTool(
+            "search_logs",
+            "Read synthetic service logs for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            search_logs,
+        ),
+        ChatTool(
+            "lookup_runbook",
+            "Read the synthetic runbook for an error signature.",
+            _tool_schema({"error_signature": string}, ["error_signature"]),
+            lookup_runbook,
+        ),
+    ]
+    return [tool.schema() for tool in tools]
+
+
+def _unwrap_json_fence(output: str) -> str:
+    stripped = output.strip()
+    if not stripped.startswith("```"):
+        return output
+    lines = stripped.splitlines()
+    if len(lines) < 3 or lines[-1].strip() != "```":
+        return output
+    return "\n".join(lines[1:-1]).strip()
+
+
+class _SRERecordingAdapter:
     def __init__(self, adapter: AgentAdapter) -> None:
         self._adapter = adapter
 
@@ -197,7 +361,12 @@ class _SREOpenAIAdapter:
             _TOOL_CALLS.reset(token)
         metadata = dict(response.metadata)
         metadata["agentstorm.sre.tool_calls"] = calls
-        return replace(response, metadata=metadata, tool_call_count=len(calls))
+        return replace(
+            response,
+            output=_unwrap_json_fence(response.output),
+            metadata=metadata,
+            tool_call_count=len(calls),
+        )
 
 
 def _create_openai_adapter(context: AdapterFactoryContext) -> AgentAdapter:
@@ -236,7 +405,53 @@ def _create_openai_adapter(context: AdapterFactoryContext) -> AgentAdapter:
         model_settings=ModelSettings(reasoning=Reasoning(effort="none"), parallel_tool_calls=True),
         serialize_output=lambda value: value.model_dump_json(),
     )
-    return _SREOpenAIAdapter(adapter)
+    return _SRERecordingAdapter(adapter)
+
+
+def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAdapter:
+    from ..adapters.openai_compatible import ChatTool, OpenAICompatibleAdapter
+
+    string = {"type": "string"}
+    tools = [
+        ChatTool(
+            "get_incident",
+            "Read one synthetic incident by id.",
+            _tool_schema({"incident_id": string}, ["incident_id"]),
+            get_incident,
+        ),
+        ChatTool(
+            "query_metrics",
+            "Read synthetic service metrics for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            query_metrics,
+        ),
+        ChatTool(
+            "search_logs",
+            "Read synthetic service logs for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            search_logs,
+        ),
+        ChatTool(
+            "lookup_runbook",
+            "Read the synthetic runbook for an error signature.",
+            _tool_schema({"error_signature": string}, ["error_signature"]),
+            lookup_runbook,
+        ),
+    ]
+    adapter = OpenAICompatibleAdapter(
+        model=context.model,
+        base_url=context.base_url,
+        instructions=_COMPATIBLE_INSTRUCTIONS,
+        tools=tools,
+        max_model_calls=SRE_COMPATIBLE_MAX_MODEL_CALLS,
+        request_timeout_seconds=SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
+        request_fields={
+            "temperature": SRE_COMPATIBLE_TEMPERATURE,
+            "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+        },
+        agent_name="sre-diagnostic-agent",
+    )
+    return _SRERecordingAdapter(adapter)
 
 
 def create_adapter(context: AdapterFactoryContext) -> AgentAdapter:
@@ -244,7 +459,9 @@ def create_adapter(context: AdapterFactoryContext) -> AgentAdapter:
         return SREFakeAdapter()
     if context.provider == "openai-agents":
         return _create_openai_adapter(context)
-    raise ValueError("SRE benchmark supports fake or openai-agents providers")
+    if context.provider == "openai-compatible":
+        return _create_openai_compatible_adapter(context)
+    raise ValueError("SRE benchmark supports fake, openai-agents, or openai-compatible providers")
 
 
 def validate_tool_usage(context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:

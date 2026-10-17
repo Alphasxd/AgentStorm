@@ -70,6 +70,12 @@ and snapshots the string; import, SDK, and domain behavior stay in the Worker. I
 ConfigMap scripts, remote downloads, and passing credential values through the factory context are
 intentionally unsupported. Trusted plugin code still shares the Worker process environment.
 
+Built-in providers are `fake`, `openai-agents`, and `openai-compatible`. The compatible provider is
+a standard-library client for `POST {baseURL}/chat/completions`. Domestic cloud endpoints and
+self-hosted servers such as vLLM share that client. The Controller requires a pinned model and a
+credential-free base URL, injects `OPENAI_API_KEY` from `apiKeySecretRef`, and still strips that
+Secret from the generated ConfigMap. See [OpenAI-compatible provider](openai-compatible.md).
+
 ## Result model
 
 The alpha worker writes one `results.jsonl` and one `summary.json` per shard and prints the summary

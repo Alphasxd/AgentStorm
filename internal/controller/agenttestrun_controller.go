@@ -506,7 +506,9 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 	if err := config.ValidateAndDefault(); err != nil {
 		return err
 	}
-	if run.Spec.Target.Provider != "fake" && run.Spec.Target.Provider != "openai-agents" {
+	switch run.Spec.Target.Provider {
+	case "fake", "openai-agents", "openai-compatible":
+	default:
 		return fmt.Errorf("unsupported provider %q", run.Spec.Target.Provider)
 	}
 	if entrypoint := run.Spec.Target.AdapterEntrypoint; entrypoint != "" &&
@@ -515,6 +517,19 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 	}
 	if run.Spec.Target.Provider == "openai-agents" && strings.TrimSpace(run.Spec.Target.Model) == "" {
 		return fmt.Errorf("target.model is required for provider openai-agents")
+	}
+	if run.Spec.Target.Provider == "openai-compatible" {
+		if err := validatePinnedModel(run.Spec.Target.Model); err != nil {
+			return err
+		}
+		if strings.TrimSpace(run.Spec.Target.BaseURL) == "" {
+			return fmt.Errorf("target.baseURL is required for provider openai-compatible")
+		}
+		// Query strings and a /chat/completions suffix are compatible-provider rules.
+		// openai-agents and fake keep the base URL they already accepted.
+		if err := validateBaseURL(run.Spec.Target.BaseURL); err != nil {
+			return err
+		}
 	}
 	if run.Spec.Target.Pricing != nil &&
 		(!pricePattern.MatchString(run.Spec.Target.Pricing.InputUSDPerMillionTokens) ||
@@ -567,6 +582,37 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 	}
 	if err := validateScheduling(run, config); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validatePinnedModel(model string) error {
+	if strings.TrimSpace(model) == "" || len(model) > 256 || strings.ContainsAny(model, " \t\r\n") {
+		return fmt.Errorf("target.model must be a pinned model id without whitespace")
+	}
+	return nil
+}
+
+func validateBaseURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 2048 || strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "\r\n\t") {
+		return fmt.Errorf("target.baseURL must be an absolute http or https URL without credentials")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("target.baseURL must be an absolute http or https URL without credentials")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("target.baseURL must not contain credentials")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("target.baseURL must not contain a query or fragment")
+	}
+	path := strings.TrimRight(parsed.EscapedPath(), "/")
+	if strings.HasSuffix(path, "/chat/completions") {
+		return fmt.Errorf("target.baseURL must be the API root, not the chat completions path")
 	}
 	return nil
 }

@@ -258,6 +258,20 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	if err := kubernetesClient.Create(ctx, tooManyShards); !apierrors.IsInvalid(err) {
 		t.Fatalf("excessive shard count error = %v, want Invalid", err)
 	}
+
+	compatible := validEnvtestRun(namespace.Name, "openai-compatible")
+	compatible.Spec.Target.Provider = "openai-compatible"
+	compatible.Spec.Target.Model = "qwen2.5-72b-instruct"
+	compatible.Spec.Target.BaseURL = "https://example.invalid/v1"
+	if err := kubernetesClient.Create(ctx, compatible); err != nil {
+		t.Fatalf("create openai-compatible AgentTestRun: %v", err)
+	}
+	incomplete := validEnvtestRun(namespace.Name, "openai-compatible-incomplete")
+	incomplete.Spec.Target.Provider = "openai-compatible"
+	incomplete.Spec.Target.Model = "qwen2.5-72b-instruct"
+	if err := kubernetesClient.Create(ctx, incomplete); !apierrors.IsInvalid(err) {
+		t.Fatalf("openai-compatible without baseURL error = %v, want Invalid", err)
+	}
 }
 
 func validEnvtestRun(namespace, name string) *agentstormv1alpha1.AgentTestRun {
