@@ -327,7 +327,17 @@ def execute_run(
         "retry_count": int(summary.get("retry_count", 0)),
         "retry_successes": int(summary.get("retry_successes", 0)),
         "injected_faults": int(summary.get("injected_faults", 0)),
+        # rate_limited_attempts counts case restarts whose error_code is
+        # rate_limited. in_call_retry_count counts HTTP 429 responses retried
+        # inside one chat call. The Result API does not store that count, so
+        # a Kubernetes run record stays 0 unless the stored attempt has it.
+        # Local cases.jsonl records it on the case.
         "rate_limited_attempts": error_codes["rate_limited"],
+        "in_call_retry_count": sum(
+            int(attempt.get("rate_limit_events") or 0)
+            for case in cases
+            for attempt in case.get("attempts", [])
+        ),
         "timeout_attempts": error_codes["timeout"],
         "tool_error_cases": tool_errors,
         "model_call_count": summary.get("model_call_count"),
@@ -506,8 +516,10 @@ def real_report(manifest: dict[str, Any], runs: list[dict[str, Any]]) -> str:
                 "",
                 f"At 16 Workers: {reliability['succeeded']}/{reliability['total']} succeeded; "
                 f"quality failures {reliability['quality_failures']}; infrastructure failures "
-                f"{reliability['infrastructure_failures']}; 429 attempts "
-                f"{reliability['rate_limited_attempts']}; timeouts {reliability['timeout_attempts']}; "
+                f"{reliability['infrastructure_failures']}; case-restart 429 attempts "
+                f"{reliability['rate_limited_attempts']}; in-call 429 retries "
+                f"{reliability.get('in_call_retry_count', 0)}; timeouts "
+                f"{reliability['timeout_attempts']}; "
                 f"tool errors {reliability['tool_error_cases']}; retry successes "
                 f"{reliability['retry_successes']}.",
             ]

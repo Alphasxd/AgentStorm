@@ -450,6 +450,7 @@ class WorkloadRunner:
             self._config, input_tokens, output_tokens, usage_complete
         )
         failed_types = [outcome.type for outcome in outcomes if not outcome.passed]
+        provider_error_code, in_call_retry_count = _case_provider_fields(attempts)
         return CaseResult(
             case_id=case.case_id,
             iteration=iteration,
@@ -471,6 +472,8 @@ class WorkloadRunner:
             input_cost_usd=input_cost,
             output_cost_usd=output_cost,
             cost_usd=total_cost,
+            provider_error_code=provider_error_code,
+            in_call_retry_count=in_call_retry_count,
         )
 
     async def _invoke_attempt(
@@ -597,8 +600,8 @@ class WorkloadRunner:
             circuit_events=list(execution_error.circuit_events)
             if execution_error is not None
             else [],
-            provider_error_code=_provider_token(
-                None if response is None else response.metadata.get("agentstorm.provider.error_code")
+            provider_error_code=_attempt_provider_code(
+                None if response is None else response.metadata
             ),
             rate_limit_events=_rate_limit_events(None if response is None else response.metadata),
             finish_reason=_provider_token(
@@ -621,9 +624,7 @@ class WorkloadRunner:
         input_cost, output_cost, total_cost = _costs_for_usage(
             self._config, input_tokens, output_tokens, usage_complete
         )
-        provider_error_code = ""
-        if attempts:
-            provider_error_code = attempts[-1].provider_error_code
+        provider_error_code, in_call_retry_count = _case_provider_fields(attempts)
         return CaseResult(
             case_id=case.case_id,
             iteration=iteration,
@@ -644,6 +645,7 @@ class WorkloadRunner:
             output_cost_usd=output_cost,
             cost_usd=total_cost,
             provider_error_code=provider_error_code,
+            in_call_retry_count=in_call_retry_count,
         )
 
     def _trace_circuit_events(self, events: tuple[str, ...]) -> None:
@@ -752,6 +754,41 @@ def summarize(
         thresholds_passed=not failures,
         threshold_failures=failures,
     )
+
+
+def _case_provider_fields(attempts: list[AttemptResult]) -> tuple[str, int]:
+    """Last allowlisted provider code and the in-call HTTP 429 count.
+
+    A 429 that is retried inside the chat call and then succeeds has no
+    terminal ``error_code``. The code still comes from that attempt, and the
+    count is the number of 429 responses, not the number of case restarts.
+    """
+    code = ""
+    for attempt in attempts:
+        if attempt.provider_error_code:
+            code = attempt.provider_error_code
+    return code, sum(attempt.rate_limit_events for attempt in attempts)
+
+
+def _attempt_provider_code(metadata: dict[str, Any] | None) -> str:
+    if not metadata:
+        return ""
+    terminal = _provider_token(metadata.get("agentstorm.provider.error_code"))
+    if terminal:
+        return terminal
+    return _last_rate_limit_code(metadata)
+
+
+def _last_rate_limit_code(metadata: dict[str, Any]) -> str:
+    codes = metadata.get("agentstorm.provider.rate_limit_codes")
+    if not isinstance(codes, list):
+        return ""
+    last = ""
+    for code in codes:
+        token = _provider_token(code)
+        if token:
+            last = token
+    return last
 
 
 def _provider_token(value: Any) -> str:

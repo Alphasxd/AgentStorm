@@ -39,6 +39,7 @@ from run_sre_compatible import (
     BenchmarkError,
     _revision,
     assert_case_timeout_covers_calls,
+    case_timeout_retry_warning,
     claim_policy,
     confirm_zero_price,
     limitations,
@@ -252,6 +253,14 @@ def main() -> None:
             if args.http_retry_max_wait
             else int(DEFAULT_HTTP_RETRY_MAX_SECONDS)
         )
+        retry_warning = case_timeout_retry_warning(
+            REAL_CASE_TIMEOUT_SECONDS,
+            2,
+            http_retry_attempts=http_retry_attempts,
+            http_retry_max_wait_seconds=http_retry_max_wait_seconds,
+        )
+        if retry_warning:
+            print(retry_warning, file=sys.stderr)
         endpoint = validate_endpoint(
             model=args.model,
             base_url=args.base_url,
@@ -438,7 +447,10 @@ def main() -> None:
         "claims": claim_policy(
             "openai-compatible-keda", canonical=complete, complete=complete
         ),
-        "limitations": limitations("openai-compatible-keda", endpoint),
+        "limitations": [
+            *limitations("openai-compatible-keda", endpoint),
+            *([retry_warning] if retry_warning else []),
+        ],
     }
     write_json(args.output / "manifest.json", manifest)
     write_json(args.output / "runs.json", runs)

@@ -258,6 +258,50 @@ def assert_case_timeout_covers_calls(timeout_seconds: int, attempts: int) -> Non
         )
 
 
+def http_retry_wait_budget_seconds(
+    case_attempts: int,
+    model_calls: int,
+    http_retry_attempts: int,
+    http_retry_max_wait_seconds: int,
+) -> int:
+    """Worst-case 429 wait: attempts x max wait, per chat call.
+
+    The adapter sleeps at most ``http_retry_attempts - 1`` times, so this
+    product is above the sleeps that can occur. It is the budget the case
+    timeout does not include.
+    """
+    return case_attempts * model_calls * http_retry_attempts * http_retry_max_wait_seconds
+
+
+def case_timeout_retry_warning(
+    timeout_seconds: int,
+    case_attempts: int,
+    *,
+    model_calls: int = SRE_COMPATIBLE_MAX_MODEL_CALLS,
+    socket_timeout_seconds: int = SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
+    http_retry_attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
+    http_retry_max_wait_seconds: int = int(DEFAULT_HTTP_RETRY_MAX_SECONDS),
+) -> str | None:
+    """Warn when 429 waits plus per-socket time can pass the case deadline."""
+    waits = http_retry_wait_budget_seconds(
+        case_attempts,
+        model_calls,
+        http_retry_attempts,
+        http_retry_max_wait_seconds,
+    )
+    sockets = case_attempts * model_calls * socket_timeout_seconds
+    if sockets + waits < timeout_seconds:
+        return None
+    return (
+        f"case timeout of {timeout_seconds}s does not cover worst-case HTTP 429 waits "
+        f"of httpRetryAttempts x httpRetryMaxWaitSeconds per chat call "
+        f"({http_retry_attempts} x {http_retry_max_wait_seconds}s) across "
+        f"{case_attempts} case attempts and {model_calls} model calls ({waits}s), "
+        f"in addition to {sockets}s of per-socket timeouts. The deadline can cancel "
+        "the case before that retry budget is spent."
+    )
+
+
 def claim_policy(mode: str, *, canonical: bool, complete: bool) -> dict[str, Any]:
     if mode == "openai-compatible-mock":
         return {
@@ -540,6 +584,14 @@ async def execute_local(
     stopped = False
     spent = Decimal(0)
     assert_case_timeout_covers_calls(REAL_CASE_TIMEOUT_SECONDS, 2)
+    retry_warning = case_timeout_retry_warning(
+        REAL_CASE_TIMEOUT_SECONDS,
+        2 if shape == "full" else 1,
+        http_retry_attempts=http_retry_attempts,
+        http_retry_max_wait_seconds=http_retry_max_wait_seconds,
+    )
+    if retry_warning:
+        print(retry_warning, file=sys.stderr)
     try:
         if shape == "smoke":
             workers = resolve_concurrency(1, shape, max_concurrency)
@@ -649,6 +701,8 @@ async def execute_local(
         http_retry_attempts=http_retry_attempts,
         http_retry_max_wait_seconds=http_retry_max_wait_seconds,
     )
+    if retry_warning:
+        manifest["limitations"] = [*manifest["limitations"], retry_warning]
     if shape == "full" and not publishable:
         manifest["limitations"] = [
             *manifest["limitations"],

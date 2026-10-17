@@ -195,6 +195,9 @@ def run_record(
     infrastructure = sum(
         item.failure_category in {"provider", "tool", "harness"} for item in results
     )
+    # retry_count and rate_limited_attempts count case restarts. A 429 that is
+    # retried inside one chat call and then succeeds does not add to either.
+    # in_call_retry_count is those HTTP 429 responses.
     retries = sum(max(0, len(item.attempts) - 1) for item in results)
     retry_successes = sum(item.success and len(item.attempts) > 1 for item in results)
     injected = sum(
@@ -204,6 +207,9 @@ def run_record(
         attempt.error_code == "rate_limited"
         for item in results
         for attempt in item.attempts
+    )
+    in_call_retries = sum(
+        attempt.rate_limit_events for item in results for attempt in item.attempts
     )
     timeouts = sum(
         attempt.error_code == "timeout" for item in results for attempt in item.attempts
@@ -238,6 +244,7 @@ def run_record(
         "retry_successes": retry_successes,
         "injected_faults": injected,
         "rate_limited_attempts": rate_limited,
+        "in_call_retry_count": in_call_retries,
         "timeout_attempts": timeouts,
         "tool_error_cases": tool_errors,
         "model_call_count": summary.model_call_count,
@@ -272,6 +279,8 @@ def case_record(run_id: str, result: Any) -> dict[str, Any]:
         "model_call_count": result.model_call_count,
         "tool_call_count": result.tool_call_count,
         "tool_path": result.tool_path,
+        "provider_error_code": result.provider_error_code or None,
+        "in_call_retry_count": result.in_call_retry_count,
         "attempts": [asdict(attempt) for attempt in result.attempts],
     }
 
