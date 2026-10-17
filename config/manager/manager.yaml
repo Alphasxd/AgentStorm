@@ -6,7 +6,18 @@ metadata:
   labels:
     app.kubernetes.io/name: agentstorm-controller
 spec:
+  # /readyz passes only after this process holds the leader lease.
+  # maxUnavailable 1 and maxSurge 0 remove the current pod before the
+  # replacement is created, and stay a RollingUpdate so a server-side apply
+  # upgrade of an existing install is accepted. LeaderElectionReleaseOnCancel
+  # frees the Lease during that shutdown. Additional replicas would stay
+  # Running but unready, so rollout status completes only for this single replica.
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: agentstorm-controller

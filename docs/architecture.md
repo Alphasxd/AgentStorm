@@ -108,6 +108,28 @@ M6 adds nullable model-call and exact tool-call counts to each attempt and case.
 never converted to zero. Tool counts come from the provider-independent lifecycle, and successful-
 Agent averages make multi-turn/tool behavior visible alongside throughput.
 
+## Controller leadership and readiness
+
+`/healthz` is a process ping. `/readyz` returns an error until `manager.Elected()` is closed.
+controller-runtime closes that channel after the process has started its controllers. With
+`--leader-elect`, that happens only once this process holds the Lease. The probe uses a
+non-blocking read, so a readiness request cannot wait on election and election does not wait on
+the probe.
+
+`config/manager` and the Helm chart, when leader election is enabled, run one replica with
+RollingUpdate `maxUnavailable: 1` and `maxSurge: 0`. That removes the current pod before the
+replacement is created, and the strategy type stays RollingUpdate so a server-side apply upgrade
+of an existing install can replace the default surge values. The process sets
+`LeaderElectionReleaseOnCancel` and then exits when the manager stops, so the outgoing pod releases
+the Lease before the replacement has to become Ready. `kubectl rollout status` therefore succeeds
+only after the replacement can reach the API and hold the lease. With leader election left off, the
+chart omits the strategy and Kubernetes uses its default RollingUpdate.
+
+A replica that has not been elected stays Running, because liveness does not depend on the lease.
+It becomes Ready if it later wins election. With more than one electing replica, rollout status
+keeps waiting because only the leader is Ready. The supported replica count with leader election
+enabled is 1.
+
 ## Failure semantics
 
 | Failure | Current behavior | Planned improvement |

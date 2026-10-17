@@ -107,6 +107,9 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         leaderElection,
 		LeaderElectionID:       "agentstorm-controller.agentstorm.io",
+		// The process returns as soon as Start returns, so releasing the Lease
+		// on shutdown cannot leave this process reconciling afterward.
+		LeaderElectionReleaseOnCancel: true,
 	}
 	if watchNamespace != "" {
 		managerOptions.Cache.DefaultNamespaces = map[string]cache.Config{watchNamespace: {}}
@@ -135,7 +138,10 @@ func main() {
 		ctrl.Log.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := manager.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	// /readyz fails until this process is elected, so rollout status does not
+	// succeed while the manager still cannot reach the API. /healthz stays a
+	// ping so a follower is not restarted. See leaderReadyChecker.
+	if err := manager.AddReadyzCheck("leader", leaderReadyChecker(manager.Elected())); err != nil {
 		ctrl.Log.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
