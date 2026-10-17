@@ -11,6 +11,7 @@ or ``ExecutionError``.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import os
 import urllib.error
@@ -28,6 +29,8 @@ _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_URL_LENGTH = 2048
 _MAX_MODEL_LENGTH = 256
 _RESERVED_REQUEST_FIELDS = {"model", "messages", "stream", "tools", "tool_choice"}
+# Distinct from a proven model-call count of zero.
+_LEDGER_COUNT = object()
 
 
 class _RejectRedirect(urllib.request.HTTPRedirectHandler):
@@ -123,9 +126,10 @@ class _Ledger:
         self.input_tokens += usage[0]
         self.output_tokens += usage[1]
 
-    def response(self, output: str = "", *, model_calls: int | None = 0) -> AdapterResponse:
-        # model_calls=0 means "use the ledger count". None means the total is unproven.
-        calls = self.model_calls if model_calls == 0 else model_calls
+    def response(
+        self, output: str = "", *, model_calls: int | None | object = _LEDGER_COUNT
+    ) -> AdapterResponse:
+        calls = self.model_calls if model_calls is _LEDGER_COUNT else model_calls
         return AdapterResponse(
             output=output,
             input_tokens=self.input_tokens if self.usage_known else None,
@@ -193,7 +197,19 @@ class OpenAICompatibleAdapter:
             if self._tool_schemas:
                 payload["tools"] = self._tool_schemas
                 payload["tool_choice"] = "auto"
-            status, body = await asyncio.to_thread(self._post, payload, api_key.strip(), ledger)
+            try:
+                status, body = await asyncio.to_thread(self._post, payload, api_key.strip(), ledger)
+            except asyncio.CancelledError as exc:
+                # The worker thread can still finish the paid request. Do not
+                # report that missing usage as a proven zero.
+                ledger.usage_known = False
+                raise _error(
+                    "timeout",
+                    failure_kind="timeout",
+                    ambiguous=True,
+                    ledger=ledger,
+                    model_calls=None,
+                ) from exc
             if status != 200:
                 raise _status_error(status, ledger)
             ledger.model_calls += 1
@@ -252,8 +268,10 @@ class OpenAICompatibleAdapter:
             status = int(exc.code)
             try:
                 downloaded = exc.read(_MAX_RESPONSE_BYTES + 1)
-            except Exception:
-                downloaded = b""
+            except (http.client.HTTPException, OSError) as read_error:
+                raise _error(
+                    "connection_error", ambiguous=True, ledger=ledger, model_calls=None
+                ) from read_error
         except TimeoutError as exc:
             raise _error(
                 "timeout", failure_kind="timeout", ambiguous=True, ledger=ledger, model_calls=None
@@ -267,6 +285,10 @@ class OpenAICompatibleAdapter:
                     ledger=ledger,
                     model_calls=None,
                 ) from exc
+            raise _error(
+                "connection_error", ambiguous=True, ledger=ledger, model_calls=None
+            ) from exc
+        except (http.client.HTTPException, OSError) as exc:
             raise _error(
                 "connection_error", ambiguous=True, ledger=ledger, model_calls=None
             ) from exc
@@ -319,7 +341,9 @@ class OpenAICompatibleAdapter:
                 content = json.dumps(
                     result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                 )
-            except ExecutionError:
+            except ExecutionError as exc:
+                if lifecycle is not None:
+                    lifecycle.tool_finished(replace(event, result=None), error_type=exc.code)
                 raise
             except TypeError as exc:
                 if lifecycle is not None:
@@ -455,12 +479,15 @@ def _error(
     ambiguous: bool = False,
     safe_to_retry: bool = False,
     ledger: _Ledger | None = None,
-    model_calls: int | None = 0,
+    model_calls: int | None | object = _LEDGER_COUNT,
     usage_complete: bool = False,
 ) -> ExecutionError:
-    response = ledger.response(model_calls=model_calls) if ledger is not None else None
     if model_calls is None:
         usage_complete = False
+        if ledger is not None:
+            # The call may have been accepted. A zero token total would hide that.
+            ledger.usage_known = False
+    response = ledger.response(model_calls=model_calls) if ledger is not None else None
     return ExecutionError(
         category,
         code,

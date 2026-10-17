@@ -15,6 +15,16 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
 
 ### Fixed
 
+- OpenAI-compatible benchmark runners price a worst-case token ceiling before each run and refuse
+  to start when recorded spend plus that ceiling would pass USD 8. Input tokens use the same
+  ceiling as `max_tokens` because prompt size is uncapped. Cancelling an in-flight HTTP call
+  records unknown usage, and the real-run case timeout stays above two attempts times eight calls
+  times the 120 second per-call timeout.
+- Incomplete or reset response bodies map to an ambiguous `connection_error` with a null
+  model-call count. A tool `ExecutionError` closes its lifecycle span before it propagates.
+  Base URL shape checks apply only to `openai-compatible`. The Kubernetes runner rejects loopback
+  and unspecified addresses, including a trailing DNS dot. The 8-concurrent / 60 rpm cap remains
+  the development KEDA overlay and is not a Helm chart default.
 - Controller `/readyz` stays unsuccessful until the process is elected leader, so
   `kubectl rollout status` does not succeed while the manager cannot reach the API.
   `/healthz` remains a ping. Electing Deployments in `config/manager` and the Helm chart

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import os
 import platform
 import re
@@ -29,7 +30,13 @@ sys.path.insert(0, str(REPO_ROOT / "hack/benchmark"))
 
 from agentstorm_worker.adapters import AdapterFactoryContext
 from agentstorm_worker.adapters.openai_compatible import validate_base_url
-from agentstorm_worker.benchmarks.sre import create_adapter
+from agentstorm_worker.benchmarks.sre import (
+    SRE_COMPATIBLE_MAX_MODEL_CALLS,
+    SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+    SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
+    SRE_COMPATIBLE_TEMPERATURE,
+    create_adapter,
+)
 from agentstorm_worker.config import (
     PricingConfig,
     ReliabilityConfig,
@@ -61,10 +68,15 @@ from run_sre_keda import SPEND_STOP_USD, reliability_evidence_complete, scan_sec
 MOCK_MODEL = "mock-sre-protocol"
 ADAPTER = "agentstorm_worker.benchmarks.sre:create_adapter"
 DATASET = REPO_ROOT / "examples/datasets/sre-incidents.jsonl"
+DATASET_CASES = 32
 UNPINNED_MODELS = {"latest", "auto", "default"}
-LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 PRICE = re.compile(r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$")
 _FIELD = re.compile(r"^[^\r\n]{1,512}$")
+# Two reliability attempts must finish inside the case timeout, including every
+# per-call HTTP timeout, so a case deadline cannot cancel a paid request.
+REAL_CASE_TIMEOUT_SECONDS = (
+    2 * SRE_COMPATIBLE_MAX_MODEL_CALLS * SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS + 180
+)
 
 
 class BenchmarkError(RuntimeError):
@@ -105,8 +117,10 @@ def validate_endpoint(
     host = parsed.hostname or ""
     if endpoint_class == "domestic-cloud" and parsed.scheme != "https":
         raise BenchmarkError("domestic-cloud endpoints must use https")
-    if reject_loopback and host.casefold() in LOOPBACK_HOSTS:
-        raise BenchmarkError("Kubernetes Workers cannot use a loopback endpoint")
+    if reject_loopback and _kubernetes_unreachable(host):
+        raise BenchmarkError(
+            "Kubernetes Workers cannot use a loopback or unspecified endpoint"
+        )
     if not PRICE.fullmatch(input_price) or not PRICE.fullmatch(output_price):
         raise BenchmarkError("prices must be non-negative decimal strings")
     version = model_version or model
@@ -134,6 +148,51 @@ def validate_endpoint(
         endpoint.update(attested)
         endpoint["attestation"] = "operator-supplied; AgentStorm does not probe GPUs"
     return endpoint
+
+
+def _kubernetes_unreachable(host: str) -> bool:
+    """Reject hosts a Worker pod cannot use as a remote inference endpoint."""
+    normalized = host.strip().rstrip(".").casefold()
+    if normalized == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def worst_case_run_usd(input_price: str, output_price: str, attempts: int) -> Decimal:
+    """Ceiling for one 32-case run before it is allowed to start.
+
+    Output tokens are capped by the SRE factory. Input tokens are not, so the
+    same token count is charged at the input price. A high input price therefore
+    cannot pass a check that only prices ``max_tokens``.
+    """
+    calls = Decimal(DATASET_CASES * SRE_COMPATIBLE_MAX_MODEL_CALLS * attempts)
+    tokens = calls * Decimal(SRE_COMPATIBLE_MAX_OUTPUT_TOKENS)
+    million = Decimal(1_000_000)
+    return (tokens * Decimal(input_price) + tokens * Decimal(output_price)) / million
+
+
+def reserve_benchmark_spend(
+    spent: Decimal, input_price: str, output_price: str, attempts: int
+) -> None:
+    """Refuse to start a run that could finish above the recorded-cost stop."""
+    estimate = worst_case_run_usd(input_price, output_price, attempts)
+    if spent + estimate > SPEND_STOP_USD:
+        raise BenchmarkError(
+            "USD 8 recorded-cost stop: spent "
+            f"{spent} plus worst-case {estimate} exceeds the cap"
+        )
+
+
+def assert_case_timeout_covers_calls(timeout_seconds: int, attempts: int) -> None:
+    needed = attempts * SRE_COMPATIBLE_MAX_MODEL_CALLS * SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS
+    if needed >= timeout_seconds:
+        raise BenchmarkError(
+            "case timeout must exceed max attempts times model calls times the per-call timeout"
+        )
 
 
 def claim_policy(mode: str, *, canonical: bool, complete: bool) -> dict[str, Any]:
@@ -326,12 +385,16 @@ async def execute_local(output_dir: Path, endpoint: dict[str, Any], image_digest
     error: str | None = None
     stopped = False
     spent = Decimal(0)
+    prices = endpoint["pricing"]
+    assert_case_timeout_covers_calls(REAL_CASE_TIMEOUT_SECONDS, 2)
     try:
         for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
             for sequence, workers in enumerate(order, start=1):
-                if spent >= SPEND_STOP_USD:
+                try:
+                    reserve_benchmark_spend(spent, prices["input"], prices["output"], 1)
+                except BenchmarkError:
                     stopped = True
-                    raise BenchmarkError("USD 8 recorded-cost stop reached before the next run")
+                    raise
                 record = await _append_run(
                     runs,
                     case_records,
@@ -348,9 +411,11 @@ async def execute_local(output_dir: Path, endpoint: dict[str, Any], image_digest
                 if record["cost_usd"] is None:
                     raise BenchmarkError("capacity cost is unknown; refusing to start another run")
                 spent += Decimal(record["cost_usd"])
-        if spent >= SPEND_STOP_USD:
+        try:
+            reserve_benchmark_spend(spent, prices["input"], prices["output"], 2)
+        except BenchmarkError:
             stopped = True
-            raise BenchmarkError("USD 8 recorded-cost stop reached before the reliability run")
+            raise
         await _append_run(
             runs,
             case_records,
@@ -422,7 +487,7 @@ async def _append_run(
             base.workload,
             concurrency=workers,
             iterations=1,
-            timeout_seconds=1800 if endpoint is not None else 120,
+            timeout_seconds=REAL_CASE_TIMEOUT_SECONDS if endpoint is not None else 120,
         ),
         reliability=(
             ReliabilityConfig(
@@ -511,8 +576,8 @@ def _manifest(
             "target": {
                 "provider": "openai-compatible",
                 "model": model,
-                "temperature": 0,
-                "max_tokens": 512,
+                "temperature": SRE_COMPATIBLE_TEMPERATURE,
+                "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
                 "stream": False,
                 "adapter_entrypoint": ADAPTER,
             }

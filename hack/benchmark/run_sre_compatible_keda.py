@@ -32,12 +32,17 @@ from run_sre_benchmark import (
 from run_sre_compatible import (
     ADAPTER,
     DATASET,
+    REAL_CASE_TIMEOUT_SECONDS,
+    SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+    SRE_COMPATIBLE_TEMPERATURE,
     BenchmarkError,
     _revision,
+    assert_case_timeout_covers_calls,
     claim_policy,
     limitations,
     render_report,
     require_spend_opt_in,
+    reserve_benchmark_spend,
     validate_endpoint,
 )
 from run_sre_keda import (
@@ -97,7 +102,7 @@ def compatible_run_resource(
             "parallelism": 32,
             "concurrencyPerWorker": 1,
             "iterations": 1,
-            "timeoutSeconds": 1800,
+            "timeoutSeconds": REAL_CASE_TIMEOUT_SECONDS,
         },
         "evaluation": {} if reliability else {"minSuccessRate": 1, "maxErrorRate": 0},
         "scheduling": {
@@ -160,8 +165,12 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
     if not IMAGE_DIGEST.fullmatch(args.worker_image):
         raise SystemExit("--worker-image must be an immutable sha256 digest reference")
-    if not 60 <= args.timeout_seconds <= 7200:
-        raise SystemExit("--timeout-seconds must be between 60 and 7200")
+    assert_case_timeout_covers_calls(REAL_CASE_TIMEOUT_SECONDS, 2)
+    if not REAL_CASE_TIMEOUT_SECONDS < args.timeout_seconds <= 7200:
+        raise SystemExit(
+            "--timeout-seconds must be greater than the case timeout "
+            f"({REAL_CASE_TIMEOUT_SECONDS}s) and at most 7200"
+        )
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     read_token = os.environ.get("AGENTSTORM_RESULT_READ_TOKEN", "")
     if not api_key or not read_token:
@@ -203,9 +212,11 @@ def main() -> None:
         spent = Decimal(0)
         for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
             for sequence, workers in enumerate(order, start=1):
-                if spent >= SPEND_STOP_USD:
+                try:
+                    reserve_benchmark_spend(spent, args.input_price, args.output_price, 1)
+                except BenchmarkError:
                     stopped_for_budget = True
-                    raise BenchmarkError("USD 8 recorded-cost stop reached before the next run")
+                    raise
                 name = f"{prefix}-r{round_index}s{sequence}w{workers}"
                 resource = compatible_run_resource(
                     name,
@@ -229,9 +240,11 @@ def main() -> None:
                 if record["cost_usd"] is None:
                     raise BenchmarkError("capacity cost is unknown; refusing to start another run")
                 spent += Decimal(record["cost_usd"])
-        if spent >= SPEND_STOP_USD:
+        try:
+            reserve_benchmark_spend(spent, args.input_price, args.output_price, 2)
+        except BenchmarkError:
             stopped_for_budget = True
-            raise BenchmarkError("USD 8 recorded-cost stop reached before the reliability run")
+            raise
         reliability_name = prefix + "-reliability"
         resource = compatible_run_resource(
             reliability_name,
@@ -312,8 +325,8 @@ def main() -> None:
                 "provider": "openai-compatible",
                 "model": args.model,
                 "base_url": args.base_url,
-                "temperature": 0,
-                "max_tokens": 512,
+                "temperature": SRE_COMPATIBLE_TEMPERATURE,
+                "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
                 "stream": False,
                 "adapter_entrypoint": ADAPTER,
             },

@@ -903,10 +903,18 @@ func TestValidateAndDefault(t *testing.T) {
 
 	run = testRun()
 	run.Spec.Target.Provider = "openai-compatible"
-	run.Spec.Target.Model = "latest"
+	run.Spec.Target.Model = "pinned-model-id"
 	run.Spec.Target.BaseURL = "https://user:secret@example.invalid/v1"
 	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "credentials") {
 		t.Fatalf("expected credential-bearing base URL to fail, got %v", err)
+	}
+
+	run = testRun()
+	run.Spec.Target.Provider = "openai-agents"
+	run.Spec.Target.Model = "gpt-5.6-luna"
+	run.Spec.Target.BaseURL = "https://example.invalid/v1/chat/completions?api-version=2024"
+	if err := validateAndDefault(run); err != nil {
+		t.Fatalf("openai-agents should keep a query and chat completions path, got %v", err)
 	}
 
 	run = testRun()

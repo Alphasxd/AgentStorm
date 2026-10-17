@@ -161,12 +161,11 @@ def load_run_config(path: str | Path) -> RunConfig:
         telemetry=_telemetry(telemetry),
         reliability=_reliability(raw.get("reliability")),
     )
-    if config.target.base_url:
-        validate_base_url(config.target.base_url)
     if config.target.provider == "openai-compatible":
         validate_pinned_model(config.target.model)
         if not config.target.base_url:
             raise ValueError("target.baseURL is required for provider openai-compatible")
+        validate_base_url(config.target.base_url)
     if config.target.provider == "openai-agents" and not config.target.model.strip():
         raise ValueError("target.model is required for provider openai-agents")
     if config.workload.concurrency < 1 or config.workload.iterations < 1:

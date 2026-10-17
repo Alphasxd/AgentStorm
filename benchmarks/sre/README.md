@@ -75,7 +75,8 @@ http://host:8000/v1
 ```
 
 The default worker NetworkPolicy allows TCP 443 and DNS. A server on another port needs its own
-policy. The Kubernetes runner rejects loopback hosts.
+policy. The Kubernetes runner rejects loopback and unspecified addresses, including a trailing DNS
+dot, `0.0.0.0`, and `::`.
 
 ### No-cost mock
 
@@ -109,8 +110,12 @@ make benchmark-compatible-local
 Replace the model, base URL, and prices with the endpoint you will call. `INPUT_PRICE` and
 `OUTPUT_PRICE` are decimal USD per million tokens. For `ENDPOINT_CLASS=self-hosted`, also set
 `INFERENCE_SERVER`, `QUANTIZATION`, `HARDWARE`, and `TOPOLOGY`. `MODEL_VERSION` defaults to `MODEL`.
-The runner stops before the next run once recorded cost reaches USD 8. A completed local matrix can
-report in-process duration and token cost for that pinned endpoint. It is `canonical=false` and is
+Before each run the runner prices a ceiling of 32 cases, 8 model calls, the attempt count (1 for
+capacity, 2 for reliability), and 512 tokens at both the input and the output price. It refuses to
+start when recorded spend plus that ceiling would pass USD 8. Prompt size is not capped by
+`max_tokens`, so the input price uses the same token ceiling. The case timeout is 2100 seconds,
+above two attempts times eight calls times the 120 second per-call timeout. A completed local
+matrix can report in-process duration and token cost for that pinned endpoint. It is `canonical=false` and is
 not a KEDA or speedup result. An incomplete matrix writes a report with no performance table and
 exits non-zero.
 
@@ -138,8 +143,10 @@ make benchmark-compatible-keda
 
 Self-hosted runs add the same attested metadata as the local command. `canonical=true` only when all
 384 capacity executions and the 32-case reliability run finish, the price snapshot is present, the
-endpoint stayed pinned, and the KEDA evidence checks pass. A partial matrix, a budget stop, or a
-changed dataset or model exits non-zero and omits the performance table. Hardware, quantization,
+endpoint stayed pinned, and the KEDA evidence checks pass. The Kubernetes runner uses the same
+worst-case spend reserve and the same 2100 second case timeout. Its wait must be longer than that
+case timeout. A partial matrix, a budget stop, or a changed dataset or model exits non-zero and
+omits the performance table. Hardware, quantization,
 inference server, and topology in a self-hosted manifest are operator-supplied; AgentStorm does not
 probe GPUs.
 

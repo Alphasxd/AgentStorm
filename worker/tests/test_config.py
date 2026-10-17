@@ -126,6 +126,24 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.target.provider, "openai-compatible")
             self.assertEqual(config.target.base_url, "http://127.0.0.1:9/v1")
 
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-agents",
+                            "model": "gpt-5.6-luna",
+                            "baseURL": "https://example.invalid/v1/chat/completions?api-version=2024",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            agents = load_run_config(config_path)
+            self.assertEqual(
+                agents.target.base_url,
+                "https://example.invalid/v1/chat/completions?api-version=2024",
+            )
+
             for target, error in (
                 ({"provider": "openai-compatible", "model": "pinned-test"}, "baseURL is required"),
                 (

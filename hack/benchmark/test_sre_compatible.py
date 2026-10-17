@@ -7,18 +7,22 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openai_compatible_mock import diagnosis, load_fixtures, scripted_completion
 from run_sre_compatible import (
+    REAL_CASE_TIMEOUT_SECONDS,
     BenchmarkError,
     claim_policy,
     execute_mock,
     render_report,
     require_spend_opt_in,
+    reserve_benchmark_spend,
     validate_endpoint,
+    worst_case_run_usd,
 )
 from run_sre_compatible_keda import compatible_run_resource
 
@@ -126,8 +130,53 @@ class EndpointMetadataTest(unittest.TestCase):
             "https://example.invalid/compatible-mode/v1",
         )
         self.assertEqual(resource["spec"]["target"]["apiKeySecretRef"]["name"], "provider-secret")
+        self.assertEqual(
+            resource["spec"]["workload"]["timeoutSeconds"], REAL_CASE_TIMEOUT_SECONDS
+        )
         self.assertNotIn(secret, rendered)
         self.assertNotIn("OPENAI_API_KEY", rendered)
+
+    def test_unreachable_worker_endpoints_are_rejected_and_routable_ones_pass(self) -> None:
+        attested = {
+            "endpoint_class": "self-hosted",
+            "input_price": "0",
+            "output_price": "0",
+            "inference_server": "vllm/0.6.3",
+            "quantization": "none",
+            "hardware": "1xA100-80GB",
+            "topology": "operator laptop tunnel",
+            "reject_loopback": True,
+        }
+        for base_url in (
+            "http://0.0.0.0:8000/v1",
+            "http://[::1]:8000/v1",
+            "http://[::]:8000/v1",
+            "http://localhost.:8000/v1",
+            "http://127.0.0.1.:8000/v1",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaisesRegex(BenchmarkError, "loopback or unspecified"):
+                    validate_endpoint(
+                        model="Qwen/Qwen2.5-72B-Instruct",
+                        base_url=base_url,
+                        **attested,
+                    )
+        endpoint = validate_endpoint(
+            model="Qwen/Qwen2.5-72B-Instruct",
+            base_url="http://10.1.2.3:8000/v1",
+            **attested,
+        )
+        self.assertEqual(endpoint["host"], "10.1.2.3")
+
+    def test_spend_reserve_stops_before_one_run_can_pass_the_cap(self) -> None:
+        one_attempt = worst_case_run_usd("1", "2", 1)
+        self.assertEqual(one_attempt, Decimal("0.393216"))
+        self.assertEqual(worst_case_run_usd("1", "2", 2), one_attempt * 2)
+        reserve_benchmark_spend(Decimal(0), "1", "2", 1)
+        with self.assertRaisesRegex(BenchmarkError, "worst-case"):
+            reserve_benchmark_spend(Decimal(0), "0", "70", 1)
+        with self.assertRaisesRegex(BenchmarkError, "worst-case"):
+            reserve_benchmark_spend(Decimal("7.9"), "1", "2", 1)
 
     def test_non_canonical_report_makes_no_performance_claim(self) -> None:
         manifest = {

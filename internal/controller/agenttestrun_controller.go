@@ -525,9 +525,11 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 		if strings.TrimSpace(run.Spec.Target.BaseURL) == "" {
 			return fmt.Errorf("target.baseURL is required for provider openai-compatible")
 		}
-	}
-	if err := validateBaseURL(run.Spec.Target.BaseURL); err != nil {
-		return err
+		// Query strings and a /chat/completions suffix are compatible-provider rules.
+		// openai-agents and fake keep the base URL they already accepted.
+		if err := validateBaseURL(run.Spec.Target.BaseURL); err != nil {
+			return err
+		}
 	}
 	if run.Spec.Target.Pricing != nil &&
 		(!pricePattern.MatchString(run.Spec.Target.Pricing.InputUSDPerMillionTokens) ||

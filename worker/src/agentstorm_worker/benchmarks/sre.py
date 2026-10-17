@@ -184,6 +184,12 @@ class SREFakeAdapter:
         return result
 
 
+# Pinned on the compatible SRE factory and copied into benchmark manifests.
+SRE_COMPATIBLE_TEMPERATURE = 0
+SRE_COMPATIBLE_MAX_OUTPUT_TOKENS = 512
+SRE_COMPATIBLE_MAX_MODEL_CALLS = 8
+SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS = 120
+
 _COMPATIBLE_INSTRUCTIONS = (
     "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
     "and window for both query_metrics and search_logs; those two calls may be made in "
@@ -309,8 +315,12 @@ def _create_openai_compatible_adapter(context: AdapterFactoryContext) -> AgentAd
         base_url=context.base_url,
         instructions=_COMPATIBLE_INSTRUCTIONS,
         tools=tools,
-        max_model_calls=8,
-        request_fields={"temperature": 0, "max_tokens": 512},
+        max_model_calls=SRE_COMPATIBLE_MAX_MODEL_CALLS,
+        request_timeout_seconds=SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
+        request_fields={
+            "temperature": SRE_COMPATIBLE_TEMPERATURE,
+            "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+        },
         agent_name="sre-diagnostic-agent",
     )
     return _SRERecordingAdapter(adapter)

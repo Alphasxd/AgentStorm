@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import socket
+import struct
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,6 +69,54 @@ def _serve(test: unittest.TestCase, respond) -> str:
     test.addCleanup(close)
     host, port = server.server_address[:2]
     return f"http://{host}:{port}/v1"
+
+
+def _drop_after_headers(test: unittest.TestCase, status: int) -> str:
+    """Accept the request, send headers, then reset before the body."""
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                connection.settimeout(2)
+                received = b""
+                while b"\r\n\r\n" not in received:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    received += chunk
+                reason = "OK" if status == 200 else "Error"
+                header = (
+                    f"HTTP/1.1 {status} {reason}\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Content-Length: 100\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                )
+                connection.sendall(header.encode("ascii"))
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            except OSError:
+                pass
+            finally:
+                connection.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    def close() -> None:
+        listener.close()
+        thread.join(timeout=2)
+
+    test.addCleanup(close)
+    return f"http://127.0.0.1:{port}/v1"
 
 
 def _completion(content: str, usage: dict[str, int] | None = None) -> dict[str, Any]:
@@ -243,6 +292,106 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
         self.assertTrue(raised.exception.ambiguous)
         self.assertNotIn("do-not-leak", str(raised.exception))
         self.assertEqual(raised.exception.response.model_call_count, 1)
+
+    def test_truncated_body_is_an_ambiguous_connection_error(self) -> None:
+        for status in (200, 500):
+            with self.subTest(status=status):
+                base_url = _drop_after_headers(self, status)
+                adapter = OpenAICompatibleAdapter(
+                    "pinned-test", base_url, api_key="", request_timeout_seconds=2
+                )
+                with self.assertRaises(ExecutionError) as raised:
+                    asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
+                self.assertEqual(raised.exception.code, "connection_error")
+                self.assertTrue(raised.exception.ambiguous)
+                self.assertFalse(raised.exception.usage_complete)
+                self.assertIsNotNone(raised.exception.response)
+                self.assertIsNone(raised.exception.response.model_call_count)
+                self.assertIsNone(raised.exception.response.input_tokens)
+
+    def test_tool_execution_error_closes_the_lifecycle_span(self) -> None:
+        async def fail() -> dict[str, str]:
+            raise ExecutionError("tool", "injected_fault", "tool")
+
+        def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            return 200, {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "fail", "arguments": {}},
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            }
+
+        base_url = _serve(self, respond)
+        lifecycle = RecordingLifecycle()
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test",
+            base_url,
+            api_key="",
+            tools=[
+                ChatTool(
+                    "fail",
+                    "Fail on purpose.",
+                    {"type": "object", "properties": {}},
+                    fail,
+                )
+            ],
+        )
+        with self.assertRaises(ExecutionError) as raised:
+            asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello"), lifecycle=lifecycle))
+        self.assertEqual(raised.exception.code, "injected_fault")
+        self.assertEqual(lifecycle.started, ["fail"])
+        self.assertEqual(lifecycle.finished, ["injected_fault"])
+
+    def test_cancelled_call_records_unknown_usage(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            started.set()
+            release.wait(timeout=5)
+            return 200, _completion("late", {"prompt_tokens": 9, "completion_tokens": 9})
+
+        base_url = _serve(self, respond)
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test", base_url, api_key="", request_timeout_seconds=30
+        )
+
+        async def invoke() -> ExecutionError:
+            task = asyncio.create_task(adapter.run(TestCase(case_id="1", prompt="hello")))
+            if not await asyncio.to_thread(started.wait, 2):
+                raise AssertionError("server did not accept the request")
+            task.cancel()
+            try:
+                await task
+            except ExecutionError as exc:
+                return exc
+            raise AssertionError("cancelled call returned a response")
+
+        try:
+            exc = asyncio.run(invoke())
+        finally:
+            release.set()
+        self.assertEqual(exc.code, "timeout")
+        self.assertTrue(exc.ambiguous)
+        self.assertFalse(exc.usage_complete)
+        self.assertIsNotNone(exc.response)
+        self.assertIsNone(exc.response.model_call_count)
+        self.assertIsNone(exc.response.input_tokens)
+        self.assertIsNone(exc.response.output_tokens)
 
     def test_connection_error_does_not_invent_a_model_call(self) -> None:
         sock = socket.socket()

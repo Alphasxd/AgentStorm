@@ -21,9 +21,11 @@ target:
     outputUSDPerMillionTokens: "2"
 ```
 
-`model` and `baseURL` are required. CEL and the Controller reject a missing model, a missing base
-URL, whitespace, credentials in the URL, a query or fragment, and a base URL whose path already ends
-in `/chat/completions`. The base URL is the API root. The Worker appends `/chat/completions`.
+`model` and `baseURL` are required for `openai-compatible`. CEL and the Controller reject a missing
+model, a missing base URL, whitespace, credentials in the URL, a query or fragment, and a base URL
+whose path already ends in `/chat/completions`. The base URL is the API root. The Worker appends
+`/chat/completions`. Those shape checks apply only to this provider. `openai-agents` and `fake`
+keep a base URL they already accepted, including a query string or a `/chat/completions` suffix.
 
 The Controller allows any non-empty model id without whitespace. Benchmark runners additionally
 reject `latest`, `auto`, and `default`. A price snapshot is optional on a single `AgentTestRun` and
@@ -35,8 +37,9 @@ runners still require a non-empty key so the Secret path is exercised; an open i
 accept that bearer token or ignore it.
 
 Built-in provider keys are `fake`, `openai-agents`, and `openai-compatible`. The development KEDA
-overlay caps `openai-compatible` at 8 concurrent attempts and 60 requests per minute, matching
-`openai-agents`.
+overlay in `config/dev/keda` caps `openai-compatible` at 8 concurrent attempts and 60 requests per
+minute, matching `openai-agents`. That cap is not a Helm chart default. The chart leaves provider
+limits unset until an operator configures them.
 
 ## HTTP behavior
 
@@ -54,8 +57,15 @@ the run manifest.
 
 HTTP status maps onto the existing error taxonomy: `429` is retry-safe and does not count as a
 completed model call; `408`, `5xx`, redirects, timeouts, and connection failures are ambiguous and
-leave `model_call_count` null; a malformed `200` counts the call and is ambiguous. Token totals
-stay unknown when usage is absent. They are never stored as zero.
+leave `model_call_count` null; a malformed `200` counts the call and is ambiguous. A connection
+reset or a short body while reading a success or error response is the same ambiguous
+`connection_error`. Token totals stay unknown when usage is absent. They are never stored as zero.
+
+Cancelling the worker thread does not stop the HTTP call, so the adapter records that attempt as
+an ambiguous timeout with a null model-call count and null tokens. A tool `ExecutionError` closes
+its lifecycle span with the tool error code before it propagates. Real benchmark runs set the case
+timeout to 2100 seconds, above two reliability attempts times eight model calls times the 120
+second per-call timeout, so those calls finish or time out inside the case.
 
 ## Endpoint examples
 
@@ -69,8 +79,9 @@ These are operator-pinned examples, not defaults and not measured results:
 
 The default worker NetworkPolicy allows egress to TCP 443 and DNS. A self-hosted server on another
 port needs an explicit policy. Do not widen worker egress to arbitrary ports in the default profile.
-The Kubernetes benchmark runner rejects loopback hosts (`localhost`, `127.0.0.1`, `::1`) because a
-Worker pod cannot treat the operator laptop as the endpoint.
+The Kubernetes benchmark runner rejects loopback and unspecified addresses, including `localhost`
+with a trailing dot, `0.0.0.0`, and `::`. A Worker pod cannot treat the operator laptop, or an
+address that is not a remote host, as the endpoint.
 
 ## What this provider is not
 
