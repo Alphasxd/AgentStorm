@@ -124,8 +124,11 @@ status` therefore succeeds only after the replacement can reach the API and hold
 A replica that has not been elected stays Running, because liveness does not depend on the lease.
 It becomes Ready if it later wins election. With more than one electing replica, rollout status
 keeps waiting because only the leader is Ready. The supported replica count with leader election
-enabled is 1. The Helm chart follows the same rule when `controller.leaderElection` is true and
-keeps a RollingUpdate Deployment when leader election is off.
+enabled is 1. When `controller.leaderElection` is true, the Helm chart sets RollingUpdate
+`maxUnavailable: 1` and `maxSurge: 0`. For one replica that also removes the current pod before
+the replacement is created, and the strategy type stays RollingUpdate so a server-side apply
+upgrade can replace the default surge values. With leader election left off, the chart omits the
+strategy and Kubernetes uses its default RollingUpdate.
 
 ## Failure semantics
 

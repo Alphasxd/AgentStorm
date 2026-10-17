@@ -12,9 +12,10 @@ controller:
     tag: v0.6.0
     digest: ""
     pullPolicy: IfNotPresent
-  # When true, the Deployment uses Recreate and /readyz stays false until this
-  # process wins the lease. When false, controller-runtime closes the elected
-  # channel after controllers start and the Deployment keeps RollingUpdate.
+  # When true, the Deployment uses RollingUpdate maxUnavailable 1 and maxSurge 0,
+  # and /readyz stays false until this process wins the lease. When false,
+  # controller-runtime closes the elected channel after controllers start and the
+  # Deployment keeps the Kubernetes default RollingUpdate.
   leaderElection: false
   resultSink:
     enabled: false
