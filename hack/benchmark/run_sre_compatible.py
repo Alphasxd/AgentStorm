@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT / "hack/benchmark"))
 from agentstorm_worker.adapters import AdapterFactoryContext
 from agentstorm_worker.adapters.openai_compatible import validate_base_url
 from agentstorm_worker.benchmarks.sre import (
+    SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE,
     SRE_COMPATIBLE_MAX_MODEL_CALLS,
     SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
     SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS,
@@ -163,16 +164,19 @@ def _kubernetes_unreachable(host: str) -> bool:
 
 
 def worst_case_run_usd(input_price: str, output_price: str, attempts: int) -> Decimal:
-    """Ceiling for one 32-case run before it is allowed to start.
+    """Spend estimate for one 32-case run before it is allowed to start.
 
-    Output tokens are capped by the SRE factory. Input tokens are not, so the
-    same token count is charged at the input price. A high input price therefore
-    cannot pass a check that only prices ``max_tokens``.
+    Output tokens follow the SRE ``max_tokens`` limit. Input tokens use
+    ``SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE``, which is larger than the scripted
+    fixture requests and the assistant history those calls resend. The endpoint
+    does not enforce that allowance, so this is an estimate rather than a cap
+    on what a provider can bill.
     """
     calls = Decimal(DATASET_CASES * SRE_COMPATIBLE_MAX_MODEL_CALLS * attempts)
-    tokens = calls * Decimal(SRE_COMPATIBLE_MAX_OUTPUT_TOKENS)
     million = Decimal(1_000_000)
-    return (tokens * Decimal(input_price) + tokens * Decimal(output_price)) / million
+    input_tokens = calls * Decimal(SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE)
+    output_tokens = calls * Decimal(SRE_COMPATIBLE_MAX_OUTPUT_TOKENS)
+    return (input_tokens * Decimal(input_price) + output_tokens * Decimal(output_price)) / million
 
 
 def reserve_benchmark_spend(
@@ -183,7 +187,7 @@ def reserve_benchmark_spend(
     if spent + estimate > SPEND_STOP_USD:
         raise BenchmarkError(
             "USD 8 recorded-cost stop: spent "
-            f"{spent} plus worst-case {estimate} exceeds the cap"
+            f"{spent} plus estimate {estimate} exceeds the cap"
         )
 
 

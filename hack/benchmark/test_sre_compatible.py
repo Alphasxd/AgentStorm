@@ -13,6 +13,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openai_compatible_mock import diagnosis, load_fixtures, scripted_completion
+from agentstorm_worker.benchmarks.sre import (
+    SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE,
+    SRE_COMPATIBLE_MAX_MODEL_CALLS,
+    SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+    largest_scripted_request_tokens,
+)
 from run_sre_compatible import (
     REAL_CASE_TIMEOUT_SECONDS,
     BenchmarkError,
@@ -24,7 +30,7 @@ from run_sre_compatible import (
     validate_endpoint,
     worst_case_run_usd,
 )
-from run_sre_compatible_keda import compatible_run_resource
+from run_sre_compatible_keda import compatible_run_resource, drive_until_budget
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -168,15 +174,60 @@ class EndpointMetadataTest(unittest.TestCase):
         )
         self.assertEqual(endpoint["host"], "10.1.2.3")
 
+    def test_input_allowance_covers_scripted_requests_and_resent_history(self) -> None:
+        measured = largest_scripted_request_tokens()
+        resent_history = (SRE_COMPATIBLE_MAX_MODEL_CALLS - 1) * SRE_COMPATIBLE_MAX_OUTPUT_TOKENS
+        self.assertGreater(measured, SRE_COMPATIBLE_MAX_OUTPUT_TOKENS)
+        self.assertGreater(SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE, measured + resent_history)
+        calls = Decimal(32 * SRE_COMPATIBLE_MAX_MODEL_CALLS)
+        self.assertEqual(
+            worst_case_run_usd("1", "0", 1),
+            calls * Decimal(SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE) / Decimal(1_000_000),
+        )
+        self.assertEqual(
+            worst_case_run_usd("0", "1", 1),
+            calls * Decimal(SRE_COMPATIBLE_MAX_OUTPUT_TOKENS) / Decimal(1_000_000),
+        )
+
     def test_spend_reserve_stops_before_one_run_can_pass_the_cap(self) -> None:
         one_attempt = worst_case_run_usd("1", "2", 1)
-        self.assertEqual(one_attempt, Decimal("0.393216"))
         self.assertEqual(worst_case_run_usd("1", "2", 2), one_attempt * 2)
+        self.assertGreater(one_attempt, worst_case_run_usd("0", "2", 1))
         reserve_benchmark_spend(Decimal(0), "1", "2", 1)
-        with self.assertRaisesRegex(BenchmarkError, "worst-case"):
+        with self.assertRaisesRegex(BenchmarkError, "estimate"):
             reserve_benchmark_spend(Decimal(0), "0", "70", 1)
-        with self.assertRaisesRegex(BenchmarkError, "worst-case"):
+        with self.assertRaisesRegex(BenchmarkError, "estimate"):
             reserve_benchmark_spend(Decimal("7.9"), "1", "2", 1)
+
+    def test_keda_budget_stop_skips_a_run_the_estimate_cannot_cover(self) -> None:
+        started: list[str] = []
+
+        def start(kind: str, workers: int, round_index: int, sequence: int) -> dict[str, object]:
+            del workers, round_index, sequence
+            started.append(kind)
+            return {"kind": kind, "cost_usd": "7.50", "total": 32}
+
+        runs, error, stopped = drive_until_budget("0", "70", start)
+        self.assertEqual(started, [])
+        self.assertEqual(runs, [])
+        self.assertTrue(stopped)
+        self.assertIn("estimate", error or "")
+
+        started.clear()
+        runs, error, stopped = drive_until_budget("1", "2", start)
+        self.assertEqual(started, ["capacity"])
+        self.assertEqual(len(runs), 1)
+        self.assertTrue(stopped)
+        self.assertIn("estimate", error or "")
+
+        def unknown(kind: str, workers: int, round_index: int, sequence: int) -> dict[str, object]:
+            del workers, round_index, sequence
+            return {"kind": kind, "cost_usd": None, "total": 32}
+
+        runs, error, stopped = drive_until_budget("1", "2", unknown)
+        self.assertEqual(len(runs), 1)
+        self.assertFalse(stopped)
+        self.assertIn("unknown", error or "")
 
     def test_non_canonical_report_makes_no_performance_claim(self) -> None:
         manifest = {

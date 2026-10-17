@@ -14,6 +14,7 @@ from ..adapters.base import (
     AgentLifecycle,
     ToolLifecycleEvent,
 )
+from ..adapters.openai_compatible import UNKNOWN_CALL_INPUT_TOKENS
 from ..models import AdapterResponse, TestCase
 
 _FIXTURES = json.loads(
@@ -189,6 +190,9 @@ SRE_COMPATIBLE_TEMPERATURE = 0
 SRE_COMPATIBLE_MAX_OUTPUT_TOKENS = 512
 SRE_COMPATIBLE_MAX_MODEL_CALLS = 8
 SRE_COMPATIBLE_REQUEST_TIMEOUT_SECONDS = 120
+# Same allowance the adapter uses when a call returns no usage. It is not a
+# request cap. See largest_scripted_request_tokens().
+SRE_COMPATIBLE_INPUT_TOKEN_ALLOWANCE = UNKNOWN_CALL_INPUT_TOKENS
 
 _COMPATIBLE_INSTRUCTIONS = (
     "Diagnose the supplied synthetic incident. Call get_incident first. Use its service "
@@ -208,6 +212,130 @@ def _tool_schema(properties: dict[str, Any], required: list[str]) -> dict[str, A
         "properties": properties,
         "required": required,
     }
+
+
+def approximate_token_count(text: str) -> int:
+    """Estimate tokens at about four characters each. This is not a model tokenizer."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def largest_scripted_request_tokens() -> int:
+    """Approximate tokens in the largest scripted SRE request, including tools and history."""
+
+    async def measure() -> int:
+        worst = 0
+        for incident_id in _INCIDENTS:
+            fetched = await get_incident(incident_id)
+            metrics = await query_metrics(fetched["service"], fetched["window"])
+            logs = await search_logs(fetched["service"], fetched["window"])
+            runbook = await lookup_runbook(str(logs["error_signature"]))
+            messages = _scripted_history(incident_id, fetched, metrics, logs, runbook)
+            payload = {
+                "model": "pinned-model-id",
+                "messages": messages,
+                "stream": False,
+                "tools": _compatible_tool_schemas(),
+                "tool_choice": "auto",
+                "temperature": SRE_COMPATIBLE_TEMPERATURE,
+                "max_tokens": SRE_COMPATIBLE_MAX_OUTPUT_TOKENS,
+            }
+            worst = max(worst, approximate_token_count(json.dumps(payload, ensure_ascii=False)))
+        return worst
+
+    return asyncio.run(measure())
+
+
+def _scripted_history(
+    incident_id: str,
+    fetched: dict[str, Any],
+    metrics: dict[str, Any],
+    logs: dict[str, Any],
+    runbook: dict[str, Any],
+) -> list[dict[str, Any]]:
+    service_window = {"service": fetched["service"], "window": fetched["window"]}
+    signature = {"error_signature": logs["error_signature"]}
+    return [
+        {"role": "system", "content": _COMPATIBLE_INSTRUCTIONS},
+        {
+            "role": "user",
+            "content": (
+                f"Investigate incident {incident_id}. Use the available read-only tools "
+                "and return the required diagnosis."
+            ),
+        },
+        _assistant_call("c1", "get_incident", {"incident_id": incident_id}),
+        _tool_message("c1", fetched),
+        _assistant_calls(
+            [("c2", "query_metrics", service_window), ("c3", "search_logs", service_window)]
+        ),
+        _tool_message("c2", metrics),
+        _tool_message("c3", logs),
+        _assistant_call("c4", "lookup_runbook", signature),
+        _tool_message("c4", runbook),
+    ]
+
+
+def _assistant_call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return _assistant_calls([(call_id, name, arguments)])
+
+
+def _assistant_calls(calls: list[tuple[str, str, dict[str, Any]]]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, sort_keys=True, separators=(",", ":")),
+                },
+            }
+            for call_id, name, arguments in calls
+        ],
+    }
+
+
+def _tool_message(call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    }
+
+
+def _compatible_tool_schemas() -> list[dict[str, Any]]:
+    from ..adapters.openai_compatible import ChatTool
+
+    string = {"type": "string"}
+    tools = [
+        ChatTool(
+            "get_incident",
+            "Read one synthetic incident by id.",
+            _tool_schema({"incident_id": string}, ["incident_id"]),
+            get_incident,
+        ),
+        ChatTool(
+            "query_metrics",
+            "Read synthetic service metrics for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            query_metrics,
+        ),
+        ChatTool(
+            "search_logs",
+            "Read synthetic service logs for a window.",
+            _tool_schema({"service": string, "window": string}, ["service", "window"]),
+            search_logs,
+        ),
+        ChatTool(
+            "lookup_runbook",
+            "Read the synthetic runbook for an error signature.",
+            _tool_schema({"error_signature": string}, ["error_signature"]),
+            lookup_runbook,
+        ),
+    ]
+    return [tool.schema() for tool in tools]
 
 
 def _unwrap_json_fence(output: str) -> str:

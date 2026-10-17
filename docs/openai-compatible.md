@@ -56,16 +56,22 @@ benchmark configuration, not a hidden default of every compatible call. The fact
 the run manifest.
 
 HTTP status maps onto the existing error taxonomy: `429` is retry-safe and does not count as a
-completed model call; `408`, `5xx`, redirects, timeouts, and connection failures are ambiguous and
-leave `model_call_count` null; a malformed `200` counts the call and is ambiguous. A connection
-reset or a short body while reading a success or error response is the same ambiguous
-`connection_error`. Token totals stay unknown when usage is absent. They are never stored as zero.
+completed model call; `408`, `5xx`, redirects, timeouts, and connection failures are ambiguous. A
+connection reset while reading a success or error response is the same ambiguous `connection_error`.
+The failed call is not counted as a completion. Tokens from earlier calls in that attempt stay.
+The missing call is priced at an input allowance of 8192 tokens and at `max_tokens` when the
+request sets it, otherwise 512. `usage_complete` stays true, so one transient failure does not
+null the case cost. That price is an estimate for the missing call, not a meter reading, and the
+endpoint does not enforce the input allowance. A `200` that omits usage, or a malformed `200`,
+still leaves the attempt unpriced. Token totals are not stored as zero in those cases.
 
-Cancelling the worker thread does not stop the HTTP call, so the adapter records that attempt as
-an ambiguous timeout with a null model-call count and null tokens. A tool `ExecutionError` closes
-its lifecycle span with the tool error code before it propagates. Real benchmark runs set the case
-timeout to 2100 seconds, above two reliability attempts times eight model calls times the 120
-second per-call timeout, so those calls finish or time out inside the case.
+Cancelling the in-flight task re-raises `CancelledError`. urllib's timeout still bounds each
+socket operation, and cancelling the task does not interrupt a socket call that is already
+blocked. The runner records the run as cancelled rather than as a provider timeout. A tool
+`ExecutionError` closes its lifecycle span with the tool error code before it propagates. Real
+benchmark runs set the case timeout to 2100 seconds, above two reliability attempts times eight
+model calls times the 120 second per-call timeout, so those calls finish or time out inside the
+case.
 
 ## Endpoint examples
 

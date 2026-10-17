@@ -16,6 +16,7 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -126,6 +127,45 @@ def compatible_run_resource(
     }
 
 
+def drive_until_budget(
+    input_price: str,
+    output_price: str,
+    start: Callable[[str, int, int, int], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None, bool]:
+    """Start capacity runs, then reliability, until the spend estimate cannot cover the next one.
+
+    ``start(kind, workers, round_index, sequence)`` performs one run. ``kind`` is
+    ``capacity`` or ``reliability``. A reserve refusal sets the stop flag. Any
+    other benchmark error is returned without that flag.
+    """
+    spent = Decimal(0)
+    runs: list[dict[str, Any]] = []
+    stopped = False
+    error: str | None = None
+    try:
+        for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
+            for sequence, workers in enumerate(order, start=1):
+                try:
+                    reserve_benchmark_spend(spent, input_price, output_price, 1)
+                except BenchmarkError:
+                    stopped = True
+                    raise
+                record = start("capacity", workers, round_index, sequence)
+                runs.append(record)
+                if record["cost_usd"] is None:
+                    raise BenchmarkError("capacity cost is unknown; refusing to start another run")
+                spent += Decimal(record["cost_usd"])
+        try:
+            reserve_benchmark_spend(spent, input_price, output_price, 2)
+        except BenchmarkError:
+            stopped = True
+            raise
+        runs.append(start("reliability", 16, 1, 1))
+    except BenchmarkError as exc:
+        error = str(exc)
+    return runs, error, stopped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", default="agentstorm-system")
@@ -209,61 +249,38 @@ def main() -> None:
             )
         )
         kube.install_api_key(secret_name, api_key)
-        spent = Decimal(0)
-        for round_index, order in enumerate(CAPACITY_ORDERS, start=1):
-            for sequence, workers in enumerate(order, start=1):
-                try:
-                    reserve_benchmark_spend(spent, args.input_price, args.output_price, 1)
-                except BenchmarkError:
-                    stopped_for_budget = True
-                    raise
-                name = f"{prefix}-r{round_index}s{sequence}w{workers}"
-                resource = compatible_run_resource(
-                    name,
-                    args.namespace,
-                    dataset_name,
-                    scenario_name,
-                    secret_name,
-                    args.worker_image,
-                    workers,
-                    args.model,
-                    args.base_url,
-                    args.input_price,
-                    args.output_price,
-                    False,
-                )
+
+        def start(kind: str, workers: int, round_index: int, sequence: int) -> dict[str, Any]:
+            reliability = kind == "reliability"
+            name = (
+                prefix + "-reliability"
+                if reliability
+                else f"{prefix}-r{round_index}s{sequence}w{workers}"
+            )
+            resource = compatible_run_resource(
+                name,
+                args.namespace,
+                dataset_name,
+                scenario_name,
+                secret_name,
+                args.worker_image,
+                workers,
+                args.model,
+                args.base_url,
+                args.input_price,
+                args.output_price,
+                reliability,
+            )
+            if not reliability:
                 resource["metadata"]["annotations"] = {"round": str(round_index)}
-                created_runs.append(name)
-                record, result_cases = execute_run(kube, reader, resource, args.timeout_seconds)
-                runs.append(record)
-                cases.extend(result_cases)
-                if record["cost_usd"] is None:
-                    raise BenchmarkError("capacity cost is unknown; refusing to start another run")
-                spent += Decimal(record["cost_usd"])
-        try:
-            reserve_benchmark_spend(spent, args.input_price, args.output_price, 2)
-        except BenchmarkError:
-            stopped_for_budget = True
-            raise
-        reliability_name = prefix + "-reliability"
-        resource = compatible_run_resource(
-            reliability_name,
-            args.namespace,
-            dataset_name,
-            scenario_name,
-            secret_name,
-            args.worker_image,
-            16,
-            args.model,
-            args.base_url,
-            args.input_price,
-            args.output_price,
-            True,
+            created_runs.append(name)
+            record, result_cases = execute_run(kube, reader, resource, args.timeout_seconds)
+            cases.extend(result_cases)
+            return record
+
+        runs, error, stopped_for_budget = drive_until_budget(
+            args.input_price, args.output_price, start
         )
-        created_runs.append(reliability_name)
-        record, result_cases = execute_run(kube, reader, resource, args.timeout_seconds)
-        runs.append(record)
-        cases.extend(result_cases)
     except BenchmarkError as exc:
         error = str(exc)
     finally:

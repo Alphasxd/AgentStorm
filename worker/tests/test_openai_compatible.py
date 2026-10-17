@@ -7,6 +7,7 @@ import socket
 import struct
 import threading
 import unittest
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +16,7 @@ from typing import Any
 from agentstorm_worker.adapters import create_adapter
 from agentstorm_worker.adapters.base import ToolLifecycleEvent
 from agentstorm_worker.adapters.openai_compatible import (
+    UNKNOWN_CALL_INPUT_TOKENS,
     ChatTool,
     OpenAICompatibleAdapter,
     validate_base_url,
@@ -298,16 +300,23 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
             with self.subTest(status=status):
                 base_url = _drop_after_headers(self, status)
                 adapter = OpenAICompatibleAdapter(
-                    "pinned-test", base_url, api_key="", request_timeout_seconds=2
+                    "pinned-test",
+                    base_url,
+                    api_key="",
+                    request_timeout_seconds=2,
+                    request_fields={"max_tokens": 32},
                 )
                 with self.assertRaises(ExecutionError) as raised:
                     asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
                 self.assertEqual(raised.exception.code, "connection_error")
                 self.assertTrue(raised.exception.ambiguous)
-                self.assertFalse(raised.exception.usage_complete)
-                self.assertIsNotNone(raised.exception.response)
-                self.assertIsNone(raised.exception.response.model_call_count)
-                self.assertIsNone(raised.exception.response.input_tokens)
+                self.assertTrue(raised.exception.usage_complete)
+                self.assertEqual(raised.exception.response.model_call_count, 0)
+                self.assertEqual(raised.exception.response.input_tokens, UNKNOWN_CALL_INPUT_TOKENS)
+                self.assertEqual(raised.exception.response.output_tokens, 32)
+                self.assertEqual(
+                    raised.exception.response.metadata["agentstorm.usage.unknown_calls"], 1
+                )
 
     def test_tool_execution_error_closes_the_lifecycle_span(self) -> None:
         async def fail() -> dict[str, str]:
@@ -355,7 +364,7 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
         self.assertEqual(lifecycle.started, ["fail"])
         self.assertEqual(lifecycle.finished, ["injected_fault"])
 
-    def test_cancelled_call_records_unknown_usage(self) -> None:
+    def test_cancelled_call_is_reraised(self) -> None:
         started = threading.Event()
         release = threading.Event()
 
@@ -370,28 +379,164 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
             "pinned-test", base_url, api_key="", request_timeout_seconds=30
         )
 
-        async def invoke() -> ExecutionError:
+        async def invoke() -> None:
             task = asyncio.create_task(adapter.run(TestCase(case_id="1", prompt="hello")))
             if not await asyncio.to_thread(started.wait, 2):
                 raise AssertionError("server did not accept the request")
             task.cancel()
-            try:
+            with self.assertRaises(asyncio.CancelledError):
                 await task
-            except ExecutionError as exc:
-                return exc
-            raise AssertionError("cancelled call returned a response")
 
         try:
-            exc = asyncio.run(invoke())
+            asyncio.run(invoke())
         finally:
             release.set()
-        self.assertEqual(exc.code, "timeout")
-        self.assertTrue(exc.ambiguous)
-        self.assertFalse(exc.usage_complete)
-        self.assertIsNotNone(exc.response)
-        self.assertIsNone(exc.response.model_call_count)
-        self.assertIsNone(exc.response.input_tokens)
-        self.assertIsNone(exc.response.output_tokens)
+
+    def test_stop_event_cancels_the_inflight_call(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            started.set()
+            release.wait(timeout=5)
+            return 200, _completion("late", {"prompt_tokens": 9, "completion_tokens": 9})
+
+        base_url = _serve(self, respond)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": base_url,
+                        },
+                        "workload": {"concurrency": 1, "iterations": 1, "timeout_seconds": 30},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(path)
+        adapter = OpenAICompatibleAdapter("pinned-test", base_url, api_key="")
+        stop = asyncio.Event()
+
+        async def invoke() -> tuple[list[Any], Any]:
+            task = asyncio.create_task(
+                WorkloadRunner(config, adapter).execute(
+                    [TestCase(case_id="1", prompt="hello")], stop_event=stop
+                )
+            )
+            if not await asyncio.to_thread(started.wait, 2):
+                raise AssertionError("server did not accept the request")
+            stop.set()
+            return await task
+
+        try:
+            results, summary = asyncio.run(invoke())
+        finally:
+            release.set()
+        self.assertEqual(results, [])
+        self.assertEqual(summary.total, 0)
+
+    def test_http_5xx_keeps_earlier_tokens_and_prices_the_missing_call(self) -> None:
+        state = {"calls": 0}
+
+        async def lookup() -> dict[str, str]:
+            return {"ok": "yes"}
+
+        def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return 200, {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": {}},
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+                }
+            return 500, {"error": {"message": "busy"}}
+
+        base_url = _serve(self, respond)
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test",
+            base_url,
+            api_key="",
+            request_fields={"max_tokens": 32},
+            tools=[
+                ChatTool(
+                    "lookup",
+                    "Lookup.",
+                    {"type": "object", "properties": {}},
+                    lookup,
+                )
+            ],
+        )
+        with self.assertRaises(ExecutionError) as raised:
+            asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
+        self.assertEqual(raised.exception.code, "http_5xx")
+        self.assertTrue(raised.exception.ambiguous)
+        self.assertTrue(raised.exception.usage_complete)
+        self.assertEqual(raised.exception.response.model_call_count, 1)
+        self.assertEqual(
+            raised.exception.response.input_tokens, 10 + UNKNOWN_CALL_INPUT_TOKENS
+        )
+        self.assertEqual(raised.exception.response.output_tokens, 4 + 32)
+        self.assertEqual(raised.exception.response.metadata["agentstorm.usage.unknown_calls"], 1)
+
+    def test_transient_5xx_still_prices_the_case(self) -> None:
+        def respond(headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            del headers, body
+            return 500, {"error": {"message": "busy"}}
+
+        base_url = _serve(self, respond)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": base_url,
+                            "pricing": {
+                                "inputUSDPerMillionTokens": "1",
+                                "outputUSDPerMillionTokens": "2",
+                            },
+                        },
+                        "workload": {"concurrency": 1, "iterations": 1, "timeout_seconds": 30},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_run_config(path)
+        adapter = OpenAICompatibleAdapter(
+            "pinned-test", base_url, api_key="", request_fields={"max_tokens": 32}
+        )
+        result = asyncio.run(
+            WorkloadRunner(config, adapter).execute([TestCase(case_id="1", prompt="hello")])
+        )[0][0]
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "http_5xx")
+        self.assertTrue(result.usage_complete)
+        self.assertEqual(result.input_tokens, UNKNOWN_CALL_INPUT_TOKENS)
+        self.assertEqual(result.output_tokens, 32)
+        self.assertEqual(result.model_call_count, 0)
+        self.assertIsNotNone(result.cost_usd)
+        self.assertGreater(Decimal(result.cost_usd), 0)
 
     def test_connection_error_does_not_invent_a_model_call(self) -> None:
         sock = socket.socket()
@@ -403,12 +548,15 @@ class OpenAICompatibleAdapterTest(unittest.TestCase):
             f"http://127.0.0.1:{port}/v1",
             api_key="",
             request_timeout_seconds=0.2,
+            request_fields={"max_tokens": 32},
         )
         with self.assertRaises(ExecutionError) as raised:
             asyncio.run(adapter.run(TestCase(case_id="1", prompt="hello")))
         self.assertEqual(raised.exception.code, "connection_error")
-        self.assertIsNone(raised.exception.response.model_call_count)
-        self.assertFalse(raised.exception.usage_complete)
+        self.assertEqual(raised.exception.response.model_call_count, 0)
+        self.assertTrue(raised.exception.usage_complete)
+        self.assertEqual(raised.exception.response.input_tokens, UNKNOWN_CALL_INPUT_TOKENS)
+        self.assertEqual(raised.exception.response.output_tokens, 32)
 
     def test_rejects_credential_and_method_urls(self) -> None:
         with self.assertRaisesRegex(ValueError, "credentials"):

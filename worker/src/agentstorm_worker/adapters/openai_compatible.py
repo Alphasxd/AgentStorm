@@ -31,6 +31,12 @@ _MAX_MODEL_LENGTH = 256
 _RESERVED_REQUEST_FIELDS = {"model", "messages", "stream", "tools", "tool_choice"}
 # Distinct from a proven model-call count of zero.
 _LEDGER_COUNT = object()
+# Allowance for one chat request that did not return usage. A 4-characters-per-token
+# approximation of the largest scripted SRE request is under 1,000 tokens; later
+# calls also resend prior assistant messages. 8192 covers that history with margin.
+# The endpoint does not enforce this number.
+UNKNOWN_CALL_INPUT_TOKENS = 8192
+_DEFAULT_UNKNOWN_OUTPUT_TOKENS = 512
 
 
 class _RejectRedirect(urllib.request.HTTPRedirectHandler):
@@ -118,6 +124,7 @@ class _Ledger:
     input_tokens: int = 0
     output_tokens: int = 0
     usage_known: bool = True
+    unknown_calls: int = 0
 
     def add_usage(self, usage: tuple[int, int] | None) -> None:
         if usage is None:
@@ -126,15 +133,32 @@ class _Ledger:
         self.input_tokens += usage[0]
         self.output_tokens += usage[1]
 
+    def charge_unknown_call(self, input_tokens: int, output_tokens: int) -> bool:
+        """Price one call that returned no usage, and keep earlier measured tokens.
+
+        Returns whether the ledger can still be priced. A prior response that
+        omitted usage leaves the whole attempt unpriced.
+        """
+        self.unknown_calls += 1
+        if not self.usage_known:
+            return False
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        return True
+
     def response(
         self, output: str = "", *, model_calls: int | None | object = _LEDGER_COUNT
     ) -> AdapterResponse:
         calls = self.model_calls if model_calls is _LEDGER_COUNT else model_calls
+        metadata: dict[str, Any] = {}
+        if self.unknown_calls:
+            metadata["agentstorm.usage.unknown_calls"] = self.unknown_calls
         return AdapterResponse(
             output=output,
             input_tokens=self.input_tokens if self.usage_known else None,
             output_tokens=self.output_tokens if self.usage_known else None,
             model_call_count=calls,
+            metadata=metadata,
         )
 
 
@@ -153,6 +177,7 @@ class OpenAICompatibleAdapter:
         request_timeout_seconds: float = 120,
         request_fields: dict[str, Any] | None = None,
         agent_name: str = "openai-compatible",
+        unknown_input_tokens: int = UNKNOWN_CALL_INPUT_TOKENS,
     ) -> None:
         validate_pinned_model(model)
         validate_base_url(base_url)
@@ -160,6 +185,10 @@ class OpenAICompatibleAdapter:
             raise ValueError("max_model_calls must be between 1 and 32")
         if request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be positive")
+        if isinstance(unknown_input_tokens, bool) or not isinstance(unknown_input_tokens, int):
+            raise ValueError("unknown_input_tokens must be a positive integer")
+        if unknown_input_tokens < 1:
+            raise ValueError("unknown_input_tokens must be a positive integer")
         extra = dict(request_fields or {})
         reserved = sorted(set(extra) & _RESERVED_REQUEST_FIELDS)
         if reserved:
@@ -178,6 +207,8 @@ class OpenAICompatibleAdapter:
         self._timeout = request_timeout_seconds
         self._extra = extra
         self._agent_name = agent_name
+        self._unknown_input_tokens = unknown_input_tokens
+        self._unknown_output_tokens = _output_allowance(extra)
 
     async def run(self, case: TestCase, lifecycle: AgentLifecycle | None = None) -> AdapterResponse:
         api_key = self._api_key if self._api_key is not None else os.environ.get("OPENAI_API_KEY", "")
@@ -199,19 +230,17 @@ class OpenAICompatibleAdapter:
                 payload["tool_choice"] = "auto"
             try:
                 status, body = await asyncio.to_thread(self._post, payload, api_key.strip(), ledger)
-            except asyncio.CancelledError as exc:
-                # The worker thread can still finish the paid request. Do not
-                # report that missing usage as a proven zero.
+            except asyncio.CancelledError:
+                # Cancelling the task does not interrupt a socket operation that
+                # is already blocked. urllib still applies its timeout to each
+                # socket operation. Do not turn the cancel into a priced provider
+                # error; the runner records it as cancelled.
                 ledger.usage_known = False
-                raise _error(
-                    "timeout",
-                    failure_kind="timeout",
-                    ambiguous=True,
-                    ledger=ledger,
-                    model_calls=None,
-                ) from exc
+                raise
             if status != 200:
-                raise _status_error(status, ledger)
+                raise _status_error(
+                    status, ledger, self._unknown_input_tokens, self._unknown_output_tokens
+                )
             ledger.model_calls += 1
             try:
                 message, usage = _parse_completion(body)
@@ -269,29 +298,15 @@ class OpenAICompatibleAdapter:
             try:
                 downloaded = exc.read(_MAX_RESPONSE_BYTES + 1)
             except (http.client.HTTPException, OSError) as read_error:
-                raise _error(
-                    "connection_error", ambiguous=True, ledger=ledger, model_calls=None
-                ) from read_error
+                raise self._unpriced("connection_error", ledger) from read_error
         except TimeoutError as exc:
-            raise _error(
-                "timeout", failure_kind="timeout", ambiguous=True, ledger=ledger, model_calls=None
-            ) from exc
+            raise self._unpriced("timeout", ledger, failure_kind="timeout") from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise _error(
-                    "timeout",
-                    failure_kind="timeout",
-                    ambiguous=True,
-                    ledger=ledger,
-                    model_calls=None,
-                ) from exc
-            raise _error(
-                "connection_error", ambiguous=True, ledger=ledger, model_calls=None
-            ) from exc
+                raise self._unpriced("timeout", ledger, failure_kind="timeout") from exc
+            raise self._unpriced("connection_error", ledger) from exc
         except (http.client.HTTPException, OSError) as exc:
-            raise _error(
-                "connection_error", ambiguous=True, ledger=ledger, model_calls=None
-            ) from exc
+            raise self._unpriced("connection_error", ledger) from exc
         if len(downloaded) > _MAX_RESPONSE_BYTES or not downloaded:
             return status, None
         try:
@@ -301,6 +316,17 @@ class OpenAICompatibleAdapter:
         if not isinstance(parsed, dict):
             return status, None
         return status, parsed
+
+    def _unpriced(
+        self, code: str, ledger: _Ledger, *, failure_kind: str = "provider"
+    ) -> ExecutionError:
+        return _priced_unknown(
+            ledger,
+            code,
+            self._unknown_input_tokens,
+            self._unknown_output_tokens,
+            failure_kind=failure_kind,
+        )
 
     async def _execute_tools(
         self,
@@ -452,7 +478,35 @@ def _message_text(value: Any) -> str | None:
     return None
 
 
-def _status_error(status: int, ledger: _Ledger) -> ExecutionError:
+def _output_allowance(fields: dict[str, Any]) -> int:
+    value = fields.get("max_tokens", _DEFAULT_UNKNOWN_OUTPUT_TOKENS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return _DEFAULT_UNKNOWN_OUTPUT_TOKENS
+    return value
+
+
+def _priced_unknown(
+    ledger: _Ledger,
+    code: str,
+    input_allowance: int,
+    output_allowance: int,
+    *,
+    failure_kind: str = "provider",
+) -> ExecutionError:
+    """Keep measured tokens and price the one call that returned no usage."""
+    usage_complete = ledger.charge_unknown_call(input_allowance, output_allowance)
+    return _error(
+        code,
+        failure_kind=failure_kind,
+        ambiguous=True,
+        ledger=ledger,
+        usage_complete=usage_complete,
+    )
+
+
+def _status_error(
+    status: int, ledger: _Ledger, input_allowance: int, output_allowance: int
+) -> ExecutionError:
     if status == 429:
         return _error(
             "rate_limited",
@@ -461,14 +515,16 @@ def _status_error(status: int, ledger: _Ledger) -> ExecutionError:
             usage_complete=ledger.usage_known,
         )
     if status == 408:
-        return _error("timeout", failure_kind="timeout", ambiguous=True, ledger=ledger, model_calls=None)
+        return _priced_unknown(
+            ledger, "timeout", input_allowance, output_allowance, failure_kind="timeout"
+        )
     if 300 <= status < 400:
-        return _error("http_redirect", ambiguous=True, ledger=ledger, model_calls=None)
+        return _priced_unknown(ledger, "http_redirect", input_allowance, output_allowance)
     if 500 <= status <= 599:
-        return _error("http_5xx", ambiguous=True, ledger=ledger, model_calls=None)
+        return _priced_unknown(ledger, "http_5xx", input_allowance, output_allowance)
     if 400 <= status <= 499:
         return _error("http_4xx", ledger=ledger, usage_complete=ledger.usage_known)
-    return _error("unknown_error", ambiguous=True, ledger=ledger, model_calls=None)
+    return _priced_unknown(ledger, "unknown_error", input_allowance, output_allowance)
 
 
 def _error(
@@ -482,11 +538,6 @@ def _error(
     model_calls: int | None | object = _LEDGER_COUNT,
     usage_complete: bool = False,
 ) -> ExecutionError:
-    if model_calls is None:
-        usage_complete = False
-        if ledger is not None:
-            # The call may have been accepted. A zero token total would hide that.
-            ledger.usage_known = False
     response = ledger.response(model_calls=model_calls) if ledger is not None else None
     return ExecutionError(
         category,
