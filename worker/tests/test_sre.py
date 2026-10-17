@@ -7,7 +7,13 @@ from collections import Counter
 from pathlib import Path
 
 from agentstorm_worker.adapters import AdapterFactoryContext
-from agentstorm_worker.benchmarks.sre import SREFakeAdapter, create_adapter, validate_tool_usage
+from agentstorm_worker.benchmarks.sre import (
+    SREFakeAdapter,
+    _compatible_tool_schemas,
+    _create_openai_compatible_adapter,
+    create_adapter,
+    validate_tool_usage,
+)
 from agentstorm_worker.config import load_dataset, load_run_config
 from agentstorm_worker.runner import WorkloadRunner
 
@@ -117,3 +123,17 @@ class SREBenchmarkTest(unittest.TestCase):
             (result.failure_category, result.error_code), ("tool", "injected_tool_error")
         )
         self.assertEqual(result.tool_path, ["get_incident", "query_metrics", "search_logs"])
+
+    def test_compatible_factory_uses_the_shared_tool_schemas(self) -> None:
+        context = AdapterFactoryContext(
+            provider="openai-compatible",
+            model="pinned-model-id",
+            base_url="https://example.invalid/v1",
+        )
+        recording = _create_openai_compatible_adapter(context)
+        schemas = _compatible_tool_schemas()
+        self.assertEqual(recording._adapter._tool_schemas, schemas)
+        self.assertEqual(
+            [schema["function"]["name"] for schema in schemas],
+            ["get_incident", "query_metrics", "search_logs", "lookup_runbook"],
+        )

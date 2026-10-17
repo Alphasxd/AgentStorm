@@ -159,6 +159,10 @@ class EndpointMetadataTest(unittest.TestCase):
             "http://[::]:8000/v1",
             "http://localhost.:8000/v1",
             "http://127.0.0.1.:8000/v1",
+            "http://[::ffff:127.0.0.1]:8000/v1",
+            "http://[::ffff:0.0.0.0]:8000/v1",
+            "http://[::ffff:7f00:1]:8000/v1",
+            "http://[0:0:0:0:0:ffff:127.0.0.1]:8000/v1",
         ):
             with self.subTest(base_url=base_url):
                 with self.assertRaisesRegex(BenchmarkError, "loopback or unspecified"):
@@ -173,6 +177,12 @@ class EndpointMetadataTest(unittest.TestCase):
             **attested,
         )
         self.assertEqual(endpoint["host"], "10.1.2.3")
+        mapped = validate_endpoint(
+            model="Qwen/Qwen2.5-72B-Instruct",
+            base_url="http://[::ffff:10.1.2.3]:8000/v1",
+            **attested,
+        )
+        self.assertEqual(mapped["host"], "::ffff:10.1.2.3")
 
     def test_input_allowance_covers_scripted_requests_and_resent_history(self) -> None:
         measured = largest_scripted_request_tokens()

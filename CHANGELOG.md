@@ -22,13 +22,23 @@ the Kubernetes API remains `v1alpha1` until its compatibility contract is explic
   limit. A timeout, `5xx`, or connection failure prices that one call at the same allowance and
   keeps tokens from earlier calls, so one transient failure does not null the case cost.
   Cancelling an in-flight call is re-raised, and the runner records the run as cancelled. The
-  real-run case timeout stays above two attempts times eight calls times the 120 second per-call
-  timeout.
+  real-run case timeout stays above two attempts times eight calls times the 120 second urllib
+  socket timeout. That timeout applies to each socket operation, not to the whole HTTP request.
 - Incomplete or reset response bodies map to an ambiguous `connection_error`. The failed call is
-  not counted as a completion. A tool `ExecutionError` closes its lifecycle span before it
-  propagates. Base URL shape checks apply only to `openai-compatible`. The Kubernetes runner
-  rejects loopback and unspecified addresses, including a trailing DNS dot. The 8-concurrent /
-  60 rpm cap remains the development KEDA overlay and is not a Helm chart default.
+  not counted as a completion. `model_call_count` stays at the number of completed calls. A failed
+  call the provider may already have accepted is recorded on the adapter response as
+  `agentstorm.usage.unknown_calls` and is not added to `model_call_count`. A tool `ExecutionError`
+  closes its lifecycle span before it propagates. Base URL shape checks apply only to
+  `openai-compatible`. The Kubernetes runner rejects loopback and unspecified addresses, including
+  a trailing DNS dot and IPv4-mapped forms such as `::ffff:127.0.0.1`, including on Python before
+  3.13. The 8-concurrent / 60 rpm cap remains the development KEDA overlay and is not a Helm chart
+  default.
+- The SRE compatible factory and the scripted request measurement share one tool definition, so
+  the chat-completions schemas cannot drift from the tools the factory sends.
+- A failed OpenAI-compatible call that omits `max_tokens` is priced at the named allowance
+  `UNKNOWN_CALL_OUTPUT_TOKENS` (8192). The previous unnamed fallback was 512, the SRE benchmark
+  cap, which undercharges an uncapped completion. A request that sets `max_tokens` still charges
+  that limit.
 - Controller `/readyz` stays unsuccessful until the process is elected leader, so
   `kubectl rollout status` does not succeed while the manager cannot reach the API.
   `/healthz` remains a ping. Electing Deployments in `config/manager` and the Helm chart

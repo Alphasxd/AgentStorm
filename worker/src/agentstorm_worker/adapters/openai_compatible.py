@@ -36,7 +36,13 @@ _LEDGER_COUNT = object()
 # calls also resend prior assistant messages. 8192 covers that history with margin.
 # The endpoint does not enforce this number.
 UNKNOWN_CALL_INPUT_TOKENS = 8192
-_DEFAULT_UNKNOWN_OUTPUT_TOKENS = 512
+# Output charge for one failed call when the request does not set max_tokens.
+# The generic adapter sends no max_tokens, so the provider may already have
+# generated more than the 512-token SRE benchmark cap. 8192 matches the input
+# allowance: a conservative estimate, not a meter reading and not a request
+# cap. A positive integer max_tokens on the request is charged instead. This
+# can still be below a model's maximum output.
+UNKNOWN_CALL_OUTPUT_TOKENS = 8192
 
 
 class _RejectRedirect(urllib.request.HTTPRedirectHandler):
@@ -118,7 +124,15 @@ def chat_completions_url(base_url: str) -> str:
 
 @dataclass
 class _Ledger:
-    """Token and model-call totals proven by completed HTTP responses."""
+    """Token and model-call totals proven by completed HTTP responses.
+
+    ``model_calls`` counts responses the adapter finished. A timeout, ``5xx``,
+    redirect, or connection failure is left out, even when the provider may
+    already have accepted that request. ``unknown_calls`` is the marker for
+    those omitted calls. ``response()`` copies it to
+    ``metadata["agentstorm.usage.unknown_calls"]`` and does not add it to
+    ``model_call_count``.
+    """
 
     model_calls: int = 0
     input_tokens: int = 0
@@ -204,6 +218,7 @@ class OpenAICompatibleAdapter:
         self._tool_schemas = [tool.schema() for tool in tools or []]
         self._api_key = api_key
         self._max_model_calls = max_model_calls
+        # urllib applies this to each socket operation, not the whole request.
         self._timeout = request_timeout_seconds
         self._extra = extra
         self._agent_name = agent_name
@@ -479,9 +494,9 @@ def _message_text(value: Any) -> str | None:
 
 
 def _output_allowance(fields: dict[str, Any]) -> int:
-    value = fields.get("max_tokens", _DEFAULT_UNKNOWN_OUTPUT_TOKENS)
+    value = fields.get("max_tokens", UNKNOWN_CALL_OUTPUT_TOKENS)
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        return _DEFAULT_UNKNOWN_OUTPUT_TOKENS
+        return UNKNOWN_CALL_OUTPUT_TOKENS
     return value
 
 
