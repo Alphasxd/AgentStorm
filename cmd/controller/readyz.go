@@ -23,11 +23,12 @@ var errNotElectedLeader = errors.New("controller manager is not the elected lead
 // not continue serving /readyz.
 //
 // Only the elected process becomes Ready. Manifests that pass --leader-elect
-// run one replica with strategy Recreate, and the manager sets
-// LeaderElectionReleaseOnCancel. An update therefore removes the current
-// leader and releases the Lease before the replacement has to pass /readyz.
-// Extra electing replicas stay unready until they win the lease, so rollout
-// status completes only for a single replica.
+// run one replica with RollingUpdate maxUnavailable 1 and maxSurge 0, and the
+// manager sets LeaderElectionReleaseOnCancel. An update therefore removes the
+// current leader and releases the Lease before the replacement has to pass
+// /readyz. The strategy stays RollingUpdate so a server-side apply upgrade can
+// replace the default surge values. Extra electing replicas stay unready until
+// they win the lease, so rollout status completes only for a single replica.
 func leaderReadyChecker(elected <-chan struct{}) func(*http.Request) error {
 	return func(*http.Request) error {
 		select {

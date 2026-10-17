@@ -4,8 +4,9 @@ The chart installs the `AgentTestRun` CRD and one namespace-scoped Controller by
 not bundle PostgreSQL, S3-compatible storage, or KEDA.
 
 `/healthz` is a process ping. `/readyz` stays unsuccessful until this process is elected.
-`controller.leaderElection=true` sets `maxUnavailable: 1` and `maxSurge: 0` so an update
-removes the current leader before the replacement has to become Ready. Keep
+`controller.leaderElection=true` uses the same RollingUpdate as `config/manager`:
+`maxUnavailable: 1` and `maxSurge: 0`, so an update removes the current leader before the
+replacement has to become Ready. Keep
 `controller.replicaCount` at 1 in that mode: extra replicas remain Running and pass readiness only
 after they win the lease, so rollout status does not finish. With leader election left off, the
 Deployment uses RollingUpdate and readiness passes once controllers have started.

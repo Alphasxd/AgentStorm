@@ -63,9 +63,38 @@ printf '%s\n' 'unexpected successful run status: job=agentstorm-demo-worker succ
 expect_stop "assertion failure without a wait timeout"
 
 write_signature
-printf '%s\n' 'error: timed out waiting for the condition' >"$attempt_log"
+printf '%s\n' \
+  'Waiting for deployment "agentstorm-controller" rollout to finish: 0 of 1 updated replicas are available...' \
+  "$e2e_rollout_status_timeout_line" >"$attempt_log"
+printf '' >"$job_status"
+expect_retry "rollout status timeout and resource lock error without a worker Job"
+
+write_signature
+printf '%s\n' "$e2e_rollout_status_timeout_line" >"$attempt_log"
+printf '%s\n' 'agentstorm-demo-worker Complete=' >"$job_status"
+expect_retry "rollout status timeout while the worker Job is still running"
+
+write_signature
+printf '%s\n' 'error: timed out waiting for the condition on agenttestruns/agentstorm-demo' >"$attempt_log"
+printf '' >"$job_status"
+expect_stop "AgentTestRun wait timeout without a Complete worker Job"
+
+write_signature
+printf '%s\n' "$e2e_rollout_status_timeout_line" >"$attempt_log"
+printf '' >"$job_status"
+if e2e_should_retry_kind_lock_flake kind 2 "$attempt_log" "$controller_log" "$job_status"; then
+  echo "second attempt must not retry a rollout status timeout" >&2
+  exit 1
+fi
+if e2e_should_retry_kind_lock_flake orbstack 1 "$attempt_log" "$controller_log" "$job_status"; then
+  echo "non-kind clusters must not retry a rollout status timeout" >&2
+  exit 1
+fi
+
+write_signature
+printf '%s\n' "$e2e_rollout_status_timeout_line" >"$attempt_log"
 printf '%s\n' 'leader election lost' >"$controller_log"
-expect_stop "timeout without the resource lock error"
+expect_stop "rollout status timeout without the resource lock error"
 
 write_signature
 rm -f "$controller_log"

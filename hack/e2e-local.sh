@@ -509,7 +509,7 @@ fi
 write_controller_log
 write_job_status
 if e2e_should_retry_kind_lock_flake "$cluster_provider" "$e2e_attempt" "$attempt_log" "$controller_log" "$job_status_file"; then
-  echo "AgentStorm E2E hit the kind API lock flake: a wait timed out, the controller log contains \"error retrieving resource lock\", and a worker Job is already Complete." >&2
+  echo "AgentStorm E2E hit the kind API lock flake: the controller log contains \"error retrieving resource lock\", and either rollout status timed out or a wait timed out with a Complete worker Job." >&2
   echo "The diagnostics above are from the first attempt. Deleting kind cluster ${kind_cluster_name} and retrying once." >&2
   "$kind_bin" delete cluster --name "$kind_cluster_name"
   kind_create_cluster
