@@ -15,7 +15,10 @@ injected from `spec.target.apiKeySecretRef`, and never enter generated ConfigMap
 omits the `Authorization` header so an open local server can still be called.
 
 Real benchmark runners refuse to start unless `AGENTSTORM_ALLOW_PROVIDER_SPEND=1` is set, the model
-id is pinned, and a decimal price snapshot is present. Domestic-cloud endpoints must be `https`.
+id is pinned, and a decimal price snapshot is present. The worker `run` command requires the same
+variable for `openai-compatible` and `openai-agents`. A price of zero disables the benchmark USD 8
+stop only after `--price-is-zero-confirmed`. Domestic-cloud and hosted-api endpoints must be
+`https`. `hosted-api` is metadata for a hosted compatible endpoint that is not domestic-cloud.
 Self-hosted hardware, quantization, inference server, and topology are operator-attested fields in
 the manifest; AgentStorm does not measure them. A result is canonical only when the Kubernetes
 runner finishes the unchanged 384-capacity plus 32-reliability SRE protocol. Mock and in-process

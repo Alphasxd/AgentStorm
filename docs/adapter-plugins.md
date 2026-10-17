@@ -25,10 +25,13 @@ def create_adapter(context: AdapterFactoryContext):
     ...
 ```
 
-`AdapterFactoryContext` exposes only `provider`, `model`, and `base_url`. Credentials remain in the
-Worker process environment for the Provider SDK and are never passed through the factory context.
-Pricing and Kubernetes Secret objects are also absent. A trusted plugin still runs in that same
-process and can read environment variables, so the context restriction is not a sandbox boundary.
+`AdapterFactoryContext` exposes `provider`, `model`, `base_url`, `max_output_tokens`,
+`request_fields`, `http_retry_attempts`, and `http_retry_max_wait_seconds`. Credentials remain in
+the Worker process environment for the Provider SDK and are never passed through the factory
+context. Pricing and Kubernetes Secret objects are also absent. A trusted plugin still runs in
+that same process and can read environment variables, so the context restriction is not a sandbox
+boundary. `max_output_tokens` is the optional completion cap. `request_fields` is the validated
+provider JSON from `target.requestFields`. The retry fields configure the in-call HTTP 429 retry.
 
 The returned object must implement async `run(case, lifecycle=None) -> AdapterResponse`. Emit public
 tool/handoff lifecycle events so tracing, `tool_path`, fault injection, and tool-call accounting stay

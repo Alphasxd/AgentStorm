@@ -96,6 +96,69 @@ func TestReconcileCreatesIndexedWorkerJob(t *testing.T) {
 	if strings.Contains(config.Data[workerConfigKey], "provider-credentials") || strings.Contains(config.Data[workerConfigKey], "api-key") {
 		t.Fatal("generated worker config must not contain Secret references")
 	}
+	for _, item := range job.Spec.Template.Spec.Containers[0].Env {
+		if item.Name == "AGENTSTORM_ALLOW_PROVIDER_SPEND" {
+			t.Fatal("fake provider must not set AGENTSTORM_ALLOW_PROVIDER_SPEND")
+		}
+	}
+}
+
+func TestReconcileOpenAICompatibleSetsSpendOptInAndSampling(t *testing.T) {
+	scheme := testScheme(t)
+	run := testRun()
+	tokens := int32(2048)
+	retryAttempts := int32(8)
+	retryWait := int32(120)
+	run.Spec.Target.Provider = "openai-compatible"
+	run.Spec.Target.Model = "glm-4.7-flash"
+	run.Spec.Target.BaseURL = "https://example.invalid/v4"
+	run.Spec.Target.MaxTokens = &tokens
+	run.Spec.Target.RequestFields = []byte(`{"thinking":{"type":"disabled"}}`)
+	run.Spec.Target.HTTPRetryAttempts = &retryAttempts
+	run.Spec.Target.HTTPRetryMaxWaitSeconds = &retryWait
+	run.Spec.Target.APIKeySecretRef = &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "provider-credentials"},
+		Key:                  "api-key",
+	}
+	dataset := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-dataset", Namespace: "default"},
+		Data:       map[string]string{"cases.jsonl": `{"id":"1","input":"hello"}`},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "provider-credentials", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("test-only-value")},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentstormv1alpha1.AgentTestRun{}).WithObjects(run, dataset, secret).Build()
+	reconciler := &AgentTestRunReconciler{Client: client, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "demo"}}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	job := &batchv1.Job{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-worker"}, job); err != nil {
+		t.Fatalf("get Job: %v", err)
+	}
+	assertEnv(t, job.Spec.Template.Spec.Containers[0].Env, "AGENTSTORM_ALLOW_PROVIDER_SPEND", "1")
+	config := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "demo-config"}, config); err != nil {
+		t.Fatalf("get generated ConfigMap: %v", err)
+	}
+	if strings.Contains(config.Data[workerConfigKey], "test-only-value") {
+		t.Fatal("generated worker config contains the provider Secret value")
+	}
+	workerConfig := map[string]any{}
+	if err := json.Unmarshal([]byte(config.Data[workerConfigKey]), &workerConfig); err != nil {
+		t.Fatalf("decode worker config: %v", err)
+	}
+	targetConfig := workerConfig["target"].(map[string]any)
+	fields := targetConfig["requestFields"].(map[string]any)
+	thinking := fields["thinking"].(map[string]any)
+	if targetConfig["maxTokens"] != float64(2048) || thinking["type"] != "disabled" {
+		t.Fatalf("unexpected sampling config: %#v", targetConfig)
+	}
+	if targetConfig["httpRetryAttempts"] != float64(8) || targetConfig["httpRetryMaxWaitSeconds"] != float64(120) {
+		t.Fatalf("unexpected retry config: %#v", targetConfig)
+	}
 }
 
 func TestReconcileWaitsForRequiredSecret(t *testing.T) {
@@ -931,6 +994,47 @@ func TestValidateAndDefault(t *testing.T) {
 	run.Spec.Target.BaseURL = "https://example.invalid/v1"
 	if err := validateAndDefault(run); err != nil {
 		t.Fatalf("validate openai-compatible target: %v", err)
+	}
+
+	tokens := int32(0)
+	run = testRun()
+	run.Spec.Target.MaxTokens = &tokens
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "maxTokens") {
+		t.Fatalf("expected maxTokens 0 to fail, got %v", err)
+	}
+
+	run = testRun()
+	run.Spec.Target.RequestFields = []byte(`{"model":"other"}`)
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("expected reserved request field to fail, got %v", err)
+	}
+
+	accepted := int32(2048)
+	retryAttempts := int32(8)
+	retryWait := int32(120)
+	run = testRun()
+	run.Spec.Target.Provider = "openai-compatible"
+	run.Spec.Target.Model = "glm-4.7-flash"
+	run.Spec.Target.BaseURL = "https://example.invalid/v4"
+	run.Spec.Target.MaxTokens = &accepted
+	run.Spec.Target.RequestFields = []byte(`{"thinking":{"type":"disabled"}}`)
+	run.Spec.Target.HTTPRetryAttempts = &retryAttempts
+	run.Spec.Target.HTTPRetryMaxWaitSeconds = &retryWait
+	if err := validateAndDefault(run); err != nil {
+		t.Fatalf("validate sampling fields: %v", err)
+	}
+
+	zeroAttempts := int32(0)
+	run = testRun()
+	run.Spec.Target.HTTPRetryAttempts = &zeroAttempts
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "httpRetryAttempts") {
+		t.Fatalf("expected httpRetryAttempts 0 to fail, got %v", err)
+	}
+	tooLongWait := int32(301)
+	run = testRun()
+	run.Spec.Target.HTTPRetryMaxWaitSeconds = &tooLongWait
+	if err := validateAndDefault(run); err == nil || !strings.Contains(err.Error(), "httpRetryMaxWaitSeconds") {
+		t.Fatalf("expected httpRetryMaxWaitSeconds 301 to fail, got %v", err)
 	}
 }
 

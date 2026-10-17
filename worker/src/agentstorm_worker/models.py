@@ -70,6 +70,9 @@ class AttemptResult:
     model_call_count: int | None = None
     tool_call_count: int = 0
     circuit_events: list[str] = field(default_factory=list)
+    provider_error_code: str = ""
+    rate_limit_events: int = 0
+    finish_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,7 @@ class CaseResult:
     input_cost_usd: str | None = None
     output_cost_usd: str | None = None
     cost_usd: str | None = None
+    provider_error_code: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

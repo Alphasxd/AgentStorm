@@ -18,6 +18,15 @@ spec:
     pricing:
       inputUSDPerMillionTokens: "1"
       outputUSDPerMillionTokens: "2"
+    # maxTokens overrides the SRE completion cap of 512. requestFields is extra chat JSON.
+    # httpRetryAttempts is the per-call HTTP 429 retry count (default 3, max 16).
+    # httpRetryMaxWaitSeconds caps one Retry-After or backoff sleep (default 8, max 300).
+    # maxTokens: 2048
+    # httpRetryAttempts: 8
+    # httpRetryMaxWaitSeconds: 120
+    # requestFields:
+    #   thinking:
+    #     type: disabled
   workload:
     datasetRef:
       name: sre-incidents

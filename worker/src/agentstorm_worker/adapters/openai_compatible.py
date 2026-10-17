@@ -1,11 +1,13 @@
 """Provider-neutral OpenAI Chat Completions client.
 
-The adapter speaks the portable subset used by OpenAI-compatible domestic cloud
-endpoints and self-hosted servers such as vLLM and SGLang: ``POST {baseURL}/chat/completions``
+The adapter speaks the portable subset used by OpenAI-compatible hosted APIs
+and self-hosted servers such as vLLM and SGLang: ``POST {baseURL}/chat/completions``
 with bearer auth, function tools, and non-streaming JSON. It does not import a
-vendor SDK. Retry, rate limits, faults, price snapshots, and traces stay in the
-existing Worker middleware; this module only turns HTTP into ``AdapterResponse``
-or ``ExecutionError``.
+vendor SDK. Case retry, faults, price snapshots, and traces stay in the Worker
+middleware. This module retries one chat call on HTTP 429 so a rate limit in
+the middle of a tool loop does not discard completed turns. HTTP 5xx stays
+single-shot and is priced at the unknown-call allowance. It turns HTTP into
+``AdapterResponse`` or ``ExecutionError``.
 """
 
 from __future__ import annotations
@@ -13,11 +15,15 @@ from __future__ import annotations
 import asyncio
 import http.client
 import json
+import math
 import os
+import re
 import urllib.error
 import urllib.request
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -29,6 +35,29 @@ _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_URL_LENGTH = 2048
 _MAX_MODEL_LENGTH = 256
 _RESERVED_REQUEST_FIELDS = {"model", "messages", "stream", "tools", "tool_choice"}
+# Sampling keys that target config sets explicitly, so requestFields cannot
+# disagree with the recorded max_tokens or the SRE temperature pin.
+_CONFIG_RESERVED_REQUEST_FIELDS = _RESERVED_REQUEST_FIELDS | {"temperature", "max_tokens"}
+_REQUEST_FIELD_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_PROVIDER_CODE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+_MAX_REQUEST_FIELDS = 16
+_MAX_REQUEST_FIELD_BYTES = 1024
+_MAX_REQUEST_FIELD_DEPTH = 6
+_MAX_OUTPUT_TOKENS = 131072
+# Only HTTP 429 is retried inside one chat call. A 429 was not executed.
+# 5xx responses, including 502, 503, and 504, may already have been executed
+# and billed, so they stay single-shot. The runner retries them only when
+# allowAmbiguousRetries is true, and each attempt is priced.
+RETRYABLE_HTTP_STATUSES = frozenset({429})
+DEFAULT_HTTP_RETRY_ATTEMPTS = 3
+DEFAULT_HTTP_RETRY_INITIAL_SECONDS = 0.5
+DEFAULT_HTTP_RETRY_MAX_SECONDS = 8.0
+MAX_HTTP_RETRY_ATTEMPTS = 16
+MAX_HTTP_RETRY_WAIT_SECONDS = 300
+PROVIDER_ERROR_CODE_KEY = "agentstorm.provider.error_code"
+FINISH_REASON_KEY = "agentstorm.provider.finish_reason"
+RATE_LIMIT_EVENTS_KEY = "agentstorm.provider.rate_limit_events"
+RATE_LIMIT_CODES_KEY = "agentstorm.provider.rate_limit_codes"
 # Distinct from a proven model-call count of zero.
 _LEDGER_COUNT = object()
 # Allowance for one chat request that did not return usage. A 4-characters-per-token
@@ -118,8 +147,179 @@ def validate_pinned_model(model: str) -> None:
         raise ValueError("target.model must be a pinned model id without whitespace")
 
 
+def validate_max_output_tokens(value: Any) -> int:
+    """Return a completion cap the spend estimate and the request can share."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("target.maxTokens must be an integer")
+    if not 1 <= value <= _MAX_OUTPUT_TOKENS:
+        raise ValueError("target.maxTokens must be between 1 and 131072")
+    return value
+
+
+def validate_http_retry_attempts(value: Any) -> int:
+    """Return the number of tries for one HTTP 429 chat call."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("target.httpRetryAttempts must be an integer")
+    if not 1 <= value <= MAX_HTTP_RETRY_ATTEMPTS:
+        raise ValueError("target.httpRetryAttempts must be between 1 and 16")
+    return value
+
+
+def validate_http_retry_max_wait_seconds(value: Any) -> int:
+    """Return the cap, in seconds, for one 429 sleep."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("target.httpRetryMaxWaitSeconds must be an integer")
+    if not 1 <= value <= MAX_HTTP_RETRY_WAIT_SECONDS:
+        raise ValueError("target.httpRetryMaxWaitSeconds must be between 1 and 300")
+    return value
+
+
+def http_retry_adapter_kwargs(
+    attempts: int | None, max_wait_seconds: int | None
+) -> dict[str, Any]:
+    """Adapter constructor kwargs for the configured 429 retry, or none."""
+    kwargs: dict[str, Any] = {}
+    if attempts is not None:
+        kwargs["max_http_attempts"] = validate_http_retry_attempts(attempts)
+    if max_wait_seconds is not None:
+        kwargs["retry_max_backoff_seconds"] = float(
+            validate_http_retry_max_wait_seconds(max_wait_seconds)
+        )
+    return kwargs
+
+
+def validate_request_fields(
+    fields: Any, *, reject_keys: set[str] | None = None
+) -> dict[str, Any]:
+    """Return provider JSON fields that cannot replace the chat-completions contract."""
+    if fields is None:
+        return {}
+    if not isinstance(fields, dict):
+        raise ValueError("target.requestFields must be an object")
+    if len(fields) > _MAX_REQUEST_FIELDS:
+        raise ValueError("target.requestFields must contain at most 16 entries")
+    blocked = set(_RESERVED_REQUEST_FIELDS)
+    if reject_keys:
+        blocked.update(reject_keys)
+    cleaned: dict[str, Any] = {}
+    for key, value in fields.items():
+        if not isinstance(key, str) or _REQUEST_FIELD_KEY.fullmatch(key) is None:
+            raise ValueError("target.requestFields keys must be identifiers")
+        if key in blocked:
+            raise ValueError(f"request field {key} is reserved")
+        _json_value(value, 0)
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > _MAX_REQUEST_FIELD_BYTES:
+            raise ValueError("target.requestFields values must be at most 1024 bytes")
+        cleaned[key] = value
+    return cleaned
+
+
+def allowlisted_provider_code(body: Any, secret: str = "") -> str:
+    """Return a short provider error code, or an empty string when it is unsafe to keep."""
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return ""
+    code = error.get("code")
+    if isinstance(code, bool) or code is None:
+        return ""
+    if isinstance(code, int):
+        text = str(code)
+    elif isinstance(code, str):
+        text = code
+    else:
+        return ""
+    if _PROVIDER_CODE.fullmatch(text) is None:
+        return ""
+    if secret and (text == secret or (len(secret) >= 8 and secret in text)):
+        return ""
+    return text
+
+
+def retry_after_seconds(
+    headers: Mapping[str, str] | Any | None,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    """Parse Retry-After as delta-seconds or an HTTP date. Invalid values are ignored."""
+    if headers is None:
+        return None
+    getter = getattr(headers, "get", None)
+    raw = getter("Retry-After") if callable(getter) else None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        delta = float(text)
+    except ValueError:
+        delta = None
+    if delta is not None and math.isfinite(delta):
+        return max(0.0, delta)
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    clock = now or datetime.now(timezone.utc)
+    return max(0.0, (moment - clock).total_seconds())
+
+
+def retry_delay_seconds(
+    failed_attempts: int, retry_after: float | None, initial: float, maximum: float
+) -> float:
+    """Backoff for one retry. Retry-After wins and is capped; there is no jitter."""
+    fallback = min(maximum, initial * (2 ** max(0, failed_attempts - 1)))
+    if retry_after is None:
+        return fallback
+    return min(maximum, max(0.0, retry_after))
+
+
+def _json_value(value: Any, depth: int) -> None:
+    if depth > _MAX_REQUEST_FIELD_DEPTH:
+        raise ValueError("target.requestFields is nested too deeply")
+    if value is None or isinstance(value, str) or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("target.requestFields values must be JSON values")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _json_value(item, depth + 1)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("target.requestFields values must be JSON values")
+            _json_value(item, depth + 1)
+        return
+    raise ValueError("target.requestFields values must be JSON values")
+
+
+def _allowlisted_token(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return ""
+    text = str(value) if isinstance(value, int) else value if isinstance(value, str) else ""
+    if _PROVIDER_CODE.fullmatch(text) is None:
+        return ""
+    return text
+
+
 def chat_completions_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/chat/completions"
+
+
+@dataclass
+class _RateLimitEvent:
+    status: int
+    code: str
 
 
 @dataclass
@@ -131,7 +331,9 @@ class _Ledger:
     already have accepted that request. ``unknown_calls`` is the marker for
     those omitted calls. ``response()`` copies it to
     ``metadata["agentstorm.usage.unknown_calls"]`` and does not add it to
-    ``model_call_count``.
+    ``model_call_count``. A retried 429 is recorded and is not a model call.
+    It adds no tokens. A ``5xx`` is not retried here. The caller prices that
+    one response.
     """
 
     model_calls: int = 0
@@ -139,6 +341,10 @@ class _Ledger:
     output_tokens: int = 0
     usage_known: bool = True
     unknown_calls: int = 0
+    rate_limit_events: list[_RateLimitEvent] = field(default_factory=list)
+
+    def note_retryable(self, status: int, code: str) -> None:
+        self.rate_limit_events.append(_RateLimitEvent(status, code))
 
     def add_usage(self, usage: tuple[int, int] | None) -> None:
         if usage is None:
@@ -167,6 +373,11 @@ class _Ledger:
         metadata: dict[str, Any] = {}
         if self.unknown_calls:
             metadata["agentstorm.usage.unknown_calls"] = self.unknown_calls
+        if self.rate_limit_events:
+            metadata[RATE_LIMIT_EVENTS_KEY] = len(self.rate_limit_events)
+            codes = [event.code for event in self.rate_limit_events if event.code]
+            if codes:
+                metadata[RATE_LIMIT_CODES_KEY] = codes
         return AdapterResponse(
             output=output,
             input_tokens=self.input_tokens if self.usage_known else None,
@@ -192,6 +403,10 @@ class OpenAICompatibleAdapter:
         request_fields: dict[str, Any] | None = None,
         agent_name: str = "openai-compatible",
         unknown_input_tokens: int = UNKNOWN_CALL_INPUT_TOKENS,
+        max_http_attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
+        retry_initial_backoff_seconds: float = DEFAULT_HTTP_RETRY_INITIAL_SECONDS,
+        retry_max_backoff_seconds: float = DEFAULT_HTTP_RETRY_MAX_SECONDS,
+        retry_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         validate_pinned_model(model)
         validate_base_url(base_url)
@@ -203,10 +418,23 @@ class OpenAICompatibleAdapter:
             raise ValueError("unknown_input_tokens must be a positive integer")
         if unknown_input_tokens < 1:
             raise ValueError("unknown_input_tokens must be a positive integer")
-        extra = dict(request_fields or {})
-        reserved = sorted(set(extra) & _RESERVED_REQUEST_FIELDS)
-        if reserved:
-            raise ValueError(f"request field {reserved[0]} is reserved")
+        if (
+            isinstance(max_http_attempts, bool)
+            or not isinstance(max_http_attempts, int)
+            or not 1 <= max_http_attempts <= MAX_HTTP_RETRY_ATTEMPTS
+        ):
+            raise ValueError("max_http_attempts must be between 1 and 16")
+        if (
+            not isinstance(retry_initial_backoff_seconds, (int, float))
+            or isinstance(retry_initial_backoff_seconds, bool)
+            or not isinstance(retry_max_backoff_seconds, (int, float))
+            or isinstance(retry_max_backoff_seconds, bool)
+            or retry_initial_backoff_seconds < 0
+            or retry_max_backoff_seconds < retry_initial_backoff_seconds
+            or retry_max_backoff_seconds > MAX_HTTP_RETRY_WAIT_SECONDS
+        ):
+            raise ValueError("retry backoff must be non-negative and capped")
+        extra = validate_request_fields(request_fields)
         if tools:
             names = [tool.name for tool in tools]
             if len(names) != len(set(names)) or any(not tool.name for tool in tools):
@@ -224,6 +452,10 @@ class OpenAICompatibleAdapter:
         self._agent_name = agent_name
         self._unknown_input_tokens = unknown_input_tokens
         self._unknown_output_tokens = _output_allowance(extra)
+        self._max_http_attempts = max_http_attempts
+        self._retry_initial = float(retry_initial_backoff_seconds)
+        self._retry_max = float(retry_max_backoff_seconds)
+        self._sleep = retry_sleep or asyncio.sleep
 
     async def run(self, case: TestCase, lifecycle: AgentLifecycle | None = None) -> AdapterResponse:
         api_key = self._api_key if self._api_key is not None else os.environ.get("OPENAI_API_KEY", "")
@@ -244,7 +476,7 @@ class OpenAICompatibleAdapter:
                 payload["tools"] = self._tool_schemas
                 payload["tool_choice"] = "auto"
             try:
-                status, body = await asyncio.to_thread(self._post, payload, api_key.strip(), ledger)
+                status, body = await self._post_with_retry(payload, api_key.strip(), ledger)
             except asyncio.CancelledError:
                 # Cancelling the task does not interrupt a socket operation that
                 # is already blocked. urllib still applies its timeout to each
@@ -254,11 +486,16 @@ class OpenAICompatibleAdapter:
                 raise
             if status != 200:
                 raise _status_error(
-                    status, ledger, self._unknown_input_tokens, self._unknown_output_tokens
+                    status,
+                    ledger,
+                    self._unknown_input_tokens,
+                    self._unknown_output_tokens,
+                    body=body,
+                    api_key=api_key.strip(),
                 )
             ledger.model_calls += 1
             try:
-                message, usage = _parse_completion(body)
+                message, usage, finish_reason = _parse_completion(body)
             except ValueError as exc:
                 ledger.usage_known = False
                 raise _error(
@@ -268,6 +505,7 @@ class OpenAICompatibleAdapter:
                     usage_complete=False,
                 ) from exc
             ledger.add_usage(usage)
+            finish = _allowlisted_token(finish_reason)
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
                 if ledger.model_calls >= self._max_model_calls:
@@ -276,6 +514,13 @@ class OpenAICompatibleAdapter:
                 tool_count += await self._execute_tools(tool_calls, messages, lifecycle, ledger)
                 continue
             content = _message_text(message.get("content"))
+            if finish == "length" and not (content or "").strip():
+                raise _error(
+                    "output_truncated",
+                    ledger=ledger,
+                    usage_complete=ledger.usage_known,
+                    metadata={FINISH_REASON_KEY: finish},
+                )
             if content is None:
                 raise _error(
                     "model_behavior",
@@ -283,7 +528,12 @@ class OpenAICompatibleAdapter:
                     ledger=ledger,
                     usage_complete=ledger.usage_known,
                 )
-            return replace(ledger.response(content), tool_call_count=tool_count)
+            response = replace(ledger.response(content), tool_call_count=tool_count)
+            if finish:
+                metadata = dict(response.metadata)
+                metadata[FINISH_REASON_KEY] = finish
+                response = replace(response, metadata=metadata)
+            return response
         raise _error(
             "max_turns_exceeded",
             category="evaluation",
@@ -292,9 +542,30 @@ class OpenAICompatibleAdapter:
             usage_complete=ledger.usage_known,
         )
 
-    def _post(
+    async def _post_with_retry(
         self, payload: dict[str, Any], api_key: str, ledger: _Ledger
     ) -> tuple[int, dict[str, Any] | None]:
+        """Retry one chat call. Completed tool turns stay in ``payload``."""
+        tries = 0
+        while True:
+            tries += 1
+            status, body, headers = await asyncio.to_thread(self._post, payload, api_key, ledger)
+            if status not in RETRYABLE_HTTP_STATUSES:
+                return status, body
+            ledger.note_retryable(status, allowlisted_provider_code(body, api_key))
+            if tries >= self._max_http_attempts:
+                return status, body
+            delay = retry_delay_seconds(
+                tries,
+                retry_after_seconds(headers),
+                self._retry_initial,
+                self._retry_max,
+            )
+            await self._sleep(delay)
+
+    def _post(
+        self, payload: dict[str, Any], api_key: str, ledger: _Ledger
+    ) -> tuple[int, dict[str, Any] | None, Any]:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Accept": "application/json",
@@ -304,12 +575,15 @@ class OpenAICompatibleAdapter:
         if api_key:
             headers["Authorization"] = "Bearer " + api_key
         request = urllib.request.Request(self._url, data=raw, headers=headers, method="POST")
+        response_headers: Any = None
         try:
             with _OPENER.open(request, timeout=self._timeout) as response:
                 status = int(response.status)
+                response_headers = response.headers
                 downloaded = response.read(_MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
+            response_headers = exc.headers
             try:
                 downloaded = exc.read(_MAX_RESPONSE_BYTES + 1)
             except (http.client.HTTPException, OSError) as read_error:
@@ -323,14 +597,14 @@ class OpenAICompatibleAdapter:
         except (http.client.HTTPException, OSError) as exc:
             raise self._unpriced("connection_error", ledger) from exc
         if len(downloaded) > _MAX_RESPONSE_BYTES or not downloaded:
-            return status, None
+            return status, None, response_headers
         try:
             parsed = json.loads(downloaded.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return status, None
+            return status, None, response_headers
         if not isinstance(parsed, dict):
-            return status, None
-        return status, parsed
+            return status, None, response_headers
+        return status, parsed, response_headers
 
     def _unpriced(
         self, code: str, ledger: _Ledger, *, failure_kind: str = "provider"
@@ -414,7 +688,9 @@ class OpenAICompatibleAdapter:
         return executed
 
 
-def _parse_completion(body: dict[str, Any] | None) -> tuple[dict[str, Any], tuple[int, int] | None]:
+def _parse_completion(
+    body: dict[str, Any] | None,
+) -> tuple[dict[str, Any], tuple[int, int] | None, str]:
     if not isinstance(body, dict):
         raise ValueError("completion body is not an object")
     choices = body.get("choices")
@@ -423,13 +699,16 @@ def _parse_completion(body: dict[str, Any] | None) -> tuple[dict[str, Any], tupl
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise ValueError("completion message is missing")
+    finish_reason = choices[0].get("finish_reason")
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        raise ValueError("finish_reason is invalid")
     assistant: dict[str, Any] = {"role": "assistant", "content": message.get("content")}
     tool_calls = message.get("tool_calls")
     if tool_calls is not None:
         if not isinstance(tool_calls, list):
             raise ValueError("tool_calls is not an array")
         assistant["tool_calls"] = tool_calls
-    return assistant, _usage(body.get("usage"))
+    return assistant, _usage(body.get("usage")), finish_reason or ""
 
 
 def _parse_tool_call(call: Any) -> tuple[str | None, dict[str, Any] | None, str | None]:
@@ -507,6 +786,7 @@ def _priced_unknown(
     output_allowance: int,
     *,
     failure_kind: str = "provider",
+    metadata: dict[str, Any] | None = None,
 ) -> ExecutionError:
     """Keep measured tokens and price the one call that returned no usage."""
     usage_complete = ledger.charge_unknown_call(input_allowance, output_allowance)
@@ -516,30 +796,55 @@ def _priced_unknown(
         ambiguous=True,
         ledger=ledger,
         usage_complete=usage_complete,
+        metadata=metadata,
     )
 
 
 def _status_error(
-    status: int, ledger: _Ledger, input_allowance: int, output_allowance: int
+    status: int,
+    ledger: _Ledger,
+    input_allowance: int,
+    output_allowance: int,
+    *,
+    body: dict[str, Any] | None = None,
+    api_key: str = "",
 ) -> ExecutionError:
+    metadata: dict[str, Any] = {}
+    provider_code = allowlisted_provider_code(body, api_key)
+    if provider_code:
+        metadata[PROVIDER_ERROR_CODE_KEY] = provider_code
     if status == 429:
         return _error(
             "rate_limited",
             safe_to_retry=True,
             ledger=ledger,
             usage_complete=ledger.usage_known,
+            metadata=metadata,
         )
     if status == 408:
         return _priced_unknown(
-            ledger, "timeout", input_allowance, output_allowance, failure_kind="timeout"
+            ledger,
+            "timeout",
+            input_allowance,
+            output_allowance,
+            failure_kind="timeout",
+            metadata=metadata,
         )
     if 300 <= status < 400:
-        return _priced_unknown(ledger, "http_redirect", input_allowance, output_allowance)
+        return _priced_unknown(
+            ledger, "http_redirect", input_allowance, output_allowance, metadata=metadata
+        )
     if 500 <= status <= 599:
-        return _priced_unknown(ledger, "http_5xx", input_allowance, output_allowance)
+        return _priced_unknown(
+            ledger, "http_5xx", input_allowance, output_allowance, metadata=metadata
+        )
     if 400 <= status <= 499:
-        return _error("http_4xx", ledger=ledger, usage_complete=ledger.usage_known)
-    return _priced_unknown(ledger, "unknown_error", input_allowance, output_allowance)
+        return _error(
+            "http_4xx", ledger=ledger, usage_complete=ledger.usage_known, metadata=metadata
+        )
+    return _priced_unknown(
+        ledger, "unknown_error", input_allowance, output_allowance, metadata=metadata
+    )
 
 
 def _error(
@@ -552,8 +857,13 @@ def _error(
     ledger: _Ledger | None = None,
     model_calls: int | None | object = _LEDGER_COUNT,
     usage_complete: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> ExecutionError:
     response = ledger.response(model_calls=model_calls) if ledger is not None else None
+    if response is not None and metadata:
+        merged = dict(response.metadata)
+        merged.update(metadata)
+        response = replace(response, metadata=merged)
     return ExecutionError(
         category,
         code,

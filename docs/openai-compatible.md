@@ -36,6 +36,16 @@ key only. When the variable is empty, the adapter sends no `Authorization` heade
 runners still require a non-empty key so the Secret path is exercised; an open inference server must
 accept that bearer token or ignore it.
 
+`python -m agentstorm_worker run` calls `openai-compatible` and `openai-agents` only when
+`AGENTSTORM_ALLOW_PROVIDER_SPEND=1`. `validate` does not call a provider and does not need the
+variable. The controller sets it to `1` on Workers it starts for those two providers, because
+creating the AgentTestRun is the operator's authorization. `fake` is ungated. The worker process
+has no USD stop. Benchmark runners keep the USD 8 recorded-cost stop. A price of `0` makes that
+estimate `0`, so those runners reject it unless `--price-is-zero-confirmed` is set after the
+operator checks the provider bill. That confirmation disables the USD 8 stop and is recorded as
+`spend_guard=confirmed-zero-price`. A non-zero price still reserves spend and ignores the flag.
+An AgentTestRun priced at `0` has no second confirmation field; the CR itself is the snapshot.
+
 Built-in provider keys are `fake`, `openai-agents`, and `openai-compatible`. The development KEDA
 overlay in `config/dev/keda` caps `openai-compatible` at 8 concurrent attempts and 60 requests per
 minute, matching `openai-agents`. That cap is not a Helm chart default. The chart leaves provider
@@ -49,11 +59,45 @@ message run one after another so fault injection stays deterministic. `parallel_
 `response_format` are not sent.
 
 The generic adapter, selected with no `adapterEntrypoint`, is a plain chat client. It sends no
-sampling fields and no tools. The SRE factory
+tools. `target.maxTokens` (1 through 131072) becomes `max_tokens` on that request. Leave it empty
+and the generic adapter sends no completion cap. The SRE factory
 `agentstorm_worker.benchmarks.sre:create_adapter` adds the four read-only incident tools, pins
-`temperature` 0 and `max_tokens` 512, and stops after 8 model calls. Those two sampling fields are
-benchmark configuration, not a hidden default of every compatible call. The factory records them in
-the run manifest.
+`temperature` 0, uses `target.maxTokens` or 512, and stops after 8 model calls. `lookup_runbook`
+returns the exact `root_cause`, `severity`, `recommended_action`, `evidence`, and `runbook` the
+case schema requires, and the instructions tell the model to copy those values. `evidence` is a
+JSON array of strings.
+
+`target.requestFields` is extra JSON merged into the chat body, for provider options such as
+`thinking: {type: disabled}`. It allows at most 16 identifier keys. Values are JSON, at most 1024
+bytes, and at most six levels deep. `model`, `messages`, `stream`, `tools`, `tool_choice`,
+`temperature`, and `max_tokens` are reserved so they cannot diverge from the recorded request.
+Benchmark manifests record `max_tokens` and `request_fields`.
+
+One chat call retries HTTP 429 inside the adapter. HTTP 5xx, including 502, 503, and 504, is
+single-shot: those responses may already have been executed and billed. The runner retries that
+ambiguous error only when `reliability.retry.allowAmbiguousRetries` is true, and token totals
+include every attempt. A 429 adds no tokens and is not a model call. Each 5xx is priced once, at
+the unknown-call allowance, when it happens.
+
+`target.httpRetryAttempts` (1 through 16, default 3) is the number of tries for one 429.
+`target.httpRetryMaxWaitSeconds` (1 through 300, default 8) caps one sleep. Backoff starts at 0.5
+seconds and doubles until that cap. A `Retry-After` delta-seconds or HTTP-date value replaces the
+backoff and is still capped. There is no jitter. Completed tool turns stay in the message list, so
+a 429 does not rerun earlier tools. Timeouts and connection errors stay single-shot. Exhausted 429
+retries remain retry-safe, so the runner can still retry the case. Benchmark manifests record both
+retry settings.
+
+Response bodies stay out of error strings. When `error.code` is an integer or string of at most 32
+characters matching `[A-Za-z0-9_.-]`, and it is not the API key, the adapter keeps it as
+`agentstorm.provider.error_code`. Message text is dropped. The Result API `error_code` stays the
+harness reason, such as `rate_limited`, because that field does not accept provider codes such as
+`1305`. Local attempt records also store that provider code, the rate-limit event count, and
+`finish_reason` when it matches the same allowlist.
+
+`finish_reason=length` with no tool call and empty or whitespace content is
+`provider/output_truncated`. It is not a final answer and it is not retried. A non-empty truncated
+completion is still returned so the evaluator can score it. An empty completion with another
+finish reason stays an empty answer.
 
 HTTP status maps onto the existing error taxonomy: `429` is retry-safe and does not count as a
 completed model call; `408`, `5xx`, redirects, timeouts, and connection failures are ambiguous. A
@@ -85,11 +129,16 @@ second interval when more than one socket operation uses the timeout.
 
 These are operator-pinned examples, not defaults and not measured results:
 
-| Deployment | Base URL shape |
-| --- | --- |
-| DashScope legacy compatible mode | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| DashScope workspace domain | `https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1` |
-| vLLM or SGLang | `http://host:8000/v1` |
+| Deployment | Base URL shape | Endpoint class |
+| --- | --- | --- |
+| DashScope legacy compatible mode | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `domestic-cloud` |
+| DashScope workspace domain | `https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1` | `domestic-cloud` |
+| Hosted OpenAI-compatible API | `https://api.example.invalid/v1` | `hosted-api` |
+| vLLM or SGLang | `http://host:8000/v1` | `self-hosted` |
+
+`hosted-api` uses the same `https` rule as `domestic-cloud`. It is metadata for a hosted
+compatible endpoint that is not a domestic-cloud deployment. A short validation procedure for
+Z.ai `glm-4.7-flash` is in the [SRE benchmark](../benchmarks/sre/README.md).
 
 The default worker NetworkPolicy allows egress to TCP 443 and DNS. A self-hosted server on another
 port needs an explicit policy. Do not widen worker egress to arbitrary ports in the default profile.

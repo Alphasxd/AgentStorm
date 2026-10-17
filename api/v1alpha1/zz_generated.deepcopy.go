@@ -35,6 +35,21 @@ func (in *AgentTargetSpec) DeepCopyInto(out *AgentTargetSpec) {
 		out.Pricing = new(AgentPricingSpec)
 		*out.Pricing = *in.Pricing
 	}
+	if in.MaxTokens != nil {
+		value := *in.MaxTokens
+		out.MaxTokens = &value
+	}
+	if in.HTTPRetryAttempts != nil {
+		value := *in.HTTPRetryAttempts
+		out.HTTPRetryAttempts = &value
+	}
+	if in.HTTPRetryMaxWaitSeconds != nil {
+		value := *in.HTTPRetryMaxWaitSeconds
+		out.HTTPRetryMaxWaitSeconds = &value
+	}
+	if in.RequestFields != nil {
+		out.RequestFields = append([]byte(nil), in.RequestFields...)
+	}
 }
 
 func (in *AgentPricingSpec) DeepCopyInto(out *AgentPricingSpec) { *out = *in }

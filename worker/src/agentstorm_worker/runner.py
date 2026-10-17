@@ -5,6 +5,7 @@ import json
 import math
 import time
 from pathlib import Path
+from typing import Any
 
 from .adapters import (
     AgentAdapter,
@@ -293,7 +294,9 @@ class WorkloadRunner:
                 )
                 if attempt_number == 1:
                     attempt.circuit_events.extend(permit.events)
-                tool_path.extend(attempt_tools)
+                # Keep the latest attempt. A retried case must not concatenate
+                # tool names from attempts that were discarded.
+                tool_path[:] = attempt_tools
                 final_provider_latency_ms = attempt.latency_ms
                 if execution_error is None:
                     attempt.retry_decision = "not_needed"
@@ -594,6 +597,13 @@ class WorkloadRunner:
             circuit_events=list(execution_error.circuit_events)
             if execution_error is not None
             else [],
+            provider_error_code=_provider_token(
+                None if response is None else response.metadata.get("agentstorm.provider.error_code")
+            ),
+            rate_limit_events=_rate_limit_events(None if response is None else response.metadata),
+            finish_reason=_provider_token(
+                None if response is None else response.metadata.get("agentstorm.provider.finish_reason")
+            ),
         )
         return response, execution_error, attempt, lifecycle.tool_path
 
@@ -611,6 +621,9 @@ class WorkloadRunner:
         input_cost, output_cost, total_cost = _costs_for_usage(
             self._config, input_tokens, output_tokens, usage_complete
         )
+        provider_error_code = ""
+        if attempts:
+            provider_error_code = attempts[-1].provider_error_code
         return CaseResult(
             case_id=case.case_id,
             iteration=iteration,
@@ -630,6 +643,7 @@ class WorkloadRunner:
             input_cost_usd=input_cost,
             output_cost_usd=output_cost,
             cost_usd=total_cost,
+            provider_error_code=provider_error_code,
         )
 
     def _trace_circuit_events(self, events: tuple[str, ...]) -> None:
@@ -738,6 +752,23 @@ def summarize(
         thresholds_passed=not failures,
         threshold_failures=failures,
     )
+
+
+def _provider_token(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 32:
+        return ""
+    if any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" for character in value):
+        return ""
+    return value
+
+
+def _rate_limit_events(metadata: dict[str, Any] | None) -> int:
+    if not metadata:
+        return 0
+    value = metadata.get("agentstorm.provider.rate_limit_events", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 def write_results(output_dir: str | Path, results: list[CaseResult], summary: RunSummary) -> None:

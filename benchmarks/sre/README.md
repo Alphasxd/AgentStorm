@@ -1,8 +1,14 @@
 # SRE Agent benchmark
 
-This benchmark measures a complete Agent execution, not a single prompt completion. Each of the
-32 synthetic incidents requires a four-tool evidence chain and a structured diagnosis. The tools
-are deterministic, read-only fixtures shipped in the Worker image.
+This benchmark measures tool use and instruction following along a fixed path. It does not measure
+diagnostic reasoning. Each of the 32 synthetic incidents requires the model to call `get_incident`,
+then `query_metrics` and `search_logs`, then `lookup_runbook` with the `error_signature` that only
+`search_logs` returns. The diagnosis values (`root_cause`, `severity`, `recommended_action`,
+`evidence`, and `runbook`) come from `lookup_runbook`. The instructions tell the model to copy them
+verbatim, and `evidence` is a JSON array of strings. `query_metrics` is required by the path
+assertion even though those diagnosis values do not depend on its numbers. A wrong path or a skipped
+tool cannot pass `validate_tool_usage`. The tools are deterministic, read-only fixtures shipped in
+the Worker image.
 
 ## No-cost validation
 
@@ -63,10 +69,11 @@ Agents SDK runner above is unchanged. SSH only transports a Worker-reachable HTT
 an adapter. Codex and ChatGPT sessions are neither endpoints nor credentials.
 
 The contract is [OpenAI-compatible provider](../../docs/openai-compatible.md). The SRE factory pins
-`temperature` 0 and `max_tokens` 512 and records both in the manifest. Real modes also require a
-decimal price snapshot and reject model ids `latest`, `auto`, and `default`. Domestic-cloud base
-URLs must be `https`. Example roots an operator may pin, none of which are defaults or measured
-results:
+`temperature` 0 and `max_tokens` from `target.maxTokens`, default 512, and records both in the
+manifest. `lookup_runbook` returns the diagnosis fields the schema requires, including `evidence`
+as an array of strings. Real modes also require a decimal price snapshot and reject model ids
+`latest`, `auto`, and `default`. `domestic-cloud` and `hosted-api` base URLs must be `https`.
+Example roots an operator may pin, none of which are defaults or measured results:
 
 ```text
 https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -110,12 +117,15 @@ make benchmark-compatible-local
 Replace the model, base URL, and prices with the endpoint you will call. `INPUT_PRICE` and
 `OUTPUT_PRICE` are decimal USD per million tokens. For `ENDPOINT_CLASS=self-hosted`, also set
 `INFERENCE_SERVER`, `QUANTIZATION`, `HARDWARE`, and `TOPOLOGY`. `MODEL_VERSION` defaults to `MODEL`.
-Before each run the runner estimates spend for 32 cases, 8 model calls, and the attempt count
-(1 for capacity, 2 for reliability). Output tokens use the 512 `max_tokens` limit. Input tokens
-use an allowance of 8192 per call, which is above the largest scripted fixture request and the
-assistant history those calls can resend. The endpoint does not enforce that allowance. The
-runner refuses to start when recorded spend plus the estimate would pass USD 8. A timeout, `5xx`,
-or connection failure prices that one call at the same allowance and keeps earlier tokens, so the
+Before each run the runner estimates spend for the cases in that run, 8 model calls, and the
+attempt count (1 for capacity, 2 for reliability). Output tokens use the configured `max_tokens`
+limit, 512 unless `--max-tokens` is set. Input tokens use the larger of 8192 and the assistant
+history those calls can resend at that limit. The endpoint does not enforce that allowance. The
+runner refuses to start when recorded spend plus the estimate would pass USD 8. A price of `0`
+makes the estimate `0`. Pass `--price-is-zero-confirmed` only after checking the provider bill;
+that flag is recorded on the manifest and disables the USD 8 stop. A non-zero price still
+reserves spend. A timeout, `5xx`, or connection failure prices that one call at the same
+allowance and keeps earlier tokens, so the
 case cost stays populated. `model_call_count` in the run artifacts stays at the number of completed
 calls. The adapter response records the failed call as `agentstorm.usage.unknown_calls` because the
 provider may already have accepted it. The case timeout is 2100 seconds, above two attempts times
@@ -124,6 +134,66 @@ operation, not to the whole HTTP request. A completed local matrix can report in
 and token cost for that pinned endpoint. It is `canonical=false` and is
 not a KEDA or speedup result. An incomplete matrix writes a report with no performance table and
 exits non-zero.
+
+`--shape smoke` runs four incidents, `INC-001`, `INC-009`, `INC-017`, and `INC-025`, one from each
+root-cause family. `--cases N` with smoke keeps the first N incidents instead. Smoke defaults to
+`--max-concurrency 1`. The same cap applies to a full matrix: a cap below 32 is not the fixed
+protocol. Smoke and a capped full run set `complete=false`, omit performance claims, and exit 0
+when the harness itself finishes. Pass provider JSON with `--request-fields`, for example
+`'{"thinking":{"type":"disabled"}}'`. `make benchmark-compatible-local` forwards `SHAPE`, `CASES`,
+`MAX_CONCURRENCY`, `MAX_TOKENS`, `HTTP_RETRY_ATTEMPTS`, `HTTP_RETRY_MAX_WAIT`, and
+`PRICE_IS_ZERO_CONFIRMED=1`. Pass `--request-fields` on the Python command; Make does not quote
+that JSON. `--http-retry-attempts` (1 through 16, default 3) and `--http-retry-max-wait` (1
+through 300 seconds, default 8) set the in-call HTTP 429 retry. HTTP 5xx is not retried inside
+that call.
+
+```bash
+AGENTSTORM_ALLOW_PROVIDER_SPEND=1 \
+OPENAI_API_KEY='...' \
+python3 hack/benchmark/run_sre_compatible.py --mode local --shape smoke \
+  --model exact-model-id \
+  --base-url 'https://example.invalid/v1' \
+  --endpoint-class hosted-api \
+  --input-price '0' --output-price '0' --price-is-zero-confirmed \
+  --max-concurrency 1 --max-tokens 2048 \
+  --request-fields '{"thinking":{"type":"disabled"}}' \
+  --output .out/benchmark-compatible-smoke
+```
+
+### Z.ai glm-4.7-flash
+
+This is a non-publishable smoke against the hosted API. It is not a measured result. Put the key
+in `OPENAI_API_KEY` in the environment. Do not write it into a file, a manifest, or this document.
+
+| Field | Value |
+| --- | --- |
+| Model | `glm-4.7-flash` |
+| Base URL | `https://api.z.ai/api/paas/v4` |
+| Endpoint class | `hosted-api` |
+| Concurrency | `1` |
+
+```bash
+AGENTSTORM_ALLOW_PROVIDER_SPEND=1 \
+OPENAI_API_KEY='...' \
+python3 hack/benchmark/run_sre_compatible.py --mode local --shape smoke \
+  --model glm-4.7-flash \
+  --base-url 'https://api.z.ai/api/paas/v4' \
+  --endpoint-class hosted-api \
+  --input-price '0' --output-price '0' --price-is-zero-confirmed \
+  --max-concurrency 1 --max-tokens 2048 \
+  --request-fields '{"thinking":{"type":"disabled"}}' \
+  --http-retry-attempts 8 --http-retry-max-wait 120 \
+  --output .out/benchmark-zai-smoke
+```
+
+Check the Z.ai bill before `--price-is-zero-confirmed`. A confirmed zero price disables the USD 8
+stop. `python -m agentstorm_worker run` also requires `AGENTSTORM_ALLOW_PROVIDER_SPEND=1` and has
+no USD stop of its own. HTTP 429 responses may carry Z.ai code `1305` (overloaded) or `1302`
+(concurrency). The adapter keeps that code on the local attempt and retries only that 429,
+honoring `Retry-After` up to `httpRetryMaxWaitSeconds`, before the runner can restart the case.
+`1305` is overload, including at concurrency 1, and a free-tier overload can last minutes, so the
+default of 3 attempts with an 8 second cap is too short. HTTP 5xx stays single-shot and is priced
+at the unknown-call allowance. This smoke is `complete=false` and is not a publishable benchmark.
 
 ### Kubernetes real endpoint
 

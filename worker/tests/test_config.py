@@ -144,6 +144,63 @@ class ConfigTest(unittest.TestCase):
                 "https://example.invalid/v1/chat/completions?api-version=2024",
             )
 
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "target": {
+                            "provider": "openai-compatible",
+                            "model": "pinned-test",
+                            "baseURL": "http://127.0.0.1:9/v1",
+                            "maxTokens": 2048,
+                            "requestFields": {"thinking": {"type": "disabled"}},
+                            "httpRetryAttempts": 8,
+                            "httpRetryMaxWaitSeconds": 120,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sampled = load_run_config(config_path)
+            self.assertEqual(sampled.target.max_output_tokens, 2048)
+            self.assertEqual(
+                sampled.target.request_fields, {"thinking": {"type": "disabled"}}
+            )
+            self.assertEqual(sampled.target.http_retry_attempts, 8)
+            self.assertEqual(sampled.target.http_retry_max_wait_seconds, 120)
+            for target, error in (
+                (
+                    {
+                        "provider": "openai-compatible",
+                        "model": "pinned-test",
+                        "baseURL": "http://127.0.0.1:9/v1",
+                        "maxTokens": 0,
+                    },
+                    "maxTokens",
+                ),
+                (
+                    {
+                        "provider": "openai-compatible",
+                        "model": "pinned-test",
+                        "baseURL": "http://127.0.0.1:9/v1",
+                        "requestFields": {"max_tokens": 32},
+                    },
+                    "reserved",
+                ),
+                (
+                    {
+                        "provider": "openai-compatible",
+                        "model": "pinned-test",
+                        "baseURL": "http://127.0.0.1:9/v1",
+                        "requestFields": {"model": "other"},
+                    },
+                    "reserved",
+                ),
+            ):
+                config_path.write_text(json.dumps({"target": target}), encoding="utf-8")
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(ValueError, error):
+                        load_run_config(config_path)
+
             for target, error in (
                 ({"provider": "openai-compatible", "model": "pinned-test"}, "baseURL is required"),
                 (

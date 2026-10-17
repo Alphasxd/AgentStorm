@@ -536,6 +536,18 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 			!pricePattern.MatchString(run.Spec.Target.Pricing.OutputUSDPerMillionTokens)) {
 		return fmt.Errorf("target.pricing requires non-negative decimal USD prices")
 	}
+	if run.Spec.Target.MaxTokens != nil && (*run.Spec.Target.MaxTokens < 1 || *run.Spec.Target.MaxTokens > 131072) {
+		return fmt.Errorf("target.maxTokens must be between 1 and 131072")
+	}
+	if run.Spec.Target.HTTPRetryAttempts != nil && (*run.Spec.Target.HTTPRetryAttempts < 1 || *run.Spec.Target.HTTPRetryAttempts > 16) {
+		return fmt.Errorf("target.httpRetryAttempts must be between 1 and 16")
+	}
+	if run.Spec.Target.HTTPRetryMaxWaitSeconds != nil && (*run.Spec.Target.HTTPRetryMaxWaitSeconds < 1 || *run.Spec.Target.HTTPRetryMaxWaitSeconds > 300) {
+		return fmt.Errorf("target.httpRetryMaxWaitSeconds must be between 1 and 300")
+	}
+	if err := validateRequestFields(run.Spec.Target.RequestFields); err != nil {
+		return err
+	}
 	if run.Spec.Telemetry.ContentMode == "" {
 		run.Spec.Telemetry.ContentMode = "omit"
 	}
@@ -582,6 +594,42 @@ func validateAndDefaultWithScheduler(run *agentstormv1alpha1.AgentTestRun, confi
 	}
 	if err := validateScheduling(run, config); err != nil {
 		return err
+	}
+	return nil
+}
+
+var requestFieldKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+
+var reservedRequestFields = map[string]struct{}{
+	"model": {}, "messages": {}, "stream": {}, "tools": {}, "tool_choice": {},
+	"temperature": {}, "max_tokens": {},
+}
+
+func validateRequestFields(raw []byte) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return fmt.Errorf("target.requestFields must be an object")
+	}
+	if len(fields) > 16 {
+		return fmt.Errorf("target.requestFields must contain at most 16 entries")
+	}
+	for key, value := range fields {
+		if !requestFieldKey.MatchString(key) {
+			return fmt.Errorf("target.requestFields keys must be identifiers")
+		}
+		if _, reserved := reservedRequestFields[key]; reserved {
+			return fmt.Errorf("request field %s is reserved", key)
+		}
+		if len(value) > 1024 {
+			return fmt.Errorf("target.requestFields values must be at most 1024 bytes")
+		}
+		var decoded any
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return fmt.Errorf("target.requestFields values must be JSON values")
+		}
 	}
 	return nil
 }
@@ -919,6 +967,11 @@ func buildJob(run *agentstormv1alpha1.AgentTestRun, resultSink ResultSinkConfig,
 			Name:      "OPENAI_API_KEY",
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: ref.DeepCopy()},
 		})
+	}
+	// Creating the AgentTestRun is the operator's authorization to call the provider.
+	// The worker process still requires this variable before openai-compatible or openai-agents calls.
+	if run.Spec.Target.Provider == "openai-compatible" || run.Spec.Target.Provider == "openai-agents" {
+		env = append(env, corev1.EnvVar{Name: "AGENTSTORM_ALLOW_PROVIDER_SPEND", Value: "1"})
 	}
 	if resultSink.Enabled() {
 		env = append(env,

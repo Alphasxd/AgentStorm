@@ -35,6 +35,15 @@ async def execute(args: argparse.Namespace) -> int:
     if args.command == "validate":
         print(json.dumps({"run_id": config.run_id, "cases": len(cases)}, indent=2))
         return 0
+    if not provider_spend_allowed(config.target.provider):
+        print(
+            "AGENTSTORM_ALLOW_PROVIDER_SPEND=1 is required before "
+            f"{config.target.provider} calls. The Kubernetes controller sets it "
+            "when it starts a Worker for that provider. Benchmark runners require "
+            "the same opt-in.",
+            file=sys.stderr,
+        )
+        return 3
 
     shard_count = int(os.getenv("AGENTSTORM_SHARD_COUNT", "1"))
     shard_index = int(os.getenv("AGENTSTORM_SHARD_INDEX", "0"))
@@ -115,6 +124,10 @@ async def execute(args: argparse.Namespace) -> int:
                     model=config.target.model,
                     base_url=config.target.base_url,
                     adapter_entrypoint=config.target.adapter_entrypoint,
+                    max_output_tokens=config.target.max_output_tokens,
+                    request_fields=config.target.request_fields,
+                    http_retry_attempts=config.target.http_retry_attempts,
+                    http_retry_max_wait_seconds=config.target.http_retry_max_wait_seconds,
                 )
                 distributed_limiter = (
                     DistributedLimiter(
@@ -292,6 +305,20 @@ def main() -> None:
         print("AgentStorm worker harness failure", file=sys.stderr)
         exit_code = 3
     raise SystemExit(exit_code)
+
+
+def provider_spend_allowed(provider: str) -> bool:
+    """Real providers need an explicit spend opt-in outside the controller.
+
+    ``fake`` never calls a billed endpoint. The controller sets
+    ``AGENTSTORM_ALLOW_PROVIDER_SPEND=1`` on Workers it starts for
+    ``openai-compatible`` and ``openai-agents``, because creating the
+    AgentTestRun is the operator's authorization. A local worker process does
+    not infer that authorization from a config file.
+    """
+    if provider not in {"openai-compatible", "openai-agents"}:
+        return True
+    return os.environ.get("AGENTSTORM_ALLOW_PROVIDER_SPEND") == "1"
 
 
 def _environment_boolean(name: str, default: bool) -> bool:

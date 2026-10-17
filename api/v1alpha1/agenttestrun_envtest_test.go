@@ -272,6 +272,45 @@ func TestAgentTestRunCRDContract(t *testing.T) {
 	if err := kubernetesClient.Create(ctx, incomplete); !apierrors.IsInvalid(err) {
 		t.Fatalf("openai-compatible without baseURL error = %v, want Invalid", err)
 	}
+
+	sampled := validEnvtestRun(namespace.Name, "sampling")
+	maxTokens := int32(2048)
+	retryAttempts := int32(8)
+	retryWait := int32(120)
+	sampled.Spec.Target.Provider = "openai-compatible"
+	sampled.Spec.Target.Model = "glm-4.7-flash"
+	sampled.Spec.Target.BaseURL = "https://example.invalid/v4"
+	sampled.Spec.Target.MaxTokens = &maxTokens
+	sampled.Spec.Target.RequestFields = []byte(`{"thinking":{"type":"disabled"}}`)
+	sampled.Spec.Target.HTTPRetryAttempts = &retryAttempts
+	sampled.Spec.Target.HTTPRetryMaxWaitSeconds = &retryWait
+	if err := kubernetesClient.Create(ctx, sampled); err != nil {
+		t.Fatalf("create sampled AgentTestRun: %v", err)
+	}
+	zeroTokens := int32(0)
+	invalidTokens := validEnvtestRun(namespace.Name, "invalid-tokens")
+	invalidTokens.Spec.Target.MaxTokens = &zeroTokens
+	if err := kubernetesClient.Create(ctx, invalidTokens); !apierrors.IsInvalid(err) {
+		t.Fatalf("maxTokens 0 error = %v, want Invalid", err)
+	}
+	zeroAttempts := int32(0)
+	invalidAttempts := validEnvtestRun(namespace.Name, "invalid-retry-attempts")
+	invalidAttempts.Spec.Target.HTTPRetryAttempts = &zeroAttempts
+	if err := kubernetesClient.Create(ctx, invalidAttempts); !apierrors.IsInvalid(err) {
+		t.Fatalf("httpRetryAttempts 0 error = %v, want Invalid", err)
+	}
+	tooManyAttempts := int32(17)
+	invalidAttemptCap := validEnvtestRun(namespace.Name, "invalid-retry-attempt-cap")
+	invalidAttemptCap.Spec.Target.HTTPRetryAttempts = &tooManyAttempts
+	if err := kubernetesClient.Create(ctx, invalidAttemptCap); !apierrors.IsInvalid(err) {
+		t.Fatalf("httpRetryAttempts 17 error = %v, want Invalid", err)
+	}
+	tooLongWait := int32(301)
+	invalidWait := validEnvtestRun(namespace.Name, "invalid-retry-wait")
+	invalidWait.Spec.Target.HTTPRetryMaxWaitSeconds = &tooLongWait
+	if err := kubernetesClient.Create(ctx, invalidWait); !apierrors.IsInvalid(err) {
+		t.Fatalf("httpRetryMaxWaitSeconds 301 error = %v, want Invalid", err)
+	}
 }
 
 func validEnvtestRun(namespace, name string) *agentstormv1alpha1.AgentTestRun {
